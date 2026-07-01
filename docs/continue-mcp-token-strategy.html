@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Token-Cost Strategy — continue-retool</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#141b24; --panel2:#1b2430; --ink:#e6edf3; --muted:#9fb0c0;
+    --line:#243140; --accent:#5db0ff; --accent2:#7ee787; --warn:#ffb454; --purple:#d2a8ff;
+    --chip:#1f2a37; --max:900px;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0; background:linear-gradient(180deg,#0b0f14,#0d1117 320px); color:var(--ink);
+    font-family:var(--sans); line-height:1.65; font-size:16.5px; -webkit-font-smoothing:antialiased}
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  header{padding:56px 22px 22px; max-width:var(--max); margin:0 auto}
+  .kicker{font-family:var(--mono); font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); margin-bottom:14px}
+  .kicker a{color:var(--accent)}
+  header h1{font-family:var(--serif); font-size:clamp(30px,5vw,50px); margin:0 0 6px; font-weight:600; letter-spacing:-.02em; line-height:1.1}
+
+  main{max-width:var(--max); margin:0 auto; padding:8px 22px 80px}
+  main h1{font-family:var(--serif); font-size:30px; margin:2.4em 0 .4em; font-weight:600; letter-spacing:-.01em}
+  h2{font-family:var(--serif); font-size:25px; margin:2em 0 .5em; font-weight:600; padding-bottom:.3rem; border-bottom:1px solid var(--line)}
+  h3{font-size:19px; margin:1.6em 0 .3em; color:var(--accent2); font-weight:600}
+  h4{font-size:16px; margin:1.4em 0 .2em; color:var(--purple); font-weight:600}
+  p{max-width:80ch}
+  ul,ol{max-width:80ch}
+  li{margin:.25em 0}
+  strong{color:#fff}
+  hr{border:0; border-top:1px solid var(--line); margin:2.2em 0}
+
+  code{font-family:var(--mono); font-size:.88em; background:var(--chip); border:1px solid var(--line);
+    border-radius:5px; padding:1px 5px; color:var(--accent2)}
+  pre{background:#0a0e13; border:1px solid var(--line); border-radius:11px; padding:16px 18px;
+    overflow:auto; font-size:13.5px; line-height:1.5; max-width:100%}
+  pre code{background:none; border:0; padding:0; color:var(--ink); font-size:13.5px}
+
+  blockquote{margin:1.4em 0; padding:.5em 1.1em; border-left:4px solid var(--warn);
+    background:var(--panel); border-radius:0 9px 9px 0; color:var(--muted)}
+  blockquote p{margin:.4em 0}
+
+  table{border-collapse:collapse; margin:1.4em 0; font-size:14.5px; width:100%; display:block; overflow-x:auto}
+  th,td{border:1px solid var(--line); padding:8px 12px; text-align:left; vertical-align:top}
+  th{background:var(--panel2); color:#fff; font-family:var(--sans)}
+  tr:nth-child(even) td{background:var(--panel)}
+
+  nav#TOC{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:14px 20px; margin:1.6em 0 2em; font-size:14.5px}
+  nav#TOC::before{content:"On this page"; display:block; font-family:var(--mono); font-size:11px;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin-bottom:8px}
+  nav#TOC ul{list-style:none; margin:0; padding-left:0}
+  nav#TOC ul ul{padding-left:16px}
+  nav#TOC li{margin:.15em 0}
+
+  footer{max-width:var(--max); margin:0 auto; padding:24px 22px 70px; color:var(--muted); font-size:13.5px;
+    border-top:1px solid var(--line)}
+  footer a{color:var(--muted); text-decoration:underline}
+</style>
+</head>
+<body>
+<header>
+  <div class="kicker"><a href="./index.html">&larr; continue-retool</a></div>
+  <h1>Token-Cost Strategy</h1>
+</header>
+<main>
+<ul>
+<li><a
+href="#keeping-token-costs-down-which-tools-to-replace-and-where-to-put-them"
+id="toc-keeping-token-costs-down-which-tools-to-replace-and-where-to-put-them">Keeping
+Token Costs Down: Which Tools to Replace, and Where to Put Them</a>
+<ul>
+<li><a href="#0-tldr--the-recommendation"
+id="toc-0-tldr--the-recommendation">0. TL;DR — the
+recommendation</a></li>
+<li><a href="#1-two-kinds-of-token-cost"
+id="toc-1-two-kinds-of-token-cost">1. Two kinds of token cost</a></li>
+<li><a href="#2-the-ladder-of-token-levers-cheapest--most-involved"
+id="toc-2-the-ladder-of-token-levers-cheapest--most-involved">2. The
+ladder of token levers (cheapest → most involved)</a></li>
+<li><a href="#3-the-headtail-decision-made-concrete"
+id="toc-3-the-headtail-decision-made-concrete">3. The head/tail
+decision, made concrete</a></li>
+<li><a href="#4-worked-example--the-current-toolkit"
+id="toc-4-worked-example--the-current-toolkit">4. Worked example — the
+current toolkit</a></li>
+<li><a href="#5-caveats-and-second-order-effects"
+id="toc-5-caveats-and-second-order-effects">5. Caveats and second-order
+effects</a></li>
+<li><a href="#6-recommendation-in-one-paragraph"
+id="toc-6-recommendation-in-one-paragraph">6. Recommendation, in one
+paragraph</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul></li>
+</ul>
+<h1
+id="keeping-token-costs-down-which-tools-to-replace-and-where-to-put-them">Keeping
+Token Costs Down: Which Tools to Replace, and Where to Put Them</h1>
+<p><em>Working design doc, 2026-07-01. Companion to
+<code>continue-mcp-toolkit.md</code>. Answers: how do I replace
+Continue's tools to minimize token cost — and for each tool, do I
+register it <strong>directly</strong> (paid every request) or hide it
+behind the <strong>gateway</strong> (paid per use)? The
+long-tail-vs-starting-cost tradeoff, made concrete.</em></p>
+<hr />
+<h2 id="0-tldr--the-recommendation">0. TL;DR — the recommendation</h2>
+<table>
+<thead>
+<tr>
+<th>Move</th>
+<th>When</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Exclude built-ins you never use</strong></td>
+<td>Always, first</td>
+<td>Free win. Every built-in tool you don't need is pure resting tax you
+can delete in the tool-policy UI.</td>
+</tr>
+<tr>
+<td><strong>Replace hot tools with <em>terse</em> MCPs, keep them
+DIRECT</strong></td>
+<td>edit, shell-run, grep — the 2–3 you use every message</td>
+<td>Cuts resting cost (terse &lt; fat built-in) <em>without</em> adding
+latency. This alone fixes most of the pain.</td>
+</tr>
+<tr>
+<td><strong>Gateway the long tail</strong></td>
+<td>Once you have ~10+ occasional tools</td>
+<td>Near-zero resting cost for tools you rarely touch; a small per-use
+hop you barely notice because you barely use them.</td>
+</tr>
+<tr>
+<td><strong>Enforce terse descriptions</strong></td>
+<td>Every new tool</td>
+<td>≤ 2 sentences, ≤ ~80 tokens — baked into the
+<code>new-mcp-tool</code> factory.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The one mental model to keep:</strong> a tool's
+<em>gateway-worthiness</em> ≈
+<strong><code>schema_size × (1 − how_often_you_use_it)</code></strong>.
+Big schema <strong>and</strong> rarely used → hide it behind the
+gateway. Small <strong>or</strong> used constantly → keep it direct.
+Savings and cost pull in opposite directions with usage — that's the
+whole trick (§3).</p>
+<hr />
+<h2 id="1-two-kinds-of-token-cost">1. Two kinds of token cost</h2>
+<p>There are exactly two ways tools cost you tokens, and they behave
+completely differently:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><strong>Resting cost</strong> (direct tools)</th>
+<th><strong>Per-use cost</strong> (gateway tools)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What</td>
+<td>Every registered tool's schema sits in context <strong>on every
+request</strong></td>
+<td>The <code>search</code>→<code>describe</code>→<code>call</code>
+round-trips, paid <strong>only when you use the tool</strong></td>
+</tr>
+<tr>
+<td>Occupies the window?</td>
+<td><strong>Yes, always</strong> — even on turns you don't use the
+tool</td>
+<td>Only on turns you use it (via <code>describe</code>)</td>
+</tr>
+<tr>
+<td>Scales with</td>
+<td>number of tools × requests in the session</td>
+<td>how <em>often</em> you actually invoke the tool</td>
+</tr>
+<tr>
+<td>Hurts</td>
+<td>window room (crowds out code) + $ on cache misses</td>
+<td>latency (extra turns) + a little reasoning burden</td>
+</tr>
+<tr>
+<td>Prompt caching helps?</td>
+<td><strong>Yes</strong> — a stable schema block caches, so $ drops
+after turn 1 (but it still occupies the window)</td>
+<td>N/A — these are dynamic, mid-context</td>
+</tr>
+</tbody>
+</table>
+<p>Two things fall out of this table immediately:</p>
+<ol type="1">
+<li><strong>Your pain determines your lever.</strong> If the pain is
+<strong>$</strong>, prompt caching already makes direct tools cheap
+after the first turn — so replacing fat built-ins with terse direct MCPs
+may be all you need. If the pain is <strong>window room / quality
+degradation</strong> (context half-eaten before you type), the gateway
+is what buys the window back, because caching doesn't free window
+space.</li>
+<li><strong>Resting cost is paid whether or not you use the
+tool.</strong> That's why 40 rarely- used tools registered directly is
+the worst case — you pay for all of them, all the time, to use a few of
+them occasionally.</li>
+</ol>
+<hr />
+<h2 id="2-the-ladder-of-token-levers-cheapest--most-involved">2. The
+ladder of token levers (cheapest → most involved)</h2>
+<p>Climb only as far as your pain requires. Most people are fixed by
+rungs 0–2.</p>
+<p><strong>Rung 0 — Exclude what you don't use.</strong> Continue's tool
+policies let you set any built-in to <strong>Excluded</strong>. Every
+excluded tool's schema leaves the prompt. This is free and immediate; do
+it before anything clever.</p>
+<p><strong>Rung 1 — Replace fat built-ins with terse direct
+MCPs.</strong> The built-in tool prompts are verbose. A terse MCP
+equivalent (name + ≤ 2-sentence description + minimal schema, ~150–300
+tokens) replacing a fat built-in (~800+ tokens), kept <strong>directly
+registered</strong>, cuts resting cost with <strong>zero latency
+cost</strong>. This is the sweet spot for your everyday tools — you
+already built <code>edit</code>, <code>search</code>, and
+<code>shell</code> this way.</p>
+<p><strong>Rung 2 — Gateway the long tail.</strong> For the many tools
+you use <em>occasionally</em>, register only the gateway and let it hide
+their schemas until needed (§3). Resting cost for the whole tail
+collapses to the gateway's fixed ~3-schema footprint.</p>
+<p><strong>Rung 3 — Enforce terseness at creation.</strong> The
+<code>new-mcp-tool</code> factory bakes in a token budget per
+description and registers new tools into the gateway catalog, so the
+toolkit can grow without the prompt growing. Discipline by construction,
+not willpower.</p>
+<hr />
+<h2 id="3-the-headtail-decision-made-concrete">3. The head/tail
+decision, made concrete</h2>
+<p>Here's the math that makes the recommendation non-arbitrary. Over a
+session of <code>R</code> requests, consider one tool with schema size
+<code>S</code>, used on a fraction <code>f</code> of turns:</p>
+<pre class="text"><code>  DIRECT   : schema present on ALL R turns          window-occupancy ≈ S · R
+  GATEWAY  : schema pulled (via describe) only on    window-occupancy ≈ S · f · R
+             the f·R turns you actually use it       (+ tiny search overhead)
+
+  GATEWAY SAVINGS  ≈ S · R · (1 − f)      → grows as the tool is used LESS
+  GATEWAY COST     ≈ latency + reasoning  → grows as the tool is used MORE
+                     on the f·R uses</code></pre>
+<p><strong>Savings scale with <code>(1 − f)</code>; cost scales with
+<code>f</code>. They move in opposite directions.</strong> That single
+fact decides everything:</p>
+<ul>
+<li><strong>Rarely-used tool (<code>f → 0</code>):</strong> you save
+almost its entire resting cost, and pay the hop almost never.
+<strong>Gateway wins big.</strong></li>
+<li><strong>Constantly-used tool (<code>f → 1</code>):</strong> the
+gateway saves you <strong>almost nothing</strong> — because
+<code>describe</code> drags its schema into context on nearly every turn
+<em>anyway</em> — while you pay the discovery hop and reasoning overhead
+every time. <strong>Keep it direct.</strong></li>
+</ul>
+<p>That second point is the one people miss: <strong>hiding a hot tool
+behind the gateway doesn't actually save window tokens</strong>, because
+you keep loading its schema to use it. You get the cost with none of the
+benefit.</p>
+<h3 id="the-22">The 2×2</h3>
+<pre class="text"><code>                    used OFTEN                 used RARELY
+                ┌───────────────────────┬───────────────────────┐
+  BIG schema    │  DIRECT               │  GATEWAY  ★            │
+                │  (worth its rent;     │  (biggest resting tax  │
+                │   gateway saves ~0)   │   for least benefit)   │
+                ├───────────────────────┼───────────────────────┤
+  SMALL schema  │  DIRECT               │  either — lean GATEWAY  │
+                │  (cheap; latency      │   if it&#39;s part of a     │
+                │   matters more)       │   large tail            │
+                └───────────────────────┴───────────────────────┘</code></pre>
+<p>The clean gateway win is the <strong>top-right: big schema, rarely
+used.</strong> The clean direct win is the <strong>whole left column:
+anything you use often</strong>, regardless of size, because latency and
+the near-zero savings both argue for keeping it direct.</p>
+<h3 id="dont-forget-the-gateways-own-fixed-cost">Don't forget the
+gateway's own fixed cost</h3>
+<p>The gateway isn't free: its three meta-tools cost ~1,200 tokens at
+rest, <em>always</em>. So there's a break-even — the tail you hide must
+be bigger than that overhead. Two rarely-used 200-token tools behind a
+gateway is a <strong>loss</strong> (you added ~1,200 to save ~400). Ten
+of them is a clear <strong>win</strong> (added ~1,200 to save
+~1,800/turn of resting schema). <strong>Rule of thumb: gateway pays off
+past ~8–10 tail tools.</strong></p>
+<hr />
+<h2 id="4-worked-example--the-current-toolkit">4. Worked example — the
+current toolkit</h2>
+<p>Say you end up with these, with rough schema sizes and honest
+usage:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Schema ~tokens</th>
+<th>Usage</th>
+<th>Verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>edit.edit</code></td>
+<td>250</td>
+<td>every message</td>
+<td><strong>Direct</strong> — hot; gateway would save ~0 and add
+latency</td>
+</tr>
+<tr>
+<td><code>shell.run</code> / <code>shell.start</code></td>
+<td>300</td>
+<td>most messages</td>
+<td><strong>Direct</strong> — hot</td>
+</tr>
+<tr>
+<td><code>search.grep</code></td>
+<td>200</td>
+<td>frequent</td>
+<td><strong>Direct</strong> — hot, and small</td>
+</tr>
+<tr>
+<td><code>shell.kill</code> / <code>poll</code> /
+<code>list_jobs</code></td>
+<td>150 ea</td>
+<td>occasional</td>
+<td>Direct (small) or fold behind gateway if the tail grows</td>
+</tr>
+<tr>
+<td><code>sql.format</code></td>
+<td>400</td>
+<td>rarely</td>
+<td><strong>Gateway ★</strong> — big + rare</td>
+</tr>
+<tr>
+<td><code>repo.symbols</code></td>
+<td>500</td>
+<td>rarely</td>
+<td><strong>Gateway ★</strong> — big + rare</td>
+</tr>
+<tr>
+<td><code>http.call</code> (allow-listed APIs)</td>
+<td>350</td>
+<td>rarely</td>
+<td><strong>Gateway</strong></td>
+</tr>
+<tr>
+<td>…20 more niche tools</td>
+<td>300 avg</td>
+<td>rarely</td>
+<td><strong>Gateway</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Result:</strong> the 3–4 hot tools stay directly registered
+(~750–1,000 resting tokens, which cache well). Everything rare lives
+behind the gateway (~1,200 resting, flat forever, no matter how many you
+add). You've replaced <em>all</em> the fat built-ins, kept the everyday
+path fast, and stopped the tail from ever bloating your window.</p>
+<p>Concretely for Continue: register <code>edit.yaml</code>,
+<code>search.yaml</code>, <code>shell.yaml</code>, <strong>and</strong>
+<code>gateway.yaml</code> — but put only the <em>tail</em> servers in
+<code>gateway.config.json</code>, and do <strong>not</strong> also
+register those tail servers with Continue directly (that would double-
+load them, §gateway README).</p>
+<hr />
+<h2 id="5-caveats-and-second-order-effects">5. Caveats and second-order
+effects</h2>
+<ul>
+<li><strong>Prompt caching changes the $ picture, not the window
+picture.</strong> A stable block of directly-registered tool schemas
+caches well, so after the first turn the <em>$</em> cost of resting
+tools is small. But those schemas still <em>occupy the window</em>, and
+that's usually the real complaint (context crowded out, quality
+degrades). The gateway is a window play first, a $ play second.</li>
+<li><strong>Keep the tool block stable to preserve the cache.</strong>
+Tool schemas usually sit at the top of the prompt (a cache prefix).
+Adding/removing directly-registered tools mid-session busts that cache.
+The gateway helps here too: you change <code>gateway.config.json</code>,
+not Continue's registered tool set, so the cached prefix stays
+stable.</li>
+<li><strong>Reliability has a token cost too.</strong> A model that
+fumbles the gateway's search→describe→call dance burns tokens on
+retries. Terse, well-named tools and good summaries (what
+<code>search</code> returns) keep navigation cheap. This is another
+reason to keep the <em>hot</em> path direct — you don't want the tool
+you use constantly to depend on a 3-step negotiation.</li>
+<li><strong>"Terse" is not "cryptic."</strong> Cutting descriptions
+saves tokens only up to the point the model starts guessing wrong and
+retrying. Budget ~80 tokens, spend them on the name and the one
+distinguishing sentence.</li>
+</ul>
+<hr />
+<h2 id="6-recommendation-in-one-paragraph">6. Recommendation, in one
+paragraph</h2>
+<p>Exclude the built-ins you don't use (free). Replace the built-ins you
+<em>do</em> use with <strong>terse, directly-registered</strong> MCPs —
+that fixes most of the bloat with no latency cost, and prompt caching
+keeps their $ low. Only once you've accumulated a <strong>long tail
+(~8–10+) of occasional tools</strong> should you stand up the gateway,
+and then put <strong>only the tail</strong> behind it while keeping your
+2–3 everyday tools direct. Decide each tool by
+<code>schema_size × (1 − usage)</code>: <strong>big and rare → gateway;
+small or constant → direct.</strong> Grow the tail through the factory
+so new tools land behind the gateway with terse descriptions and zero
+added resting cost. That gives you low resting tokens, a fast hot path,
+and unlimited expansion — the three goals at once.</p>
+<hr />
+<h2 id="sources">Sources</h2>
+<ul>
+<li><a
+href="https://mcp.directory/blog/mcp-context-bloat-fix-2026-tool-search-code-mode-progressive-disclosure">MCP
+context-bloat fix 2026: Tool Search / Code Mode / progressive
+disclosure</a></li>
+<li><a href="https://www.stackone.com/blog/mcp-token-optimization/">MCP
+token optimization compared (StackOne)</a> · <a
+href="https://www.apideck.com/blog/mcp-server-eating-context-window-cli-alternative">Your
+MCP server is eating your context window (Apideck)</a></li>
+<li><a
+href="https://www.anthropic.com/engineering/code-execution-with-mcp">Anthropic
+— Tool Search Tool &amp; code execution with MCP</a> · <a
+href="https://docs.continue.dev/ide-extensions/agent/how-it-works">How
+Agent Mode Works — Continue Docs</a></li>
+<li>Companion docs in this repo: <code>continue-mcp-toolkit.md</code>
+(§5 token tax, §5b gateway),
+<code>continue-mcp/gateway-mcp/README.md</code> (head/tail design)</li>
+</ul>
+</content>
+</main>
+<footer>
+  Part of <a href="https://github.com/curtisalexander/continue-retool">continue-retool</a> —
+  retooling Continue with our own tools. MIT licensed.
+</footer>
+</body>
+</html>

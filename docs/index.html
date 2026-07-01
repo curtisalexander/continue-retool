@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>continue-retool</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#141b24; --panel2:#1b2430; --ink:#e6edf3; --muted:#9fb0c0;
+    --line:#243140; --accent:#5db0ff; --accent2:#7ee787; --warn:#ffb454; --purple:#d2a8ff;
+    --chip:#1f2a37; --max:980px;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:linear-gradient(180deg,#0b0f14,#0d1117 320px); color:var(--ink);
+    font-family:var(--sans); line-height:1.6; font-size:16.5px; -webkit-font-smoothing:antialiased}
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  header{padding:64px 22px 28px; max-width:var(--max); margin:0 auto}
+  .kicker{font-family:var(--mono); font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); margin-bottom:16px}
+  h1{font-family:var(--serif); font-size:clamp(34px,6vw,60px); margin:0 0 14px; font-weight:600; letter-spacing:-.02em}
+  .lede{color:var(--muted); font-size:18px; max-width:74ch}
+  .lede em{color:var(--ink); font-style:normal; font-weight:600}
+  .ghlink{margin-top:20px; font-family:var(--mono); font-size:13px}
+  .ghlink a{background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 14px; display:inline-block; color:var(--ink)}
+  .ghlink a:hover{border-color:var(--accent); text-decoration:none}
+
+  section{max-width:var(--max); margin:0 auto; padding:30px 22px}
+  h2{font-family:var(--serif); font-size:24px; margin:0 0 4px; font-weight:600}
+  h2 .badge{font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--accent2); vertical-align:middle; margin-left:10px; font-weight:400}
+  .sub{color:var(--muted); font-size:15px; margin:2px 0 18px; max-width:80ch}
+
+  .series{display:grid; gap:12px}
+  .doc{display:flex; gap:16px; align-items:flex-start; background:var(--panel); border:1px solid var(--line);
+    border-radius:13px; padding:17px 19px; transition:border-color .15s, transform .15s}
+  .doc:hover{border-color:var(--accent); transform:translateY(-1px)}
+  .doc .num{flex:0 0 38px; height:38px; border-radius:9px; background:var(--panel2); border:1px solid var(--accent);
+    color:var(--accent); display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-weight:600; font-size:15px}
+  .doc .body{flex:1; min-width:0}
+  .doc .t{font-size:17px; font-weight:600; color:#fff; margin:0 0 3px}
+  .doc .t a{color:#fff}
+  .doc .t a:hover{color:var(--accent)}
+  .doc .d{color:var(--muted); font-size:14.5px; margin:0}
+  .doc.alt .num{border-color:var(--purple); color:var(--purple)}
+  .doc.alt:hover{border-color:var(--purple)}
+
+  .tools{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+  @media(max-width:680px){.tools{grid-template-columns:1fr}}
+  .tool{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:15px 17px}
+  .tool .n{font-family:var(--mono); font-size:13.5px; color:var(--accent2); font-weight:600; margin:0 0 4px}
+  .tool .n .start{color:var(--warn); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; margin-left:8px}
+  .tool .d{color:var(--muted); font-size:14px; margin:0}
+
+  footer{max-width:var(--max); margin:0 auto; padding:30px 22px 70px; color:var(--muted); font-size:13.5px}
+  footer .note{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:15px 19px}
+  footer code{font-family:var(--mono); font-size:12.5px; background:var(--chip); border:1px solid var(--line); border-radius:5px; padding:1px 5px; color:var(--accent2)}
+</style>
+</head>
+<body>
+<header>
+  <div class="kicker">Continue &middot; MCP &middot; agent tooling</div>
+  <h1>continue-retool</h1>
+  <p class="lede">Retooling <a href="https://continue.dev">Continue</a> with <em>our own tools</em> — local
+  MCP servers that replace the built-in agent tools (terminal, search, edit) with sharper, more
+  controllable versions, plus a progressive-disclosure gateway and a tool-factory skill for growing the kit.</p>
+  <p class="lede" style="margin-top:12px">The premise: the default tools are fine, but your own can be more
+  Unicode-robust, cheaper on tokens, and safer to grant — and once you can build one MCP, you can build the rest.</p>
+  <div class="ghlink"><a href="https://github.com/curtisalexander/continue-retool">github.com/curtisalexander/continue-retool &rarr;</a></div>
+</header>
+
+<section>
+  <h2>Design docs <span class="badge">read first</span></h2>
+  <p class="sub">The thinking behind the kit — what to replace, and how to keep token cost down.</p>
+  <div class="series">
+    <div class="doc">
+      <div class="num">01</div>
+      <div class="body">
+        <p class="t"><a href="./continue-mcp-toolkit.html">MCP Toolkit — Design</a></p>
+        <p class="d">The full design: the background-job shell MCP, the maturin packaging seam, Continue
+        wiring, tool policies, and the "ouroboros" tool-factory skill. Start here.</p>
+      </div>
+    </div>
+    <div class="doc alt">
+      <div class="num">02</div>
+      <div class="body">
+        <p class="t"><a href="./continue-mcp-token-strategy.html">Token-Cost Strategy</a></p>
+        <p class="d">Which built-in tools are worth replacing, and the direct-registration vs.
+        gateway tradeoff for keeping tool schemas cheap at rest.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>The kit <span class="badge">code</span></h2>
+  <p class="sub">Starter MCP servers, in build order. Full source in
+  <a href="https://github.com/curtisalexander/continue-retool/tree/main/continue-mcp">continue-mcp/</a>.</p>
+  <div class="tools">
+    <div class="tool">
+      <p class="n">hello-mcp <span class="start">start here</span></p>
+      <p class="d">Proves MCP is enabled in your build: <code>ping</code> &rarr; pong, echo, whoami.</p>
+    </div>
+    <div class="tool">
+      <p class="n">shell-mcp</p>
+      <p class="d">The flagship terminal runner — async, background jobs, tree-kill, timeouts.</p>
+    </div>
+    <div class="tool">
+      <p class="n">search-mcp</p>
+      <p class="d">ripgrep-backed search; replaces the built-in Grep / Glob search.</p>
+    </div>
+    <div class="tool">
+      <p class="n">edit-mcp</p>
+      <p class="d">Unicode-robust edit; replaces built-in Edit / Create file.</p>
+    </div>
+    <div class="tool">
+      <p class="n">gateway-mcp</p>
+      <p class="d">Progressive disclosure — many tools collapsed behind 3 meta-tools.</p>
+    </div>
+    <div class="tool">
+      <p class="n">skills/new-mcp-tool</p>
+      <p class="d">The tool factory: a skill that scaffolds the next MCP server.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="note">
+    Setup lives in <a href="https://github.com/curtisalexander/continue-retool/blob/main/continue-mcp/README.md"><code>continue-mcp/README.md</code></a>:
+    run each server's <code>pytest</code>, register its <code>.continue/mcpServers/*.yaml</code>, then flip the
+    built-in tool policies to Excluded. MIT licensed. Graduated from the <code>spark</code> incubator.
+  </div>
+</footer>
+</body>
+</html>

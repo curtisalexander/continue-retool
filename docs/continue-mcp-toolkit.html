@@ -1,0 +1,1037 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCP Toolkit — Design — continue-retool</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#141b24; --panel2:#1b2430; --ink:#e6edf3; --muted:#9fb0c0;
+    --line:#243140; --accent:#5db0ff; --accent2:#7ee787; --warn:#ffb454; --purple:#d2a8ff;
+    --chip:#1f2a37; --max:900px;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0; background:linear-gradient(180deg,#0b0f14,#0d1117 320px); color:var(--ink);
+    font-family:var(--sans); line-height:1.65; font-size:16.5px; -webkit-font-smoothing:antialiased}
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  header{padding:56px 22px 22px; max-width:var(--max); margin:0 auto}
+  .kicker{font-family:var(--mono); font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); margin-bottom:14px}
+  .kicker a{color:var(--accent)}
+  header h1{font-family:var(--serif); font-size:clamp(30px,5vw,50px); margin:0 0 6px; font-weight:600; letter-spacing:-.02em; line-height:1.1}
+
+  main{max-width:var(--max); margin:0 auto; padding:8px 22px 80px}
+  main h1{font-family:var(--serif); font-size:30px; margin:2.4em 0 .4em; font-weight:600; letter-spacing:-.01em}
+  h2{font-family:var(--serif); font-size:25px; margin:2em 0 .5em; font-weight:600; padding-bottom:.3rem; border-bottom:1px solid var(--line)}
+  h3{font-size:19px; margin:1.6em 0 .3em; color:var(--accent2); font-weight:600}
+  h4{font-size:16px; margin:1.4em 0 .2em; color:var(--purple); font-weight:600}
+  p{max-width:80ch}
+  ul,ol{max-width:80ch}
+  li{margin:.25em 0}
+  strong{color:#fff}
+  hr{border:0; border-top:1px solid var(--line); margin:2.2em 0}
+
+  code{font-family:var(--mono); font-size:.88em; background:var(--chip); border:1px solid var(--line);
+    border-radius:5px; padding:1px 5px; color:var(--accent2)}
+  pre{background:#0a0e13; border:1px solid var(--line); border-radius:11px; padding:16px 18px;
+    overflow:auto; font-size:13.5px; line-height:1.5; max-width:100%}
+  pre code{background:none; border:0; padding:0; color:var(--ink); font-size:13.5px}
+
+  blockquote{margin:1.4em 0; padding:.5em 1.1em; border-left:4px solid var(--warn);
+    background:var(--panel); border-radius:0 9px 9px 0; color:var(--muted)}
+  blockquote p{margin:.4em 0}
+
+  table{border-collapse:collapse; margin:1.4em 0; font-size:14.5px; width:100%; display:block; overflow-x:auto}
+  th,td{border:1px solid var(--line); padding:8px 12px; text-align:left; vertical-align:top}
+  th{background:var(--panel2); color:#fff; font-family:var(--sans)}
+  tr:nth-child(even) td{background:var(--panel)}
+
+  nav#TOC{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:14px 20px; margin:1.6em 0 2em; font-size:14.5px}
+  nav#TOC::before{content:"On this page"; display:block; font-family:var(--mono); font-size:11px;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin-bottom:8px}
+  nav#TOC ul{list-style:none; margin:0; padding-left:0}
+  nav#TOC ul ul{padding-left:16px}
+  nav#TOC li{margin:.15em 0}
+
+  footer{max-width:var(--max); margin:0 auto; padding:24px 22px 70px; color:var(--muted); font-size:13.5px;
+    border-top:1px solid var(--line)}
+  footer a{color:var(--muted); text-decoration:underline}
+</style>
+</head>
+<body>
+<header>
+  <div class="kicker"><a href="./index.html">&larr; continue-retool</a></div>
+  <h1>MCP Toolkit — Design</h1>
+</header>
+<main>
+<ul>
+<li><a href="#replacing-continues-tools-with-your-own-mcp-toolkit"
+id="toc-replacing-continues-tools-with-your-own-mcp-toolkit">Replacing
+Continue's Tools with Your Own MCP Toolkit</a>
+<ul>
+<li><a href="#0-tldr--what-id-actually-build"
+id="toc-0-tldr--what-id-actually-build">0. TL;DR — what I'd actually
+build</a></li>
+<li><a href="#1-how-tool-use-works-in-the-continue-extension"
+id="toc-1-how-tool-use-works-in-the-continue-extension">1. How tool use
+works in the Continue extension</a></li>
+<li><a href="#2-replacing-run_terminal_command--the-design-space"
+id="toc-2-replacing-run_terminal_command--the-design-space">2. Replacing
+<code>run_terminal_command</code> — the design space</a></li>
+<li><a href="#3-implementation-approaches-compared"
+id="toc-3-implementation-approaches-compared">3. Implementation
+approaches compared</a></li>
+<li><a
+href="#4-does-the-maturin-trojan-horse-make-higher-performing-mcps"
+id="toc-4-does-the-maturin-trojan-horse-make-higher-performing-mcps">4.
+Does the maturin "Trojan horse" make higher-performing MCPs?</a></li>
+<li><a href="#5-the-broader-toolkit--and-killing-the-token-tax"
+id="toc-5-the-broader-toolkit--and-killing-the-token-tax">5. The broader
+toolkit — and killing the token tax</a></li>
+<li><a href="#6-the-ouroboros--a-framework--skill-that-builds-new-tools"
+id="toc-6-the-ouroboros--a-framework--skill-that-builds-new-tools">6.
+The ouroboros — a framework + skill that builds new tools</a></li>
+<li><a href="#7-recommended-foundations-the-order-id-build-in"
+id="toc-7-recommended-foundations-the-order-id-build-in">7. Recommended
+foundations (the order I'd build in)</a></li>
+<li><a href="#8-open-questions-i-need-your-read-on-these"
+id="toc-8-open-questions-i-need-your-read-on-these">8. Open questions (I
+need your read on these)</a></li>
+<li><a href="#sources" id="toc-sources">Sources</a></li>
+</ul></li>
+</ul>
+<h1 id="replacing-continues-tools-with-your-own-mcp-toolkit">Replacing
+Continue's Tools with Your Own MCP Toolkit</h1>
+<p><em>Working design doc, 2026-07-01. Covers: how tool use works in a
+Continue.dev (VS Code) coding agent, why a local MCP server is the
+"native" way to own your tools, how to build a terminal-runner MCP (bash
+<strong>and</strong> PowerShell), whether the Python-wraps-Rust
+(maturin) "Trojan horse" pattern buys you real performance, and a
+framework + skill for spawning new tools rapidly — the
+"ouroboros."</em></p>
+<hr />
+<h2 id="0-tldr--what-id-actually-build">0. TL;DR — what I'd actually
+build</h2>
+<table>
+<thead>
+<tr>
+<th>Decision</th>
+<th>Recommendation</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>How to add/replace tools</strong></td>
+<td>Local <strong>MCP server(s)</strong> wired in via
+<code>.continue</code> config; set the built-in
+<code>run_terminal_command</code> policy to
+<strong>Excluded</strong>.</td>
+<td>MCP is the only <em>config-level</em> extensibility surface in a
+reskinned extension you can't fork. Its results feed the model exactly
+like built-in tools.</td>
+</tr>
+<tr>
+<td><strong>Terminal MCP execution model</strong></td>
+<td><strong>Background-job model</strong> (<code>start</code> →
+<code>poll</code> → <code>output</code> → <code>kill</code>), not
+run-to-completion.</td>
+<td>This is the only model that gives you real <em>cancel</em>,
+<em>timeout</em>, and <em>incremental output injection</em> — and it
+dodges Continue's ~7–10 s tool-call timeout.</td>
+</tr>
+<tr>
+<td><strong>First implementation language</strong></td>
+<td><strong>Python + FastMCP.</strong> Spawn via
+<code>asyncio.create_subprocess_exec</code> with a <strong>new process
+group / job object</strong> so you can kill the whole child tree.</td>
+<td>Fastest path to working. The bottleneck is the child process, not
+the harness — Python is not the constraint here.</td>
+</tr>
+<tr>
+<td><strong>When to add Rust</strong></td>
+<td>Selectively, via <strong>maturin/PyO3</strong>, for genuinely hot or
+OS-gnarly paths (huge-output ring buffers, PTYs, robust cross-platform
+process-group kill, fast search/parse tools).</td>
+<td>Keep the "install like a Python tool via <code>uv</code>/wheel"
+ergonomics; get native speed only where it matters.</td>
+</tr>
+<tr>
+<td><strong>Token minimization</strong></td>
+<td>A <strong>gateway/dispatcher MCP</strong> (progressive disclosure) +
+terse schemas, instead of exposing 40 fat tools at once.</td>
+<td>Continue loads <em>every</em> MCP tool schema up front; that's the
+token tax you're feeling. Hide tools behind a search/dispatch tool.</td>
+</tr>
+<tr>
+<td><strong>Rapid tool creation</strong></td>
+<td>A <strong>cookiecutter template + a <code>new-mcp-tool</code>
+skill</strong> that hands the LLM the pattern, an example, and
+tests.</td>
+<td>Each FastMCP tool is one decorated function → trivial to codegen.
+This is your ouroboros.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="decisions-locked-2026-07-01">Decisions locked (2026-07-01)</h3>
+<p>Three foundational choices are settled; the rest of this doc assumes
+them:</p>
+<ul>
+<li><strong>Cross-platform, equally (Windows + macOS/Linux).</strong>
+The terminal MCP must work on both from day one. Consequence: day-one
+kill uses <code>killpg</code>+<code>setsid</code> on Unix and a
+<code>taskkill /T /F</code> fallback on Windows; a <em>unified</em> Rust
+Job-Object kill is the documented upgrade (§3b/§4), not a launch
+blocker.</li>
+<li><strong>Pure-Python first, Rust added selectively.</strong> Prove
+the shell MCP shape in async Python (option B), then move a hot/gnarly
+path into a maturin core only when a profiler — not a hunch — says so.
+The Windows tree-kill is the natural first Rust candidate <em>once the
+Python fallback is proven</em>.</li>
+<li><strong>Toolkit scale TBD → build gateway-ready, not
+gateway-now.</strong> Skip the gateway MCP initially, but keep tool
+descriptions terse and the factory skill gateway-aware so §5b can be
+added later with zero rework.</li>
+</ul>
+<p>The single most important idea in this whole doc: <strong>in
+Continue, every tool result — built-in or MCP — is already injected back
+into the model's context as a tool-result message. You are not inventing
+a new injection channel; you are taking ownership of the tool whose
+output gets injected.</strong> MCP is simply the sanctioned place to put
+code whose return value the agent already knows how to consume.</p>
+<hr />
+<h2 id="1-how-tool-use-works-in-the-continue-extension">1. How tool use
+works in the Continue extension</h2>
+<h3 id="1a-the-mental-model">1a. The mental model</h3>
+<p>Continue's Agent mode is a standard <strong>tool-calling
+loop</strong>. Three moving parts:</p>
+<pre class="text"><code>   ┌──────────────────────────────────────────────────────────────┐
+   │                    CONTINUE EXTENSION (VS Code)                │
+   │                                                                │
+   │   your message ──┐                                             │
+   │                  v                                             │
+   │        ┌───────────────────┐   tools[] (JSON schemas)          │
+   │        │  request builder  │───────────────┐                  │
+   │        └───────────────────┘               v                  │
+   │                                     ┌───────────────┐          │
+   │                                     │   THE LLM     │  (your   │
+   │                                     │  (API endpoint)│  corp    │
+   │                                     └───────┬───────┘  endpoint)│
+   │                                             │ tool_call         │
+   │                  ┌──────────────────────────┘                  │
+   │                  v                                             │
+   │        ┌───────────────────┐   permission gate (Ask/Auto/Excl) │
+   │        │  tool dispatcher  │                                    │
+   │        └─────────┬─────────┘                                    │
+   │        built-in? │  MCP?                                        │
+   │           ┌──────┴───────┐                                      │
+   │           v              v                                      │
+   │   read_file, edit,   ┌────────────────┐                        │
+   │   run_terminal_cmd   │  MCP client    │── stdio/http ──▶ YOUR   │
+   │   (compiled in)      └────────────────┘                 MCP    │
+   │           │              │                              SERVER │
+   │           └──────┬───────┘                                     │
+   │                  v  tool result (string/content)               │
+   │        ┌───────────────────┐                                   │
+   │        │  appended to msgs │──▶ loop back to the LLM ──────────┤
+   │        └───────────────────┘                                   │
+   └──────────────────────────────────────────────────────────────┘</code></pre>
+<p>Step by step, the way Continue documents it:</p>
+<ol type="1">
+<li><strong>Tool advertisement.</strong> On each agent request, Continue
+sends the model a list of tools as JSON objects — each with a
+<code>name</code>, a <code>description</code>, and an
+<code>arguments</code> JSON schema. (<code>read_file</code> with a
+<code>filepath</code> arg, etc.)</li>
+<li><strong>The model decides.</strong> It either answers in prose or
+emits a <strong>tool call</strong> (name + arguments).</li>
+<li><strong>Permission gate.</strong> Each tool has a
+<strong>policy</strong>: <em>Ask First</em> (you click Continue/Cancel),
+<em>Automatic</em> (runs with no prompt), or <strong>Excluded</strong>
+(never offered to the model). This is the lever you'll pull to retire
+the built-in terminal.</li>
+<li><strong>Dispatch.</strong> Continue routes the call to either
+<strong>built-in functionality</strong> or <strong>the MCP server that
+offers that tool</strong>.</li>
+<li><strong>Result injection.</strong> The tool's return value is
+appended to the message history as a tool-result and the loop repeats.
+<em>This is the "inject output back into the agent's input" you were
+looking for — it's the default behavior of the loop, not something you
+have to engineer.</em></li>
+</ol>
+<p>Two Continue-specific details worth knowing:</p>
+<ul>
+<li><strong>"System message tools."</strong> Some models don't have
+native function-calling, or do it badly. Continue can fall back to
+describing the tools <em>in the system prompt</em> and parsing tool
+calls out of the text. Net effect: your MCP tools work across a wide
+range of models/providers — but this fallback is
+<strong>token-hungry</strong>, which is part of why you're seeing prompt
+bloat.</li>
+<li><strong>Built-in tool inventory (Agent mode):</strong> read-only
+tools (Read file, Read current file, List dir, Glob, Grep, Fetch URL,
+Search web, View diff, Repo map, Subdirectory, Codebase)
+<strong>plus</strong> the write/act tools: <strong>Create file, Edit
+file, <code>run_terminal_command</code>, Create Rule Block.</strong>
+Plan mode exposes only the read-only subset.</li>
+</ul>
+<h3 id="1b-why-a-local-mcp-server-is-the-right--and-native--move">1b.
+Why a local MCP server is the right — and "native" — move</h3>
+<p>Your instinct is correct, but for a sharper reason than "it's the
+only way to inject output." Let's be precise about <em>why</em> MCP wins
+in your situation:</p>
+<table>
+<thead>
+<tr>
+<th>If you wanted to…</th>
+<th>Non-MCP option</th>
+<th>Why it fails in a corporate reskin</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Add a brand-new tool</td>
+<td>Fork the extension, add a built-in tool, rebuild</td>
+<td>You (probably) can't ship a custom fork through corporate; you don't
+control the reskin's build/release.</td>
+</tr>
+<tr>
+<td>Change the terminal's behavior</td>
+<td>Patch <code>run_terminal_command</code> in source</td>
+<td>Same problem — it's compiled in.</td>
+</tr>
+<tr>
+<td>Feed richer output back</td>
+<td>"Inject" via some side channel</td>
+<td>There is no side channel. The <em>only</em> thing the model reads is
+messages + tool results.</td>
+</tr>
+<tr>
+<td>Add a tool via config, no rebuild</td>
+<td><strong>MCP server</strong></td>
+<td>✅ <code>.continue</code> config picks it up; results flow through
+the same loop as built-ins.</td>
+</tr>
+</tbody>
+</table>
+<p>So the "native-ness" of MCP is three things at once:</p>
+<ol type="1">
+<li><strong>It's the config-level extension point</strong> — no fork, no
+rebuild, survives extension updates. In a locked-down corp environment
+this is often the <em>only</em> sanctioned way to add capability.</li>
+<li><strong>Its results are first-class.</strong> An MCP tool's return
+value is injected into context identically to a built-in tool's. The
+model can't tell the difference. That's the "native injection" you
+want.</li>
+<li><strong>It's a place to run arbitrary local code.</strong> The MCP
+server is <em>your</em> process on the user's machine. It can shell out,
+capture stdout/stderr, transform output, keep state between calls, talk
+to a Rust binary — anything — and hand the agent back exactly the bytes
+you choose.</li>
+</ol>
+<p>One caveat to confirm early (see Open Questions): <strong>your
+reskinned extension must have MCP enabled.</strong> Most Continue builds
+do (it's config-driven via <code>.continue/mcpServers/*.yaml</code> or
+the <code>mcpServers</code> block in <code>config.yaml</code>), but a
+hardened corporate build <em>could</em> have disabled it. That's the one
+thing that would sink this plan, so verify it on day one with a trivial
+"hello" MCP.</p>
+<h3 id="1c-wiring-it-up-the-config-youll-actually-write">1c. Wiring it
+up (the config you'll actually write)</h3>
+<p>Continue reads MCP servers from a <code>mcpServers</code> list
+(global <code>config.yaml</code>, or a per-workspace
+<code>.continue/mcpServers/&lt;name&gt;.yaml</code>). stdio is the
+default transport; HTTP/SSE exists for remote servers.</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co"># .continue/mcpServers/shell.yaml</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="fu">name</span><span class="kw">:</span><span class="at"> shell</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="fu">command</span><span class="kw">:</span><span class="at"> uv</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="fu">args</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="st">&quot;run&quot;</span><span class="kw">,</span><span class="at"> </span><span class="st">&quot;shell-mcp&quot;</span><span class="kw">]</span><span class="co">      # or a wheel-installed console script</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="fu">cwd</span><span class="kw">:</span><span class="at"> /Users/you/tools/shell-mcp</span><span class="co"> # optional working dir</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="fu">env</span><span class="kw">:</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">SHELL_MCP_DEFAULT_TIMEOUT</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;120&quot;</span></span></code></pre></div>
+<p>Then, in Agent-mode tool settings, set
+<strong><code>run_terminal_command</code> → Excluded</strong> and your
+new <code>shell.run</code>/<code>shell.start</code> tools to <strong>Ask
+First</strong> (or Automatic once you trust them). Now the model reaches
+for <em>your</em> terminal, not Continue's.</p>
+<hr />
+<h2 id="2-replacing-run_terminal_command--the-design-space">2. Replacing
+<code>run_terminal_command</code> — the design space</h2>
+<p>Your requirements: run bash <strong>or</strong> PowerShell, capture
+stdout <strong>and</strong> stderr, <strong>cancel/kill</strong>, and
+set a <strong>timeout</strong>. The naive read is "just
+<code>subprocess.run</code>." That works for <code>ls</code>, but it
+fails exactly where terminals get interesting. Here's the honest design
+space.</p>
+<h3 id="2a-the-fork-that-decides-everything-sync-vs-background-job">2a.
+The fork that decides everything: sync vs. background job</h3>
+<p><strong>Synchronous / run-to-completion</strong> — one tool call
+blocks until the command exits, then returns
+<code>{stdout, stderr, exit_code}</code>.</p>
+<ul>
+<li>✅ Dead simple. ~30 lines.</li>
+<li>❌ <strong>Cancel is basically impossible.</strong> The model made
+one blocking call; there's no second call it can make to say "kill it"
+while the first is still running.</li>
+<li>❌ <strong>Timeouts fight the transport.</strong> MCP clients
+(Continue included) drop tool calls that don't answer in roughly
+<strong>7–10 seconds</strong> — you can get a
+<code>424 Failed Dependency</code> or a hang. A 3-minute
+<code>pytest</code> run will just die.</li>
+<li>❌ No incremental output. The agent sees nothing until the end.</li>
+</ul>
+<p><strong>Background-job model</strong> — <code>start</code> returns a
+<code>job_id</code> immediately; the model then calls
+<code>poll</code>/<code>output</code>/<code>kill</code> on that id.</p>
+<pre class="text"><code>  model: shell.start({cmd:&quot;pytest -q&quot;, shell:&quot;bash&quot;, timeout:300})
+     └─▶ returns {job_id:&quot;j1&quot;, state:&quot;running&quot;}          (instant — no transport timeout)
+  model: shell.output({job_id:&quot;j1&quot;, since:0})
+     └─▶ {stdout:&quot;…12 passed…&quot;, stderr:&quot;&quot;, cursor:812, state:&quot;running&quot;}
+  model: shell.output({job_id:&quot;j1&quot;, since:812})           (incremental &quot;injection&quot;)
+     └─▶ {stdout:&quot;…\n38 passed\n&quot;, state:&quot;exited&quot;, exit_code:0}
+  # or, mid-run:
+  model: shell.kill({job_id:&quot;j1&quot;})  ─▶ {state:&quot;killed&quot;}</code></pre>
+<ul>
+<li>✅ <strong>Cancel/kill is a first-class second call.</strong> This
+is <em>the</em> reason to go background.</li>
+<li>✅ <strong>Timeout is yours to enforce</strong>, independent of the
+client — the server kills the job at the deadline and reports it.</li>
+<li>✅ <strong>Incremental output injection</strong>:
+<code>output(since=cursor)</code> streams new bytes back into the
+agent's context as the job runs. This is the deepest version of "inject
+output back into the agent's input" — the agent can watch a long build
+and react.</li>
+<li>✅ Each call returns instantly, so you never hit the 7–10 s
+wall.</li>
+<li>❌ More surface area (a small job registry, a few tools instead of
+one). Worth it.</li>
+</ul>
+<p><strong>Recommendation: build the background-job model.</strong>
+Optionally keep a thin <code>shell.run</code> convenience wrapper (start
++ wait-with-short-timeout) for quick one-liners, implemented on top of
+the job registry. FastMCP even has a native background-task protocol
+(<code>task=True</code>, SEP-1686) you can lean on, but a hand-rolled
+in-process registry is simpler to reason about and fully under your
+control.</p>
+<h3 id="2b-the-parts-that-are-easy-to-get-wrong">2b. The parts that are
+easy to get wrong</h3>
+<p><strong>Shell selection (bash vs PowerShell).</strong> Don't guess —
+take a <code>shell</code> argument and map it explicitly, with a sane
+per-OS default:</p>
+<table>
+<thead>
+<tr>
+<th><code>shell</code> value</th>
+<th>Unix/macOS</th>
+<th>Windows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>bash</code></td>
+<td><code>/bin/bash -lc "&lt;cmd&gt;"</code></td>
+<td><code>bash -lc</code> (Git Bash / WSL, if present)</td>
+</tr>
+<tr>
+<td><code>pwsh</code></td>
+<td><code>pwsh -NoProfile -Command "&lt;cmd&gt;"</code></td>
+<td><code>pwsh …</code> (PowerShell 7+)</td>
+</tr>
+<tr>
+<td><code>powershell</code></td>
+<td>—</td>
+<td><code>powershell.exe -NoProfile -Command</code> (Windows PS
+5.1)</td>
+</tr>
+<tr>
+<td><code>cmd</code></td>
+<td>—</td>
+<td><code>cmd.exe /c "&lt;cmd&gt;"</code></td>
+</tr>
+<tr>
+<td>default</td>
+<td><code>bash</code></td>
+<td><code>pwsh</code> if present else <code>powershell</code></td>
+</tr>
+</tbody>
+</table>
+<p>Pass the command as a single string to the shell (<code>-c</code> /
+<code>-Command</code>) rather than trying to tokenize it yourself — the
+user's mental model is "type a shell line."</p>
+<p><strong>Killing the whole tree — the #1 bug.</strong>
+<code>process.kill()</code> on the top process leaves orphaned children
+(your <code>npm test</code> dies but the <code>node</code> it spawned
+keeps running). You must kill the <strong>process group / job
+object</strong>:</p>
+<ul>
+<li><strong>Unix/macOS:</strong> launch with
+<code>start_new_session=True</code> (i.e. <code>setsid</code>), then
+<code>os.killpg(os.getpgid(pid), SIGTERM)</code> → escalate to
+<code>SIGKILL</code> after a grace period.</li>
+<li><strong>Windows:</strong> launch with
+<code>CREATE_NEW_PROCESS_GROUP</code>, and — for reliable tree kill —
+assign the child to a <strong>Job Object</strong> and terminate the job
+(or shell out to <code>taskkill /T /F /PID</code>). This is fiddly in
+pure Python and is one of the better arguments for a small Rust core
+(§3–4).</li>
+</ul>
+<p><strong>Timeout = kill + report, not
+exception-and-lose-output.</strong> On deadline, kill the group but
+still return whatever stdout/stderr you captured, plus
+<code>{state:"timeout", exit_code:null}</code>. Partial output is often
+the most useful thing the agent gets.</p>
+<p><strong>Output capture without deadlocks.</strong> The classic trap:
+filling an OS pipe buffer while the child blocks on write. Read
+stdout/stderr <strong>concurrently</strong> (async tasks or threads),
+append into per-job buffers. Decide up front:</p>
+<ul>
+<li><em>Interleave</em> stdout+stderr into one stream (what a human
+sees) <strong>or</strong> keep them separate (cleaner for the model).
+Recommendation: keep separate, but tag lines so order is
+recoverable.</li>
+<li><strong>Cap the buffer</strong> (e.g. keep first N KB + last N KB
+with a "…truncated…" marker). A runaway command can emit gigabytes; you
+do not want that in the context window. This ring-buffer/truncation
+logic is another place a Rust core earns its keep.</li>
+</ul>
+<p><strong>Environment &amp; cwd.</strong> Take an optional
+<code>cwd</code> and <code>env</code> overlay. Default <code>cwd</code>
+to the workspace root Continue is operating in. Never inherit secrets
+you don't mean to; consider an allowlist for env passthrough in a
+corporate setting.</p>
+<h3 id="2c-what-the-tool-surface-looks-like">2c. What the tool surface
+looks like</h3>
+<pre class="text"><code>shell.start(cmd, shell?, cwd?, env?, timeout?)  -&gt; {job_id, state}
+shell.output(job_id, since?)                     -&gt; {stdout, stderr, cursor, state, exit_code?}
+shell.poll(job_id)                               -&gt; {state, exit_code?, runtime_ms}
+shell.kill(job_id, signal?)                      -&gt; {state}
+shell.list()                                     -&gt; [{job_id, cmd, state, runtime_ms}]
+shell.run(cmd, shell?, timeout?)                 -&gt; {stdout, stderr, exit_code}   # convenience</code></pre>
+<p>Keep the <strong>descriptions terse</strong> (see §5 on token cost).
+Six tools, each one or two sentences.</p>
+<hr />
+<h2 id="3-implementation-approaches-compared">3. Implementation
+approaches compared</h2>
+<p>Four realistic ways to build the terminal MCP. Scored on
+<strong>fast</strong> (runtime speed), <strong>ergonomic</strong> (nice
+to build/maintain), <strong>simple</strong> (least machinery).</p>
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>Fast?</th>
+<th>Ergonomic?</th>
+<th>Simple?</th>
+<th>When it's the right call</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A. Pure Python, <code>subprocess</code> +
+threads</strong></td>
+<td>Fine*</td>
+<td>Good</td>
+<td>★ Simplest</td>
+<td>Prototype; you want it working this afternoon.</td>
+</tr>
+<tr>
+<td><strong>B. Pure Python, <code>asyncio</code> subprocess
+(FastMCP-native)</strong></td>
+<td>Fine*</td>
+<td>★ Best in Python</td>
+<td>Simple-ish</td>
+<td><strong>The recommendation.</strong> Async matches MCP;
+cancellation/timeout are natural.</td>
+</tr>
+<tr>
+<td><strong>C. Python MCP shell + Rust core (maturin/PyO3)</strong></td>
+<td>★ Fastest on hot paths</td>
+<td>Good (two languages)</td>
+<td>Medium</td>
+<td>Huge output, PTYs, bulletproof cross-platform kill, or you want Rust
+in the codebase.</td>
+</tr>
+<tr>
+<td><strong>D. Pure Rust MCP (<code>rmcp</code> crate)</strong></td>
+<td>★ Fastest overall</td>
+<td>Good if you love Rust</td>
+<td>Medium</td>
+<td>You don't need the Python/<code>uv</code>/wheel ergonomics and want
+one static binary.</td>
+</tr>
+</tbody>
+</table>
+<p>* <strong>"Fine" is the honest answer for a terminal runner.</strong>
+The wall-clock is dominated by the <em>child process</em> (pytest, npm,
+cargo). Your harness spends its life <code>await</code>-ing a pipe.
+Python's overhead here is microseconds against seconds of child runtime.
+<strong>Do not pick a language for the harness on "speed" grounds for a
+process runner</strong> — pick it on ergonomics and on the two places
+native code genuinely helps: process-group kill on Windows, and
+high-throughput output buffering.</p>
+<h3 id="3a-ab--the-python-options">3a. A/B — the Python options</h3>
+<ul>
+<li><strong>A (threads):</strong> <code>subprocess.Popen</code> + two
+reader threads draining stdout/stderr into buffers + a watchdog thread
+for the timeout. Works everywhere, no async brain-bending. The downside
+is thread bookkeeping and that FastMCP is async, so you're bridging
+thread↔︎async.</li>
+<li><strong>B (asyncio):</strong>
+<code>asyncio.create_subprocess_exec</code>, drain pipes with
+<code>StreamReader</code>, timeout via <code>asyncio.wait_for</code>,
+cancel via task cancellation + <code>killpg</code>. This is the cleanest
+fit: FastMCP tools are coroutines, so everything composes. <strong>Start
+here.</strong></li>
+</ul>
+<p>Watch the known FastMCP/stdio gotcha: naive blocking subprocess calls
+inside a stdio server can <strong>hang the whole server</strong>. The
+background-job model plus async draining sidesteps it, because no tool
+call ever blocks for long.</p>
+<h3 id="3b-c--python-shell-over-a-rust-core-the-maturin-pattern">3b. C —
+Python shell over a Rust core (the maturin pattern)</h3>
+<p>This is your <code>rip</code> pattern applied to MCP: <strong>Rust
+does the gnarly systems work; Python is the thin MCP-facing shell; the
+whole thing ships as a wheel installed by <code>uv</code> — no Rust
+toolchain on the target machine.</strong></p>
+<pre class="text"><code>   ┌─────────────────────────────────────────────┐
+   │  wheel (built by maturin, installed by uv)   │
+   │                                              │
+   │   shell_mcp/  (Python)                        │
+   │     server.py   ── FastMCP tools ────┐        │
+   │                                       │ calls  │
+   │   _core  (Rust, compiled via PyO3) ◀──┘        │
+   │     spawn_group(cmd) -&gt; handle                 │
+   │     read(handle, since) -&gt; bytes               │
+   │     kill_tree(handle)                          │
+   │     (Job Objects on Windows, setsid on Unix)   │
+   └─────────────────────────────────────────────┘</code></pre>
+<p>What Rust actually buys you <em>here specifically</em>:</p>
+<ul>
+<li><strong>Rock-solid tree kill</strong>, especially Windows Job
+Objects — a genuine pain in Python, clean in Rust
+(<code>std::process</code> + <code>windows</code>/<code>nix</code>
+crates, or the <code>command-group</code>/<code>shared_child</code>
+crates).</li>
+<li><strong>Cheap, correct output ring-buffering</strong> at high
+throughput without the GIL in the read path.</li>
+<li><strong>PTY support</strong> (via <code>portable-pty</code>) if you
+ever need programs that behave differently when they think they're on a
+terminal (colors, progress bars, interactive prompts).</li>
+</ul>
+<p>What it costs: a two-language build, a <code>Cargo.toml</code> +
+<code>pyproject.toml</code>, and CI that builds wheels per platform. For
+a <em>terminal</em> MCP this is arguably over-engineering on day one —
+but it's a <strong>great second step</strong> once the Python version
+proves the shape, and it's the exact seam where native code pays
+off.</p>
+<h3 id="3c-d--pure-rust-via-rmcp">3c. D — pure Rust via
+<code>rmcp</code></h3>
+<p>The official Rust MCP SDK (<code>rmcp</code>) is mature in 2026. One
+static binary, fastest startup, no Python at all. You lose the
+<code>uv</code>/wheel install story (which you like) and the "codegen a
+tool as a decorated Python function" ergonomics (your ouroboros in §6 is
+much easier in Python). <strong>Pick D only if</strong> you're
+standardizing on a single distributed binary and don't want Python in
+the loop.</p>
+<hr />
+<h2 id="4-does-the-maturin-trojan-horse-make-higher-performing-mcps">4.
+Does the maturin "Trojan horse" make higher-performing MCPs?</h2>
+<p>Short answer: <strong>yes, but be honest about <em>which</em>
+MCPs.</strong> The pattern is excellent; the performance win is real
+<em>only for CPU-bound or syscall-gnarly tools</em>, not for I/O-bound
+ones.</p>
+<p>The pattern (from <code>rip</code>): write the hot logic in Rust,
+expose it to Python with <strong>PyO3</strong>, build a wheel with
+<strong>maturin</strong>, install with <strong>uv</strong>. The user
+sees a normal Python tool; you get native speed. It's a Trojan horse
+because Rust rides in inside a Python-shaped package — no Rust toolchain
+required on the target.</p>
+<p><strong>Where it genuinely makes a faster MCP:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Tool type</th>
+<th>Native speedup?</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Code search / grep-like (walk + regex over a big tree)</td>
+<td><strong>Large</strong></td>
+<td>CPU + syscall bound; this is exactly what ripgrep proves.</td>
+</tr>
+<tr>
+<td>Parse/format/lint (SQL formatter, AST tools)</td>
+<td><strong>Large</strong></td>
+<td>CPU-bound tree work; no GIL, real parsers (rowan, chumsky).</td>
+</tr>
+<tr>
+<td>Hashing / dedup / large-file diff</td>
+<td><strong>Large</strong></td>
+<td>CPU-bound byte crunching.</td>
+</tr>
+<tr>
+<td>Structured-output transforms on MBs of text</td>
+<td><strong>Medium</strong></td>
+<td>Avoids Python allocation/GIL overhead.</td>
+</tr>
+<tr>
+<td><strong>Terminal runner</strong></td>
+<td><strong>Small</strong></td>
+<td>I/O-bound; win is <em>correctness</em> (tree kill, PTY), not
+throughput.</td>
+</tr>
+<tr>
+<td>Web fetch / API call wrapper</td>
+<td><strong>~None</strong></td>
+<td>Network-bound; Rust changes nothing.</td>
+</tr>
+</tbody>
+</table>
+<p>So the framing to carry forward: <strong>maturin doesn't make MCPs
+faster; it makes CPU-bound MCPs faster, while keeping Python's packaging
+and codegen ergonomics.</strong> Use it as a <em>selective</em>
+accelerator — Python shell everywhere, Rust core where a profiler (not a
+hunch) says the time goes. The <code>rip</code> repo is the proof the
+distribution story works; reuse its
+<code>pyproject.toml</code>/<code>Cargo.toml</code>/CI skeleton
+verbatim.</p>
+<p>A single, uniform build recipe you can standardize on:</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode toml"><code class="sourceCode toml"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="co"># pyproject.toml (excerpt)</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="kw">[build-system]</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="dt">requires</span> <span class="op">=</span> <span class="op">[</span><span class="st">&quot;maturin&gt;=1.5&quot;</span><span class="op">]</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="dt">build-backend</span> <span class="op">=</span> <span class="st">&quot;maturin&quot;</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a><span class="kw">[project]</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a><span class="dt">name</span> <span class="op">=</span> <span class="st">&quot;shell-mcp&quot;</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a><span class="dt">requires-python</span> <span class="op">=</span> <span class="st">&quot;&gt;=3.11&quot;</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a><span class="dt">dependencies</span> <span class="op">=</span> <span class="op">[</span><span class="st">&quot;fastmcp&gt;=2&quot;</span><span class="op">]</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a><span class="kw">[project.scripts]</span></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a><span class="dt">shell-mcp</span> <span class="op">=</span> <span class="st">&quot;shell_mcp.server:main&quot;</span>   <span class="co"># the console script Continue launches</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a><span class="kw">[tool.maturin]</span></span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a><span class="dt">features</span> <span class="op">=</span> <span class="op">[</span><span class="st">&quot;pyo3/extension-module&quot;</span><span class="op">]</span></span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a><span class="dt">module-name</span> <span class="op">=</span> <span class="st">&quot;shell_mcp._core&quot;</span>       <span class="co"># the Rust extension, imported by Python</span></span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode toml"><code class="sourceCode toml"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Cargo.toml (excerpt)</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="kw">[lib]</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a><span class="dt">name</span> <span class="op">=</span> <span class="st">&quot;_core&quot;</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="dt">crate-type</span> <span class="op">=</span> <span class="op">[</span><span class="st">&quot;cdylib&quot;</span><span class="op">]</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a><span class="kw">[dependencies]</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a><span class="dt">pyo3</span> <span class="op">=</span> <span class="op">{ </span><span class="dt">version</span><span class="op"> =</span> <span class="st">&quot;0.22&quot;</span><span class="op">, </span><span class="dt">features</span><span class="op"> =</span> <span class="op">[</span><span class="st">&quot;extension-module&quot;</span><span class="op">] }</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a><span class="co"># command-group / shared_child / portable-pty as needed</span></span></code></pre></div>
+<p>Same skeleton works for <em>every</em> tool in your toolkit —
+pure-Python tools just skip the <code>[tool.maturin]</code>/Rust
+half.</p>
+<hr />
+<h2 id="5-the-broader-toolkit--and-killing-the-token-tax">5. The broader
+toolkit — and killing the token tax</h2>
+<p>You want to replace <em>many</em> built-in tools with MCPs, make them
+<strong>discoverable</strong>, and <strong>stop the prompt
+bloat</strong>. Two things to understand first.</p>
+<blockquote>
+<p><strong>For the full "which tools go direct vs. behind the gateway"
+strategy — the head/tail tradeoff, the token math, the ladder of levers,
+and a worked example — see the companion doc <a
+href="continue-mcp-token-strategy.md"><code>continue-mcp-token-strategy.md</code></a>.</strong>
+The short version: decide each tool by
+<code>schema_size × (1 − usage)</code> — big and rare → gateway; small
+or constant → direct.</p>
+</blockquote>
+<h3 id="5a-why-your-tokens-are-disappearing">5a. Why your tokens are
+disappearing</h3>
+<p>Every MCP tool Continue loads costs <strong>~550–1,400
+tokens</strong> for its name + description + JSON schema + field docs,
+and they're loaded <strong>up front on every request</strong> (worse if
+"system message tools" is active, since the whole schema goes in the
+system prompt as prose). Independent 2026 measurements put a handful of
+MCP servers at <strong>30k–67k tokens before you type anything</strong>
+— a third of a 200k window gone to tool <em>definitions</em>. That's the
+bloat you're feeling. Fat built-in tool prompts + several MCPs = your
+context is half-eaten at rest.</p>
+<h3 id="5b-the-fix-progressive-disclosure-via-a-gateway-mcp">5b. The
+fix: progressive disclosure via a gateway MCP</h3>
+<p>The 2026 consensus fix (Anthropic's <strong>Tool Search
+Tool</strong>, Cloudflare's <strong>Code Mode</strong>, "code execution
+with MCP") is the same idea: <strong>don't put every tool schema in
+context — put a <em>way to find and call</em> tools in context.</strong>
+Reported savings are dramatic (85% to ~99% fewer tokens) because the
+model loads a schema only when it actually needs that tool.</p>
+<p>You can build this yourself as <strong>one gateway MCP</strong> that
+exposes ~3 tools instead of 40:</p>
+<pre class="text"><code>tools.search(query)          -&gt; [{name, one_line}]      # cheap catalog lookup
+tools.describe(name)         -&gt; {full schema}           # load one schema on demand
+tools.call(name, args)       -&gt; {result}                # dispatch to the real impl</code></pre>
+<p>Now Continue only pays for <strong>three</strong> schemas at rest.
+The other 40 live behind <code>search</code>/<code>describe</code>,
+disclosed one at a time. This directly serves all three of your goals:
+<strong>fewer tokens, infinite expansion</strong> (add tools without
+adding resting cost), and you still get <strong>native
+injection</strong> (the gateway's result is a normal tool result).</p>
+<blockquote>
+<p>Check whether your Continue build natively supports the MCP/Anthropic
+Tool Search flow — if it does, you may get this for free. If not, the
+gateway MCP above reproduces it in ~100 lines and works with any
+model.</p>
+</blockquote>
+<p>Trade-off to name honestly: a gateway adds <strong>one extra
+round-trip</strong> (search → call) and slightly more reasoning burden
+on the model. For a toolkit of 5 tools, skip it and just keep
+descriptions terse. For 20+, the gateway wins decisively.</p>
+<p><strong>Built and ready in
+<code>continue-mcp/gateway-mcp/</code>.</strong> A FastMCP server
+exposing <code>search</code>/<code>describe</code>/<code>call</code>
+that is itself an MCP <em>client</em> to your downstream servers
+(configured in <code>gateway.config.json</code>), aggregating their
+catalogs at startup. The ranking/catalog core (<code>registry.py</code>)
+is pure stdlib and unit-tested. Its README documents the purpose, the
+aggregator design, the search→describe→call flow, and the important
+<strong>head/tail</strong> guidance: put the <em>long tail</em> of tools
+behind the gateway, but keep the 2–3 tools you use every message (edit,
+shell.run, search.grep) registered directly —
+searching→describing→calling for the thing you do constantly isn't worth
+the hop. When using the gateway, register <strong>only</strong> the
+gateway with Continue, not the downstream servers.</p>
+<h3 id="5c-tools-worth-building-beyond-the-terminal">5c. Tools worth
+building (beyond the terminal)</h3>
+<p>Prioritized by leverage — replace the token-heavy built-ins first,
+then expand:</p>
+<ol type="1">
+<li><strong><code>shell</code> (this doc)</strong> — the flagship;
+unlocks the background-job + injection pattern.</li>
+<li><strong><code>search</code></strong> — a ripgrep-backed grep/glob
+tool. <code>ripgrep</code> ships on <strong>PyPI</strong>, so
+<code>uv tool install ripgrep</code> puts the real <code>rg</code>
+binary on PATH with no raw-binary install needed; the MCP just shells
+out to it. (If you'd rather search in-process, embed BurntSushi's
+<code>grep</code>/<code>ignore</code> crates as a PyO3 lib via maturin —
+the same wheel pattern, no subprocess. Either way it's far cheaper in
+tokens than built-in codebase context.)</li>
+<li><strong><code>edit</code> — ready in
+<code>continue-mcp/edit-mcp/</code>.</strong> Replaces the built-in
+Edit/Create file tools with a matcher ported from Pi's edit tool: exact
+match first, then a Unicode-normalized fuzzy fallback (NFKC, smart
+quotes, dashes, exotic spaces, trailing whitespace, CRLF/BOM) that maps
+back to real line ranges so untouched lines keep their bytes. Fixes the
+non-ASCII match failures the stock tool hits. 30+ pure-stdlib tests, all
+green.</li>
+<li><strong><code>fs</code></strong> — read/list with <em>your</em>
+conventions (line-ranged reads, terse output, workspace-relative paths)
+to cut the verbosity of the built-in read tools.</li>
+<li><strong><code>repo</code></strong> — repo-map / symbol index /
+"where is X defined" backed by tree-sitter (Rust). Replaces expensive
+codebase context with targeted lookups.</li>
+<li><strong><code>sql</code></strong> — your Snowflake formatter (see
+<code>snowflake-formatter-brainstorm.md</code>) exposed as a
+<code>format</code>/<code>lint</code> tool; the maturin pattern is
+already the plan there.</li>
+<li><strong><code>notes</code>/<code>memory</code></strong> — a
+scratchpad the agent can write to and read back (stateful MCP; trivially
+injects prior output into later turns).</li>
+<li><strong><code>http</code>/<code>api</code></strong> — thin,
+allow-listed corporate API callers (network-bound, so pure Python — no
+Rust needed).</li>
+</ol>
+<p>Every one of these is the <strong>same shape</strong>: a FastMCP
+server, a handful of terse tools, optional Rust core for the CPU-bound
+ones. Which brings us to the factory.</p>
+<hr />
+<h2 id="6-the-ouroboros--a-framework--skill-that-builds-new-tools">6.
+The ouroboros — a framework + skill that builds new tools</h2>
+<p>You want the "software creating software for itself" effect.
+Concretely, that's two artifacts: a <strong>template</strong> (the
+invariant scaffold) and a <strong>skill</strong> (the instructions that
+let an LLM fill the template correctly). Because every FastMCP tool is
+<em>one decorated function</em>, codegen is genuinely easy here.</p>
+<h3 id="6a-the-template-cookiecutter">6a. The template
+(cookiecutter)</h3>
+<p>One repo layout, reused for every tool. Pure-Python tools use only
+the top half; CPU-bound tools add the Rust core.</p>
+<pre class="text"><code>mcp-&lt;name&gt;/
+  pyproject.toml            # maturin backend, console-script entry, fastmcp dep
+  Cargo.toml                # only if a Rust core is needed
+  src/lib.rs                # Rust core (optional)
+  &lt;name&gt;_mcp/
+    server.py               # FastMCP() + @mcp.tool functions (terse descriptions)
+    _core.pyi               # type stubs for the Rust extension (optional)
+  tests/
+    test_tools.py           # golden tests per tool
+  .continue/
+    mcpServers/&lt;name&gt;.yaml   # ready-to-drop-in Continue wiring
+  README.md                 # one paragraph + the tool list</code></pre>
+<h3 id="6b-the-skill-new-mcp-tool--the-ouroboros-loop">6b. The skill
+(<code>new-mcp-tool</code>) — the ouroboros loop</h3>
+<p>A Claude Code / agent <strong>skill</strong> that, given a one-line
+spec ("a tool that runs Snowflake queries and returns rows as
+markdown"), does this:</p>
+<pre class="text"><code>1. Ask 2–3 clarifying questions (inputs? outputs? side effects? CPU-bound → Rust?)
+2. Copy the cookiecutter template.
+3. Write the @mcp.tool function(s) with TERSE descriptions (enforce a token budget:
+   name + ≤2 sentence description + minimal schema).
+4. If CPU-bound, stub the Rust core and the PyO3 binding.
+5. Generate golden tests and run them (this is where your shell-MCP eats its own
+   dog food — the generator uses the terminal tool to run the tests).
+6. Emit the .continue/mcpServers/&lt;name&gt;.yaml wiring and print the exact tool-policy
+   steps (&quot;set X to Automatic, Exclude built-in Y&quot;).
+7. Register the tool in the gateway MCP&#39;s catalog (§5b) so it&#39;s discoverable with
+   zero resting token cost.</code></pre>
+<p>The self-referential ("ouroboros") part: step 5 runs the tests
+<strong>through your own <code>shell</code> MCP</strong>, and step 7
+registers the new tool into the <strong>gateway</strong> so the
+<em>next</em> generation can discover it. The toolkit literally grows
+itself, and each new tool becomes immediately available to the agent
+that's building the <em>next</em> one.</p>
+<p>A sketch of the skill's core instruction (what you'd put in
+<code>SKILL.md</code>):</p>
+<blockquote>
+<p><strong>You are a tool factory.</strong> Given a spec, produce a
+FastMCP tool from the template. Rules: (1) descriptions ≤ 2 sentences
+and ≤ ~80 tokens — the agent pays for these on every request; (2) prefer
+one flexible tool over three narrow ones; (3) mark CPU-bound work for a
+Rust core, I/O-bound work stays Python; (4) every tool ships with a
+golden test and you must run it via <code>shell.run</code> before
+declaring done; (5) register the tool in the gateway catalog. Output the
+file tree, the code, the test result, and the Continue wiring.</p>
+</blockquote>
+<h3 id="6c-why-this-is-the-right-foundation">6c. Why this is the right
+foundation</h3>
+<ul>
+<li><strong>Uniformity</strong> — one template means every tool has the
+same build, the same install (<code>uv</code>/wheel), the same wiring,
+the same test story. New tools are cheap.</li>
+<li><strong>Token discipline is enforced by the factory</strong>, not
+left to willpower — the skill <em>bakes in</em> the terse-description
+budget and gateway registration.</li>
+<li><strong>Native speed is opt-in</strong> — the Rust seam is in the
+template, dormant until a tool needs it.</li>
+<li><strong>Infinite expansion</strong> — because resting token cost is
+decoupled from tool count (gateway), you can grow the toolkit without
+growing the prompt.</li>
+</ul>
+<hr />
+<h2 id="7-recommended-foundations-the-order-id-build-in">7. Recommended
+foundations (the order I'd build in)</h2>
+<ol type="1">
+<li><strong>Prove MCP works in your reskin.</strong> Ship
+<code>continue-mcp/hello-mcp/</code> (a <code>ping</code> that returns
+<code>"pong"</code>, plus <code>echo</code>/<code>whoami</code>), wire
+it via its <code>hello.yaml</code>, and ask the agent to call
+<code>ping</code>. Confirms MCP is enabled and you can wire tools.
+<em>Do this before anything else — it's the one thing that can
+invalidate the plan.</em></li>
+<li><strong>Build <code>shell</code> in pure-async Python (option
+B)</strong> with the background-job model, process-group kill, timeout,
+and incremental <code>output</code>. Exclude the built-in
+<code>run_terminal_command</code>. This is 80% of the value.</li>
+<li><strong>Prove the pure-Python cross-platform kill on both
+OSes</strong> — <code>killpg</code> on Unix, <code>taskkill /T /F</code>
+on Windows — with a test that spawns a child-that-spawns- a-child and
+asserts the whole tree dies. Only <em>after</em> this is green do you
+add the maturin skeleton (copy from <code>rip</code>) and move Windows
+tree-kill into a unified Rust Job-Object implementation. This ordering
+matches your "pure-Python first, both OSes" decision: correctness in
+Python first, native unification second.</li>
+<li><strong><code>search</code> — ready in
+<code>continue-mcp/search-mcp/</code>.</strong> Replaces Continue's
+built-in Grep/Glob search by shelling out to <code>rg</code>
+(<code>uv tool install ripgrep</code> — it's on PyPI). Native speed,
+gitignore-aware, compact structured output, hard result cap. Exclude the
+built-in Grep/Glob tools; set <code>search.*</code> to Automatic. (Want
+in-process, no binary? Embed the <code>grep</code>/<code>ignore</code>
+crates via PyO3 — same shape.)</li>
+<li><strong>Stand up the gateway MCP</strong> once you have ~5 tools and
+the token math favors it.</li>
+<li><strong>Write the cookiecutter template + <code>new-mcp-tool</code>
+skill.</strong> Now the toolkit builds itself.</li>
+</ol>
+<hr />
+<h2 id="8-open-questions-i-need-your-read-on-these">8. Open questions (I
+need your read on these)</h2>
+<ol type="1">
+<li><strong>Is MCP enabled in your reskinned/corporate Continue
+build?</strong> (Deal-breaker if not — verify with the
+<code>hello</code> MCP first.) Do you control
+<code>.continue/config.yaml</code> and the per-tool policies, or are
+those locked by IT?</li>
+<li><strong>Primary OS for the developers using this</strong> — Windows,
+macOS, or both? This decides how hard the process-kill story is (Windows
+Job Objects push you toward a Rust core sooner) and whether PowerShell
+is the default shell.</li>
+<li><strong>Sync convenience vs. pure background model</strong> — do you
+want the simple <code>shell.run</code> one-liner alongside the job
+model, or keep the surface minimal?</li>
+<li><strong>How "live" does output injection need to be?</strong>
+Run-to-completion-then-inject (simplest) vs. true incremental streaming
+while the agent watches (the background model enables it, but the agent
+has to poll)?</li>
+<li><strong>Toolkit scale you're targeting</strong> — a handful of tools
+(skip the gateway) or dozens (build the gateway early)?</li>
+<li><strong>Rust appetite now vs. later</strong> — start pure-Python and
+add Rust selectively (my recommendation), or set up the maturin hybrid
+from commit one so the seam's always there?</li>
+</ol>
+<hr />
+<h2 id="sources">Sources</h2>
+<ul>
+<li><a
+href="https://docs.continue.dev/ide-extensions/agent/how-it-works">How
+Agent Mode Works — Continue Docs</a> · <a
+href="https://docs.continue.dev/ide-extensions/agent/quick-start">Agent
+quick start</a> · <a
+href="https://docs.continue.dev/ide-extensions/agent/how-to-customize">How
+to Customize Agent Mode</a></li>
+<li><a
+href="https://deepwiki.com/continuedev/continue/4.5-tool-calling">Tool
+Calling — Continue (DeepWiki)</a> · <a
+href="https://docs.continue.dev/cli/tool-permissions">Tool Permissions —
+Continue CLI docs</a> · <a
+href="https://docs.continue.dev/reference">config.yaml
+Reference</a></li>
+<li><a href="https://docs.continue.dev/customize/deep-dives/mcp">Set up
+MCP in Continue</a> · <a
+href="https://docs.continue.dev/customize/mcp-tools">MCP servers —
+Continue Docs</a></li>
+<li><a href="https://github.com/PrefectHQ/fastmcp">FastMCP</a> · <a
+href="https://gofastmcp.com/servers/tasks">FastMCP Background Tasks
+(SEP-1686)</a> · <a
+href="https://github.com/dylan-gluck/mcp-background-job">mcp-background-job
+(dylan-gluck)</a> · <a
+href="https://dev.to/aws/fix-mcp-timeouts-async-handleid-pattern-8ek">Fix
+MCP Timeouts: async HandleId pattern</a></li>
+<li><a
+href="https://mcp.directory/blog/mcp-context-bloat-fix-2026-tool-search-code-mode-progressive-disclosure">MCP
+context-bloat fix 2026: Tool Search / Code Mode / progressive
+disclosure</a> · <a
+href="https://www.stackone.com/blog/mcp-token-optimization/">MCP token
+optimization compared (StackOne)</a> · <a
+href="https://www.apideck.com/blog/mcp-server-eating-context-window-cli-alternative">Your
+MCP server is eating your context window (Apideck)</a></li>
+<li><a href="https://www.maturin.rs/">maturin</a> · <a
+href="https://pyo3.rs/">PyO3</a> · <a
+href="https://github.com/modelcontextprotocol/rust-sdk">rmcp — Rust MCP
+SDK</a> · <a
+href="https://github.com/curtisalexander/rip"><code>rip</code> — Rust
+binary in a Python wheel (curtisalexander)</a> · <a
+href="https://crates.io/crates/command-group">command-group crate</a> ·
+<a href="https://crates.io/crates/portable-pty">portable-pty</a></li>
+</ul>
+</content>
+</invoke>
+</main>
+<footer>
+  Part of <a href="https://github.com/curtisalexander/continue-retool">continue-retool</a> —
+  retooling Continue with our own tools. MIT licensed.
+</footer>
+</body>
+</html>
