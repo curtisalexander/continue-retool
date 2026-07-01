@@ -268,16 +268,16 @@ behind the gateway doesn't actually save window tokens</strong>, because
 you keep loading its schema to use it. You get the cost with none of the
 benefit.</p>
 <h3 id="the-22">The 2×2</h3>
-<pre class="text"><code>                    used OFTEN                 used RARELY
-                ┌───────────────────────┬───────────────────────┐
-  BIG schema    │  DIRECT               │  GATEWAY  ★            │
-                │  (worth its rent;     │  (biggest resting tax  │
-                │   gateway saves ~0)   │   for least benefit)   │
-                ├───────────────────────┼───────────────────────┤
-  SMALL schema  │  DIRECT               │  either — lean GATEWAY  │
-                │  (cheap; latency      │   if it&#39;s part of a     │
-                │   matters more)       │   large tail            │
-                └───────────────────────┴───────────────────────┘</code></pre>
+<pre class="text"><code>                        used OFTEN               used RARELY
+                ┌─────────────────────────┬─────────────────────────┐
+  BIG schema    │  DIRECT                 │  GATEWAY  *             │
+                │  (worth its rent;       │  (biggest resting tax   │
+                │   gateway saves ~0)     │   for least benefit)    │
+                ├─────────────────────────┼─────────────────────────┤
+  SMALL schema  │  DIRECT                 │  either — lean GATEWAY  │
+                │  (cheap; latency        │  if it&#39;s part of a      │
+                │   matters more)         │   large tail            │
+                └─────────────────────────┴─────────────────────────┘</code></pre>
 <p>The clean gateway win is the <strong>top-right: big schema, rarely
 used.</strong> The clean direct win is the <strong>whole left column:
 anything you use often</strong>, regardless of size, because latency and

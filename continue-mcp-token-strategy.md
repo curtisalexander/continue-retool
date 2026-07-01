@@ -107,16 +107,16 @@ it. You get the cost with none of the benefit.
 ### The 2×2
 
 ```text
-                    used OFTEN                 used RARELY
-                ┌───────────────────────┬───────────────────────┐
-  BIG schema    │  DIRECT               │  GATEWAY  ★            │
-                │  (worth its rent;     │  (biggest resting tax  │
-                │   gateway saves ~0)   │   for least benefit)   │
-                ├───────────────────────┼───────────────────────┤
-  SMALL schema  │  DIRECT               │  either — lean GATEWAY  │
-                │  (cheap; latency      │   if it's part of a     │
-                │   matters more)       │   large tail            │
-                └───────────────────────┴───────────────────────┘
+                        used OFTEN               used RARELY
+                ┌─────────────────────────┬─────────────────────────┐
+  BIG schema    │  DIRECT                 │  GATEWAY  *             │
+                │  (worth its rent;       │  (biggest resting tax   │
+                │   gateway saves ~0)     │   for least benefit)    │
+                ├─────────────────────────┼─────────────────────────┤
+  SMALL schema  │  DIRECT                 │  either — lean GATEWAY  │
+                │  (cheap; latency        │  if it's part of a      │
+                │   matters more)         │   large tail            │
+                └─────────────────────────┴─────────────────────────┘
 ```
 
 The clean gateway win is the **top-right: big schema, rarely used.** The clean

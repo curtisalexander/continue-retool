@@ -57,24 +57,24 @@ promote a tool to direct registration the moment its per-hop latency annoys you.
 ## 2. Design — how it works
 
 ```text
-        ┌──────────────┐  connects to ONLY the gateway
-        │  Continue    │─────────────┐   (3 schemas at rest)
-        └──────────────┘             v
+        ┌──────────────┐
+        │ Continue     │─────────────┐  connects to ONLY the gateway
+        └──────────────┘             v  (3 schemas at rest)
                             ┌───────────────────────┐
-                            │   gateway-mcp (this)   │
-                            │  ┌─────────────────┐   │
-                            │  │  in-mem catalog │   │  built at startup from
-                            │  │ name->summary,  │   │  each downstream's
-                            │  │ schema, server  │   │  tools/list
-                            │  └─────────────────┘   │
-                            │  search / describe /   │
-                            │  call  (MCP *server*)  │
-                            │                        │
-                            │  MCP *client* to ↓ ↓ ↓ │
-                            └───┬─────────┬────────┬─┘
-                                │ stdio   │ stdio  │ stdio
-                                v         v        v
-                          shell-mcp   search-mcp  edit-mcp   … (any number)
+                            │  gateway-mcp (this)   │
+                            │  ┌─────────────────┐  │
+                            │  │ in-mem catalog  │  │ built at startup from
+                            │  │ name->summary,  │  │ each downstream's
+                            │  │ schema, server  │  │ tools/list
+                            │  └─────────────────┘  │
+                            │  search / describe /  │
+                            │  call  (MCP *server*) │
+                            │                       │
+                            │  MCP *client* to v v v│
+                            └───┬───────┬───────┬───┘
+                                │ stdio │ stdio │ stdio
+                                v       v       v
+                           shell-mcp   search-mcp  edit-mcp   … (any number)
 ```
 
 **The gateway is both an MCP server and an MCP client.** To Continue it's a server

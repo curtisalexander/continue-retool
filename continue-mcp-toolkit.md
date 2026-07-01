@@ -50,37 +50,37 @@ place to put code whose return value the agent already knows how to consume.
 Continue's Agent mode is a standard **tool-calling loop**. Three moving parts:
 
 ```text
-   ┌──────────────────────────────────────────────────────────────┐
-   │                    CONTINUE EXTENSION (VS Code)                │
-   │                                                                │
-   │   your message ──┐                                             │
-   │                  v                                             │
-   │        ┌───────────────────┐   tools[] (JSON schemas)          │
-   │        │  request builder  │───────────────┐                  │
-   │        └───────────────────┘               v                  │
-   │                                     ┌───────────────┐          │
-   │                                     │   THE LLM     │  (your   │
-   │                                     │  (API endpoint)│  corp    │
-   │                                     └───────┬───────┘  endpoint)│
-   │                                             │ tool_call         │
-   │                  ┌──────────────────────────┘                  │
-   │                  v                                             │
-   │        ┌───────────────────┐   permission gate (Ask/Auto/Excl) │
-   │        │  tool dispatcher  │                                    │
-   │        └─────────┬─────────┘                                    │
-   │        built-in? │  MCP?                                        │
-   │           ┌──────┴───────┐                                      │
-   │           v              v                                      │
-   │   read_file, edit,   ┌────────────────┐                        │
-   │   run_terminal_cmd   │  MCP client    │── stdio/http ──▶ YOUR   │
-   │   (compiled in)      └────────────────┘                 MCP    │
-   │           │              │                              SERVER │
-   │           └──────┬───────┘                                     │
-   │                  v  tool result (string/content)               │
-   │        ┌───────────────────┐                                   │
-   │        │  appended to msgs │──▶ loop back to the LLM ──────────┤
-   │        └───────────────────┘                                   │
-   └──────────────────────────────────────────────────────────────┘
+   ┌────────────────────────────────────────────────────────────────────────┐
+   │                       CONTINUE EXTENSION (VS Code)                     │
+   │                                                                        │
+   │    your message ──┐                                                    │
+   │                   v                                                    │
+   │         ┌───────────────────┐                                          │
+   │         │ request builder   │───────────────┐   tools[] (JSON schemas) │
+   │         └───────────────────┘               v                          │
+   │                                      ┌────────────────┐                │
+   │                                      │   THE LLM      │  (your         │
+   │                                      │ (API endpoint) │  corp          │
+   │                                      └───────┬────────┘  endpoint)     │
+   │                                              │ tool_call               │
+   │                   ┌──────────────────────────┘                         │
+   │                   v                                                    │
+   │         ┌───────────────────┐                                          │
+   │         │ tool dispatcher   │  permission gate (Ask/Auto/Excl)         │
+   │         └─────────┬─────────┘                                          │
+   │         built-in? │  MCP?                                              │
+   │            ┌──────┴───────┐                                            │
+   │            v              v                                            │
+   │    read_file, edit,   ┌────────────────┐                               │
+   │    run_terminal_cmd   │ MCP client     │ ── stdio/http ──> YOUR        │
+   │    (compiled in)      └────────────────┘                 MCP           │
+   │            │              │                            SERVER          │
+   │            └──────┬───────┘                                            │
+   │                   v  tool result (string/content)                      │
+   │         ┌───────────────────┐                                          │
+   │         │ appended to msgs  │  ──> loop back to the LLM                │
+   │         └───────────────────┘                                          │
+   └────────────────────────────────────────────────────────────────────────┘
 ```
 
 Step by step, the way Continue documents it:
@@ -324,18 +324,18 @@ Python is the thin MCP-facing shell; the whole thing ships as a wheel installed 
 `uv` — no Rust toolchain on the target machine.**
 
 ```text
-   ┌─────────────────────────────────────────────┐
+   ┌──────────────────────────────────────────────┐
    │  wheel (built by maturin, installed by uv)   │
    │                                              │
-   │   shell_mcp/  (Python)                        │
-   │     server.py   ── FastMCP tools ────┐        │
-   │                                       │ calls  │
-   │   _core  (Rust, compiled via PyO3) ◀──┘        │
-   │     spawn_group(cmd) -> handle                 │
-   │     read(handle, since) -> bytes               │
-   │     kill_tree(handle)                          │
-   │     (Job Objects on Windows, setsid on Unix)   │
-   └─────────────────────────────────────────────┘
+   │   shell_mcp/  (Python)                       │
+   │     server.py   ── FastMCP tools ────┐       │
+   │                                      │ calls │
+   │   _core  (Rust, compiled via PyO3) <─┘       │
+   │     spawn_group(cmd) -> handle               │
+   │     read(handle, since) -> bytes             │
+   │     kill_tree(handle)                        │
+   │     (Job Objects on Windows, setsid on Unix) │
+   └──────────────────────────────────────────────┘
 ```
 
 What Rust actually buys you *here specifically*:

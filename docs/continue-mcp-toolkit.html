@@ -211,37 +211,37 @@ works in the Continue extension</h2>
 <h3 id="1a-the-mental-model">1a. The mental model</h3>
 <p>Continue's Agent mode is a standard <strong>tool-calling
 loop</strong>. Three moving parts:</p>
-<pre class="text"><code>   ┌──────────────────────────────────────────────────────────────┐
-   │                    CONTINUE EXTENSION (VS Code)                │
-   │                                                                │
-   │   your message ──┐                                             │
-   │                  v                                             │
-   │        ┌───────────────────┐   tools[] (JSON schemas)          │
-   │        │  request builder  │───────────────┐                  │
-   │        └───────────────────┘               v                  │
-   │                                     ┌───────────────┐          │
-   │                                     │   THE LLM     │  (your   │
-   │                                     │  (API endpoint)│  corp    │
-   │                                     └───────┬───────┘  endpoint)│
-   │                                             │ tool_call         │
-   │                  ┌──────────────────────────┘                  │
-   │                  v                                             │
-   │        ┌───────────────────┐   permission gate (Ask/Auto/Excl) │
-   │        │  tool dispatcher  │                                    │
-   │        └─────────┬─────────┘                                    │
-   │        built-in? │  MCP?                                        │
-   │           ┌──────┴───────┐                                      │
-   │           v              v                                      │
-   │   read_file, edit,   ┌────────────────┐                        │
-   │   run_terminal_cmd   │  MCP client    │── stdio/http ──▶ YOUR   │
-   │   (compiled in)      └────────────────┘                 MCP    │
-   │           │              │                              SERVER │
-   │           └──────┬───────┘                                     │
-   │                  v  tool result (string/content)               │
-   │        ┌───────────────────┐                                   │
-   │        │  appended to msgs │──▶ loop back to the LLM ──────────┤
-   │        └───────────────────┘                                   │
-   └──────────────────────────────────────────────────────────────┘</code></pre>
+<pre class="text"><code>   ┌────────────────────────────────────────────────────────────────────────┐
+   │                       CONTINUE EXTENSION (VS Code)                     │
+   │                                                                        │
+   │    your message ──┐                                                    │
+   │                   v                                                    │
+   │         ┌───────────────────┐                                          │
+   │         │ request builder   │───────────────┐   tools[] (JSON schemas) │
+   │         └───────────────────┘               v                          │
+   │                                      ┌────────────────┐                │
+   │                                      │   THE LLM      │  (your         │
+   │                                      │ (API endpoint) │  corp          │
+   │                                      └───────┬────────┘  endpoint)     │
+   │                                              │ tool_call               │
+   │                   ┌──────────────────────────┘                         │
+   │                   v                                                    │
+   │         ┌───────────────────┐                                          │
+   │         │ tool dispatcher   │  permission gate (Ask/Auto/Excl)         │
+   │         └─────────┬─────────┘                                          │
+   │         built-in? │  MCP?                                              │
+   │            ┌──────┴───────┐                                            │
+   │            v              v                                            │
+   │    read_file, edit,   ┌────────────────┐                               │
+   │    run_terminal_cmd   │ MCP client     │ ── stdio/http ──&gt; YOUR        │
+   │    (compiled in)      └────────────────┘                 MCP           │
+   │            │              │                            SERVER          │
+   │            └──────┬───────┘                                            │
+   │                   v  tool result (string/content)                      │
+   │         ┌───────────────────┐                                          │
+   │         │ appended to msgs  │  ──&gt; loop back to the LLM                │
+   │         └───────────────────┘                                          │
+   └────────────────────────────────────────────────────────────────────────┘</code></pre>
 <p>Step by step, the way Continue documents it:</p>
 <ol type="1">
 <li><strong>Tool advertisement.</strong> On each agent request, Continue
@@ -600,18 +600,18 @@ Python shell over a Rust core (the maturin pattern)</h3>
 does the gnarly systems work; Python is the thin MCP-facing shell; the
 whole thing ships as a wheel installed by <code>uv</code> — no Rust
 toolchain on the target machine.</strong></p>
-<pre class="text"><code>   ┌─────────────────────────────────────────────┐
+<pre class="text"><code>   ┌──────────────────────────────────────────────┐
    │  wheel (built by maturin, installed by uv)   │
    │                                              │
-   │   shell_mcp/  (Python)                        │
-   │     server.py   ── FastMCP tools ────┐        │
-   │                                       │ calls  │
-   │   _core  (Rust, compiled via PyO3) ◀──┘        │
-   │     spawn_group(cmd) -&gt; handle                 │
-   │     read(handle, since) -&gt; bytes               │
-   │     kill_tree(handle)                          │
-   │     (Job Objects on Windows, setsid on Unix)   │
-   └─────────────────────────────────────────────┘</code></pre>
+   │   shell_mcp/  (Python)                       │
+   │     server.py   ── FastMCP tools ────┐       │
+   │                                      │ calls │
+   │   _core  (Rust, compiled via PyO3) &lt;─┘       │
+   │     spawn_group(cmd) -&gt; handle               │
+   │     read(handle, since) -&gt; bytes             │
+   │     kill_tree(handle)                        │
+   │     (Job Objects on Windows, setsid on Unix) │
+   └──────────────────────────────────────────────┘</code></pre>
 <p>What Rust actually buys you <em>here specifically</em>:</p>
 <ul>
 <li><strong>Rock-solid tree kill</strong>, especially Windows Job
