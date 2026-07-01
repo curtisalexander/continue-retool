@@ -26,6 +26,19 @@ one MCP, you can build the rest.
 See [`continue-mcp/README.md`](continue-mcp/README.md) for the order of
 operations and per-server setup.
 
+## The site
+
+The [project site](https://curtisalexander.github.io/continue-retool/) is served
+from `docs/` via GitHub Pages. The two design docs are rendered from their
+markdown sources with [pandoc](https://pandoc.org) — after editing a `.md`,
+regenerate the HTML with:
+
+```bash
+./build/build-docs.sh   # requires pandoc; run from anywhere
+```
+
+`docs/index.html` (the landing page) is hand-maintained and not regenerated.
+
 ## License
 
 [MIT](LICENSE)
