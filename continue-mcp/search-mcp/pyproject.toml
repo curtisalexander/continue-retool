@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "search-mcp"
+version = "0.1.0"
+description = "ripgrep-backed search MCP for Continue.dev (replaces built-in Grep/Glob search)"
+requires-python = ">=3.11"
+dependencies = ["fastmcp>=2"]
+# Note: ripgrep itself is a separate tool install, not a Python dependency:
+#   uv tool install ripgrep
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+search-mcp = "search_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["search_mcp"]

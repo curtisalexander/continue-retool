@@ -1,0 +1,20 @@
+{
+  "_comment": "Downstream MCP servers the gateway aggregates. Continue connects ONLY to the gateway; the gateway connects to these. Server names must not contain '_'. cwd is relative to this file (adjust to absolute paths if you run the gateway from elsewhere).",
+  "servers": {
+    "shell": {
+      "command": "uv",
+      "args": ["run", "shell-mcp"],
+      "cwd": "../shell-mcp"
+    },
+    "search": {
+      "command": "uv",
+      "args": ["run", "search-mcp"],
+      "cwd": "../search-mcp"
+    },
+    "edit": {
+      "command": "uv",
+      "args": ["run", "edit-mcp"],
+      "cwd": "../edit-mcp"
+    }
+  }
+}

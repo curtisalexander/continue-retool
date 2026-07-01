@@ -1,0 +1,11 @@
+# Drop into your workspace's .continue/mcpServers/ directory.
+#
+# Then in Continue's Agent tool settings:
+#   * set the built-in  Edit file    policy to  Excluded
+#   * set the built-in  Create file  policy to  Excluded
+#   * set  edit.edit / edit.multi_edit / edit.create_file  to  Ask First
+#     (these write to disk — keep a human in the loop until you trust them)
+name: edit
+command: uv
+args: ["run", "edit-mcp"]
+# cwd: /absolute/path/to/continue-mcp/edit-mcp   # uncomment; point at this dir

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hello-mcp"
+version = "0.1.0"
+description = "MCP enablement check for Continue.dev (ping/echo/whoami)"
+requires-python = ">=3.11"
+dependencies = ["fastmcp>=2"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+hello-mcp = "hello_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hello_mcp"]

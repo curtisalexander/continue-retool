@@ -1,0 +1,12 @@
+# Drop this into your workspace's .continue/mcpServers/ directory.
+# Then, in Continue's Agent tool settings:
+#   * set the built-in  run_terminal_command  policy to  Excluded
+#   * set  shell.start / shell.run / shell.kill ... to  Ask First (or Automatic
+#     once you trust them)
+name: shell
+command: uv
+args: ["run", "shell-mcp"]
+# cwd: /absolute/path/to/continue-mcp/shell-mcp   # uncomment; point at this dir
+env:
+  SHELL_MCP_DEFAULT_TIMEOUT: "120"    # seconds; server kills + reports on deadline
+  SHELL_MCP_MAX_BUFFER: "262144"      # per-stream byte cap before mid-truncation

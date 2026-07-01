@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.eggs/
+*.egg-info/
+build/
+dist/
+
+# Rust / maturin
+target/
+
+# Environments & local config
+.env
+.env.*
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

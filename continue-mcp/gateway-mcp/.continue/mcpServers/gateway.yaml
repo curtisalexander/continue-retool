@@ -1,0 +1,17 @@
+# Drop into your workspace's .continue/mcpServers/ directory.
+#
+# IMPORTANT: when you use the gateway, register ONLY this file with Continue.
+# Do NOT also add shell.yaml / search.yaml / edit.yaml — the gateway connects to
+# those downstream servers itself. Adding them to Continue too would re-load all
+# their schemas and defeat the entire token-saving purpose.
+#
+# You still Exclude the built-in Continue tools you're replacing
+# (run_terminal_command, Grep/Glob search, Edit/Create file). Their replacements
+# now live behind the gateway, reachable via gateway.search -> describe -> call.
+name: gateway
+command: uv
+args: ["run", "gateway-mcp"]
+# cwd: /absolute/path/to/continue-mcp/gateway-mcp   # uncomment; point at this dir
+env:
+  # GATEWAY_CONFIG: /absolute/path/to/gateway.config.json   # optional override
+  {}

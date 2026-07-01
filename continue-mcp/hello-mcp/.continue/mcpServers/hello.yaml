@@ -1,0 +1,8 @@
+# Enablement check. Drop into your workspace's .continue/mcpServers/ directory,
+# reload Continue, open Agent mode, and ask it to call the `ping` tool.
+#   * "pong" back  -> MCP is enabled; proceed to shell-mcp.
+#   * tool missing -> MCP is disabled or config is locked by IT. Stop and find out.
+name: hello
+command: uv
+args: ["run", "hello-mcp"]
+# cwd: /absolute/path/to/continue-mcp/hello-mcp   # uncomment; point at this dir
