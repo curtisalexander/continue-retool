@@ -148,7 +148,8 @@ async def start(
 ) -> dict:
     """Start a shell command in the background. Returns instantly with a job_id;
     poll it with output()/poll(), stop it with kill(). shell = bash|pwsh|powershell|cmd."""
-    argv = build_argv(cmd, shell)
+    shell_name = (shell or ("pwsh" if IS_WINDOWS else "bash")).lower()
+    argv = build_argv(cmd, shell_name)  # validates shell_name even on the cmd path
     # cwd defaults to the workspace, and relative cwd resolves against it — the
     # server's own cwd (wherever Continue launched it) is never the implicit base.
     workspace = os.environ.get("MCP_WORKSPACE")
@@ -163,13 +164,19 @@ async def start(
     else:
         kwargs["start_new_session"] = True  # setsid -> own process group
 
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
+    common: dict = dict(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         **kwargs,
     )
+    if IS_WINDOWS and shell_name == "cmd":
+        # cmd.exe parses its command line with its own rules; the \"-escaping
+        # that list-based spawning applies breaks any quoted command. Hand
+        # cmd.exe the raw string instead (COMSPEC /c passthrough).
+        proc = await asyncio.create_subprocess_shell(cmd, **common)
+    else:
+        proc = await asyncio.create_subprocess_exec(*argv, **common)
     job = Job(job_id=_next_id(), cmd=cmd, proc=proc, started=time.monotonic())
     job._readers = [
         asyncio.create_task(_drain(proc.stdout, job.stdout)),
