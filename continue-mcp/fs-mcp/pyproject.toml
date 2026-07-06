@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fs-mcp"
+version = "0.1.0"
+description = "Line-ranged file read + directory listing MCP for Continue.dev (replaces built-in Read file / List dir)"
+requires-python = ">=3.11"
+dependencies = ["fastmcp>=3,<4"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+fs-mcp = "fs_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fs_mcp"]
