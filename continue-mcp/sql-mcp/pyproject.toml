@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sql-mcp"
+version = "0.1.0"
+description = "SQL format/lint MCP for Continue.dev, backed by sqruff (Snowflake dialect, lowercase, leading commas)"
+requires-python = ">=3.11"
+dependencies = ["fastmcp>=3,<4", "sqruff>=0.39"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+sql-mcp = "sql_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sql_mcp"]

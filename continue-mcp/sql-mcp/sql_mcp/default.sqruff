@@ -1,0 +1,24 @@
+# House style: Snowflake, lowercase everything, leading commas.
+# Override per install with SQL_MCP_CONFIG=/path/to/your/.sqruff
+[sqruff]
+dialect = snowflake
+rules = core
+
+[sqruff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqruff:rules:capitalisation.identifiers]
+extended_capitalisation_policy = lower
+
+[sqruff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower
+
+[sqruff:rules:capitalisation.literals]
+capitalisation_policy = lower
+
+[sqruff:rules:capitalisation.types]
+extended_capitalisation_policy = lower
+
+[sqruff:layout:type:comma]
+line_position = leading
+spacing_before = touch
