@@ -100,9 +100,9 @@ The ouroboros — a framework + skill that builds new tools</a></li>
 <li><a href="#7-recommended-foundations-the-order-id-build-in"
 id="toc-7-recommended-foundations-the-order-id-build-in">7. Recommended
 foundations (the order I'd build in)</a></li>
-<li><a href="#8-open-questions-i-need-your-read-on-these"
-id="toc-8-open-questions-i-need-your-read-on-these">8. Open questions (I
-need your read on these)</a></li>
+<li><a href="#8-open-questions--status-as-of-2026-07-06"
+id="toc-8-open-questions--status-as-of-2026-07-06">8. Open questions —
+status as of 2026-07-06</a></li>
 <li><a href="#sources" id="toc-sources">Sources</a></li>
 </ul></li>
 </ul>
@@ -156,11 +156,11 @@ the harness — Python is not the constraint here.</td>
 </tr>
 <tr>
 <td><strong>When to add Rust</strong></td>
-<td>Selectively, via <strong>maturin/PyO3</strong>, for genuinely hot or
-OS-gnarly paths (huge-output ring buffers, PTYs, robust cross-platform
-process-group kill, fast search/parse tools).</td>
-<td>Keep the "install like a Python tool via <code>uv</code>/wheel"
-ergonomics; get native speed only where it matters.</td>
+<td><del>Selectively, via maturin/PyO3</del> <strong>Never (decision
+log, 2026-07-06).</strong> The toolkit is pure Python; CPU-heavy work
+shells out to proven native binaries (e.g. <code>rg</code>).</td>
+<td>Simpler builds, one language, and the profiler never made the case.
+§3b/§4 kept as historical analysis.</td>
 </tr>
 <tr>
 <td><strong>Token minimization</strong></td>
@@ -179,25 +179,96 @@ This is your ouroboros.</td>
 </tr>
 </tbody>
 </table>
-<h3 id="decisions-locked-2026-07-01">Decisions locked (2026-07-01)</h3>
-<p>Three foundational choices are settled; the rest of this doc assumes
-them:</p>
+<h3 id="decision-log">Decision log</h3>
+<p>Dated, newest-first. Where a later entry contradicts earlier prose in
+this doc, <strong>the decision log wins</strong> — superseded sections
+are kept for the reasoning, not as the plan.</p>
+<p><strong>2026-07-06 (evening)</strong></p>
+<ul>
+<li><strong><code>notes</code> built — repo-local, never the home
+directory.</strong> Files-plus-thin-MCP design: plain markdown notes in
+<code>&lt;repo-root&gt;/.continue-notes/</code> (root found by walking
+up from <code>MCP_WORKSPACE</code> to <code>.git</code>), with
+<code>list</code> as a cheap index and <code>read</code> on demand —
+progressive disclosure applied to memory. Discovery is a companion
+Continue rule (<code>rules/notes.md</code>); a <code>rule-rule.md</code>
+meta-rule enforces token discipline on rule authoring and the
+notes→rules promotion etiquette. Division of labor: <strong>rules are
+policy, notes are memory.</strong></li>
+<li><strong>Path resolution fixed toolkit-wide
+(<code>MCP_WORKSPACE</code>).</strong> Previously the yamls set
+<code>cwd</code> to each package dir (so <code>uv run</code> worked),
+which silently made every relative path — and shell's default working
+dir — resolve into the toolkit checkout instead of the user's project.
+Now: yamls use <code>uv run --project &lt;pkg&gt;</code> (freeing cwd),
+and shell/search/edit/fs/notes all resolve relative paths against
+<code>MCP_WORKSPACE</code>, falling back to server cwd. The gateway also
+now resolves config-relative <code>cwd</code> entries against the config
+file, as its comment always claimed.</li>
+</ul>
+<p><strong>2026-07-06 (later the same day)</strong></p>
+<ul>
+<li><strong><code>sql</code> and <code>fs</code> built;
+<code>http</code> deferred; <code>repo</code> deferred with a
+caveat.</strong>
+<ul>
+<li><code>sql-mcp</code> wraps <strong>sqruff</strong> (the Rust-built
+sqlfluff successor; prebuilt PyPI wheels, so it's a plain dependency).
+House style: Snowflake dialect, lowercase everything, leading commas
+(<code>sql_mcp/default.sqruff</code>).</li>
+<li><code>fs-mcp</code> replaces the built-in Read file / List dir: the
+stock read tool kept pushing the agent into writing throwaway
+PowerShell/Python scripts to inspect files; line-ranged numbered reads
+with paging fix that.</li>
+<li><code>http</code>/<code>api</code> is deferred until the corporate
+machine is accessible again.</li>
+<li><code>repo</code> is deferred — with the explicit caveat that if
+tree-sitter-in-Rust would make it dramatically faster, the no-Rust
+decision below may be revisited <em>for that tool only</em>. (Note
+sqruff already sets the precedent that consuming someone else's Rust
+binary is always fine — the decision is about not <em>building</em> Rust
+ourselves.)</li>
+<li><code>notes</code> is pending a design discussion
+(notes-vs-Continue-rules).</li>
+</ul></li>
+</ul>
+<p><strong>2026-07-06</strong></p>
+<ul>
+<li><strong>No Rust, no maturin — for now, treated as never.</strong>
+The entire toolkit is pure Python (hatchling + <code>uv</code>); the
+maturin backend was removed from shell-mcp. CPU-heavy work is done by
+shelling out to proven native binaries (the way search-mcp calls
+<code>rg</code>), not by compiled extensions. §3b, §4, and the Rust
+references in §6 are <strong>historical analysis</strong>, superseded by
+this entry.</li>
+<li><strong>Windows is a day-one target</strong>, confirmed.
+<code>taskkill /T /F</code> <em>is</em> the Windows tree-kill
+implementation (not a fallback awaiting a Job-Object core). CI runs the
+full suite on <code>windows-latest</code> — the project's only Windows
+testbed.</li>
+<li><strong>All testing is deterministic — no LLM in the loop.</strong>
+Servers are exercised through fastmcp's in-process <code>Client</code>
+(<code>tests/test_mcp_surface.py</code> in each package), which drives
+the same MCP boundary Continue uses: list tools, call them, check
+results. The Continue CLI / extension is <em>not</em> part of the test
+story (no API key, no hub access); LLM tool-selection behavior is
+accepted as untested.</li>
+<li><strong>Transitioning from sketches to daily-driver
+software.</strong> fastmcp is pinned (<code>&gt;=3,&lt;4</code>),
+<code>uv.lock</code> files are committed, CI runs a 3-OS matrix.</li>
+</ul>
+<p><strong>2026-07-01</strong></p>
 <ul>
 <li><strong>Cross-platform, equally (Windows + macOS/Linux).</strong>
-The terminal MCP must work on both from day one. Consequence: day-one
-kill uses <code>killpg</code>+<code>setsid</code> on Unix and a
-<code>taskkill /T /F</code> fallback on Windows; a <em>unified</em> Rust
-Job-Object kill is the documented upgrade (§3b/§4), not a launch
-blocker.</li>
-<li><strong>Pure-Python first, Rust added selectively.</strong> Prove
-the shell MCP shape in async Python (option B), then move a hot/gnarly
-path into a maturin core only when a profiler — not a hunch — says so.
-The Windows tree-kill is the natural first Rust candidate <em>once the
-Python fallback is proven</em>.</li>
+The terminal MCP must work on both from day one.</li>
+<li><strong>Pure-Python first.</strong> Prove the shell MCP shape in
+async Python (option B). <em>(The "add Rust selectively later" half of
+this entry was superseded on 2026-07-06: no Rust.)</em></li>
 <li><strong>Toolkit scale TBD → build gateway-ready, not
 gateway-now.</strong> Skip the gateway MCP initially, but keep tool
 descriptions terse and the factory skill gateway-aware so §5b can be
-added later with zero rework.</li>
+added later with zero rework. <em>(Reaffirmed 2026-07-06: the gateway
+stays on the shelf until ~8–10 tail tools exist.)</em></li>
 </ul>
 <p>The single most important idea in this whole doc: <strong>in
 Continue, every tool result — built-in or MCP — is already injected back
@@ -596,6 +667,11 @@ background-job model plus async draining sidesteps it, because no tool
 call ever blocks for long.</p>
 <h3 id="3b-c--python-shell-over-a-rust-core-the-maturin-pattern">3b. C —
 Python shell over a Rust core (the maturin pattern)</h3>
+<blockquote>
+<p><strong>Historical (superseded 2026-07-06):</strong> the decision log
+settled on <em>no Rust, no maturin</em>. This section is kept for the
+reasoning that led there.</p>
+</blockquote>
 <p>This is your <code>rip</code> pattern applied to MCP: <strong>Rust
 does the gnarly systems work; Python is the thin MCP-facing shell; the
 whole thing ships as a wheel installed by <code>uv</code> — no Rust
@@ -643,6 +719,13 @@ the loop.</p>
 <hr />
 <h2 id="4-does-the-maturin-trojan-horse-make-higher-performing-mcps">4.
 Does the maturin "Trojan horse" make higher-performing MCPs?</h2>
+<blockquote>
+<p><strong>Historical (superseded 2026-07-06):</strong> see the decision
+log — no Rust, no maturin. The honest conclusion below ("the win is real
+only for CPU-bound tools") is part of why: for this toolkit, shelling
+out to native binaries covers the CPU-bound cases without a second
+language.</p>
+</blockquote>
 <p>Short answer: <strong>yes, but be honest about <em>which</em>
 MCPs.</strong> The pattern is excellent; the performance win is real
 <em>only for CPU-bound or syscall-gnarly tools</em>, not for I/O-bound
@@ -826,22 +909,29 @@ quotes, dashes, exotic spaces, trailing whitespace, CRLF/BOM) that maps
 back to real line ranges so untouched lines keep their bytes. Fixes the
 non-ASCII match failures the stock tool hits. 30+ pure-stdlib tests, all
 green.</li>
-<li><strong><code>fs</code></strong> — read/list with <em>your</em>
-conventions (line-ranged reads, terse output, workspace-relative paths)
-to cut the verbosity of the built-in read tools.</li>
+<li><strong><code>fs</code> — ready in
+<code>continue-mcp/fs-mcp/</code>.</strong> Line-ranged numbered reads
+with built-in paging and hard caps, plus depth-limited directory
+listings. Replaces the built-in Read file / List dir tools, which kept
+pushing the agent into writing throwaway scripts to inspect files.</li>
 <li><strong><code>repo</code></strong> — repo-map / symbol index /
-"where is X defined" backed by tree-sitter (Rust). Replaces expensive
-codebase context with targeted lookups.</li>
-<li><strong><code>sql</code></strong> — your Snowflake formatter (see
-<code>snowflake-formatter-brainstorm.md</code>) exposed as a
-<code>format</code>/<code>lint</code> tool; the maturin pattern is
-already the plan there.</li>
-<li><strong><code>notes</code>/<code>memory</code></strong> — a
-scratchpad the agent can write to and read back (stateful MCP; trivially
-injects prior output into later turns).</li>
+"where is X defined." Deferred; see the decision log for the
+tree-sitter/Rust caveat.</li>
+<li><strong><code>sql</code> — ready in
+<code>continue-mcp/sql-mcp/</code>.</strong>
+<code>format</code>/<code>lint</code> backed by sqruff (Rust binary,
+PyPI wheels, plain dependency). House style: Snowflake, lowercase,
+leading commas.</li>
+<li><strong><code>notes</code> — ready in
+<code>continue-mcp/notes-mcp/</code>.</strong> Repo-local agent memory:
+one markdown file per note under
+<code>&lt;repo-root&gt;/.continue-notes/</code>, a cheap
+<code>list()</code> index, contents on demand. Paired with
+<code>rules/notes.md</code> — the discovery rule that makes the agent
+actually consult it.</li>
 <li><strong><code>http</code>/<code>api</code></strong> — thin,
-allow-listed corporate API callers (network-bound, so pure Python — no
-Rust needed).</li>
+allow-listed corporate API callers. Deferred until the corporate machine
+is accessible.</li>
 </ol>
 <p>Every one of these is the <strong>same shape</strong>: a FastMCP
 server, a handful of terse tools, optional Rust core for the CPU-bound
@@ -856,17 +946,16 @@ let an LLM fill the template correctly). Because every FastMCP tool is
 <em>one decorated function</em>, codegen is genuinely easy here.</p>
 <h3 id="6a-the-template-cookiecutter">6a. The template
 (cookiecutter)</h3>
-<p>One repo layout, reused for every tool. Pure-Python tools use only
-the top half; CPU-bound tools add the Rust core.</p>
-<pre class="text"><code>mcp-&lt;name&gt;/
-  pyproject.toml            # maturin backend, console-script entry, fastmcp dep
-  Cargo.toml                # only if a Rust core is needed
-  src/lib.rs                # Rust core (optional)
+<p>One repo layout, reused for every tool — pure Python, hatchling
+build, <code>uv</code> run (search-mcp is the reference
+implementation):</p>
+<pre class="text"><code>&lt;name&gt;-mcp/
+  pyproject.toml            # hatchling backend, console-script entry, fastmcp dep
   &lt;name&gt;_mcp/
     server.py               # FastMCP() + @mcp.tool functions (terse descriptions)
-    _core.pyi               # type stubs for the Rust extension (optional)
   tests/
     test_tools.py           # golden tests per tool
+    test_mcp_surface.py     # deterministic MCP-protocol tests (fastmcp Client)
   .continue/
     mcpServers/&lt;name&gt;.yaml   # ready-to-drop-in Continue wiring
   README.md                 # one paragraph + the tool list</code></pre>
@@ -875,17 +964,17 @@ the top half; CPU-bound tools add the Rust core.</p>
 <p>A Claude Code / agent <strong>skill</strong> that, given a one-line
 spec ("a tool that runs Snowflake queries and returns rows as
 markdown"), does this:</p>
-<pre class="text"><code>1. Ask 2–3 clarifying questions (inputs? outputs? side effects? CPU-bound → Rust?)
-2. Copy the cookiecutter template.
+<pre class="text"><code>1. Ask 2–3 clarifying questions (inputs? outputs? side effects? hot tool or tail?)
+2. Copy the template layout (search-mcp is the reference).
 3. Write the @mcp.tool function(s) with TERSE descriptions (enforce a token budget:
-   name + ≤2 sentence description + minimal schema).
-4. If CPU-bound, stub the Rust core and the PyO3 binding.
-5. Generate golden tests and run them (this is where your shell-MCP eats its own
+   name + ≤2 sentence description + minimal schema). CPU-heavy work shells out to
+   a proven native binary, the way search-mcp calls rg.
+4. Generate golden tests and run them (this is where your shell-MCP eats its own
    dog food — the generator uses the terminal tool to run the tests).
-6. Emit the .continue/mcpServers/&lt;name&gt;.yaml wiring and print the exact tool-policy
+5. Emit the .continue/mcpServers/&lt;name&gt;.yaml wiring and print the exact tool-policy
    steps (&quot;set X to Automatic, Exclude built-in Y&quot;).
-7. Register the tool in the gateway MCP&#39;s catalog (§5b) so it&#39;s discoverable with
-   zero resting token cost.</code></pre>
+6. Register it for discovery: hot tools register directly with Continue; tail
+   tools get a server block in gateway-mcp/gateway.config.json (§5b) — never both.</code></pre>
 <p>The self-referential ("ouroboros") part: step 5 runs the tests
 <strong>through your own <code>shell</code> MCP</strong>, and step 7
 registers the new tool into the <strong>gateway</strong> so the
@@ -898,12 +987,16 @@ that's building the <em>next</em> one.</p>
 <p><strong>You are a tool factory.</strong> Given a spec, produce a
 FastMCP tool from the template. Rules: (1) descriptions ≤ 2 sentences
 and ≤ ~80 tokens — the agent pays for these on every request; (2) prefer
-one flexible tool over three narrow ones; (3) mark CPU-bound work for a
-Rust core, I/O-bound work stays Python; (4) every tool ships with a
-golden test and you must run it via <code>shell.run</code> before
-declaring done; (5) register the tool in the gateway catalog. Output the
-file tree, the code, the test result, and the Continue wiring.</p>
+one flexible tool over three narrow ones; (3) pure Python only —
+CPU-heavy work shells out to a proven native binary; (4) every tool
+ships with a golden test and you must run it via <code>shell.run</code>
+before declaring done; (5) register hot tools directly with Continue and
+tail tools in gateway.config.json — never both. Output the file tree,
+the code, the test result, and the Continue wiring.</p>
 </blockquote>
+<p>(The live version of these instructions is
+<code>continue-mcp/skills/new-mcp-tool/SKILL.md</code>; when they drift,
+the SKILL.md is the source of truth.)</p>
 <h3 id="6c-why-this-is-the-right-foundation">6c. Why this is the right
 foundation</h3>
 <ul>
@@ -913,8 +1006,10 @@ the same test story. New tools are cheap.</li>
 <li><strong>Token discipline is enforced by the factory</strong>, not
 left to willpower — the skill <em>bakes in</em> the terse-description
 budget and gateway registration.</li>
-<li><strong>Native speed is opt-in</strong> — the Rust seam is in the
-template, dormant until a tool needs it.</li>
+<li><strong>Native speed comes from native binaries</strong> — CPU-bound
+tools shell out to proven executables (<code>rg</code> today; a
+formatter or tree-sitter CLI tomorrow) instead of adding a second
+language to the build.</li>
 <li><strong>Infinite expansion</strong> — because resting token cost is
 decoupled from tool count (gateway), you can grow the toolkit without
 growing the prompt.</li>
@@ -934,14 +1029,12 @@ invalidate the plan.</em></li>
 B)</strong> with the background-job model, process-group kill, timeout,
 and incremental <code>output</code>. Exclude the built-in
 <code>run_terminal_command</code>. This is 80% of the value.</li>
-<li><strong>Prove the pure-Python cross-platform kill on both
-OSes</strong> — <code>killpg</code> on Unix, <code>taskkill /T /F</code>
-on Windows — with a test that spawns a child-that-spawns- a-child and
-asserts the whole tree dies. Only <em>after</em> this is green do you
-add the maturin skeleton (copy from <code>rip</code>) and move Windows
-tree-kill into a unified Rust Job-Object implementation. This ordering
-matches your "pure-Python first, both OSes" decision: correctness in
-Python first, native unification second.</li>
+<li><strong>Prove the cross-platform kill on both OSes</strong> —
+<code>killpg</code> on Unix, <code>taskkill /T /F</code> on Windows —
+with a test that spawns a child-that-spawns- a-child and asserts the
+whole tree dies. The golden suite covers this; CI's
+<code>windows-latest</code> runner is where the Windows half is actually
+proven.</li>
 <li><strong><code>search</code> — ready in
 <code>continue-mcp/search-mcp/</code>.</strong> Replaces Continue's
 built-in Grep/Glob search by shelling out to <code>rg</code>
@@ -956,30 +1049,32 @@ the token math favors it.</li>
 skill.</strong> Now the toolkit builds itself.</li>
 </ol>
 <hr />
-<h2 id="8-open-questions-i-need-your-read-on-these">8. Open questions (I
-need your read on these)</h2>
+<h2 id="8-open-questions--status-as-of-2026-07-06">8. Open questions —
+status as of 2026-07-06</h2>
 <ol type="1">
-<li><strong>Is MCP enabled in your reskinned/corporate Continue
-build?</strong> (Deal-breaker if not — verify with the
-<code>hello</code> MCP first.) Do you control
-<code>.continue/config.yaml</code> and the per-tool policies, or are
-those locked by IT?</li>
-<li><strong>Primary OS for the developers using this</strong> — Windows,
-macOS, or both? This decides how hard the process-kill story is (Windows
-Job Objects push you toward a Rust core sooner) and whether PowerShell
-is the default shell.</li>
-<li><strong>Sync convenience vs. pure background model</strong> — do you
-want the simple <code>shell.run</code> one-liner alongside the job
-model, or keep the surface minimal?</li>
-<li><strong>How "live" does output injection need to be?</strong>
-Run-to-completion-then-inject (simplest) vs. true incremental streaming
-while the agent watches (the background model enables it, but the agent
-has to poll)?</li>
-<li><strong>Toolkit scale you're targeting</strong> — a handful of tools
-(skip the gateway) or dozens (build the gateway early)?</li>
-<li><strong>Rust appetite now vs. later</strong> — start pure-Python and
-add Rust selectively (my recommendation), or set up the maturin hybrid
-from commit one so the seam's always there?</li>
+<li><strong>Is MCP enabled in the reskinned/corporate Continue
+build?</strong> <em><strong>Still open — and deferred.</strong></em> The
+corporate machine (the only one with the extension) is not currently
+accessible; day-to-day validation happens deterministically via
+fastmcp's client instead (see the decision log). The <code>hello</code>
+MCP check remains the first thing to run when that machine is
+available.</li>
+<li><strong>Primary OS</strong> — <em><strong>answered: both, Windows
+day-one.</strong></em> PowerShell (<code>pwsh</code>, falling back to
+<code>powershell</code>) is the Windows default shell;
+<code>taskkill /T /F</code> is the Windows tree-kill.</li>
+<li><strong>Sync convenience vs. pure background model</strong> —
+<em><strong>answered: both.</strong></em> <code>shell.run</code> ships
+alongside the job model, implemented on top of it.</li>
+<li><strong>How "live" does output injection need to be?</strong> —
+<em><strong>answered: incremental.</strong></em>
+<code>output(since=cursor)</code> streaming is built and covered by the
+golden tests.</li>
+<li><strong>Toolkit scale</strong> — <em><strong>still
+open.</strong></em> Drives when (if ever) the gateway comes off the
+shelf; revisit after the core trio has been dogfooded daily.</li>
+<li><strong>Rust appetite</strong> — <em><strong>answered: none
+(decision log, 2026-07-06).</strong></em></li>
 </ol>
 <hr />
 <h2 id="sources">Sources</h2>

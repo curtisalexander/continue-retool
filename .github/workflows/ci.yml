@@ -1,0 +1,51 @@
+# Deterministic CI: every suite runs the servers directly and over the MCP
+# protocol via fastmcp's in-process Client — no LLM, no Continue install.
+# windows-latest is the project's only Windows testbed (tree-kill via taskkill).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # ripgrep is preinstalled on all GitHub-hosted runners; the search-mcp
+      # integration tests skip themselves if rg is ever missing.
+      - name: Run all test suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for d in hello-mcp shell-mcp search-mcp edit-mcp gateway-mcp sql-mcp fs-mcp notes-mcp; do
+            echo "::group::$d"
+            (cd "continue-mcp/$d" && uv run --extra test pytest -q) || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      - name: Installer smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/blank-project"
+          mkdir -p "$target"
+          # borrow hello-mcp's venv for a cross-platform python
+          uv run --project continue-mcp/hello-mcp python \
+            continue-mcp/install-workspace.py "$target"
+          test -f "$target/.continue/mcpServers/shell.yaml"
+          test -f "$target/.continue/rules/notes.md"
+          if grep -r "/absolute/path/to" "$target/.continue"; then
+            echo "unstamped placeholders remain" && exit 1
+          fi
