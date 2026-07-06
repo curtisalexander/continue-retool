@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "notes-mcp"
+version = "0.1.0"
+description = "Repo-local agent memory MCP for Continue.dev (index + one markdown file per note)"
+requires-python = ">=3.11"
+dependencies = ["fastmcp>=3,<4"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+notes-mcp = "notes_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["notes_mcp"]
