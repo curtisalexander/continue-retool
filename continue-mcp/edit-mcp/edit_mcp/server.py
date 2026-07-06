@@ -27,6 +27,15 @@ from .matcher import EditError, apply_edits, find_and_replace
 mcp = FastMCP("edit")
 
 
+def _resolve(path: str) -> str:
+    """Relative paths resolve against MCP_WORKSPACE (falls back to server cwd),
+    so they mean the same thing no matter where Continue launched this process."""
+    if os.path.isabs(path):
+        return path
+    base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
+    return os.path.join(base, path)
+
+
 # --- file IO that preserves bytes we don't touch ---------------------------
 def _read(path: str) -> str:
     # newline="" stops Python from translating line endings; the matcher handles
@@ -63,6 +72,7 @@ async def edit(
     falls back to a Unicode-normalized match (smart quotes, dashes, NBSP, accents,
     trailing whitespace, CRLF) so non-ASCII regions still match. old_string must be
     unique unless replace_all is set."""
+    path = _resolve(path)
     try:
         before = _read(path)
     except FileNotFoundError:
@@ -86,6 +96,7 @@ async def multi_edit(path: str, edits: list[dict]) -> dict:
     """Apply several edits to one file in a single write. `edits` is a list of
     {old_string, new_string, replace_all?}, applied in order (each sees the prior
     result). All must succeed or the file is left unchanged."""
+    path = _resolve(path)
     try:
         before = _read(path)
     except FileNotFoundError:
@@ -107,6 +118,7 @@ async def multi_edit(path: str, edits: list[dict]) -> dict:
 async def create_file(path: str, content: str, overwrite: bool = False) -> dict:
     """Create a new file with the given content. Fails if the file exists unless
     overwrite is set. Creates parent directories as needed."""
+    path = _resolve(path)
     if os.path.exists(path) and not overwrite:
         return {"ok": False, "path": path, "error": "file exists (pass overwrite=true to replace)"}
     parent = os.path.dirname(os.path.abspath(path))

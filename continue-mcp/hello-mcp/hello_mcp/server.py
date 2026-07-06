@@ -12,6 +12,7 @@ Run:  uv run hello-mcp
 """
 from __future__ import annotations
 
+import os
 import platform
 
 from fastmcp import FastMCP
@@ -35,13 +36,17 @@ async def echo(text: str) -> str:
 
 @mcp.tool
 async def whoami() -> dict:
-    """Report the host OS/arch the MCP server is running on. Confirms the server
-    executes local code on the developer's machine."""
+    """Report host OS/arch plus the server's cwd, MCP_WORKSPACE, and the base
+    that relative paths resolve against. Run this first in any new environment."""
+    workspace = os.environ.get("MCP_WORKSPACE")
     return {
         "system": platform.system(),
         "release": platform.release(),
         "machine": platform.machine(),
         "python": platform.python_version(),
+        "cwd": os.getcwd(),
+        "mcp_workspace": workspace,
+        "resolved_base": os.path.abspath(workspace or os.getcwd()),
     }
 
 

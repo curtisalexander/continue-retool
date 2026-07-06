@@ -60,9 +60,7 @@ uv run edit-mcp      # starts the stdio server (Continue launches this for you)
 ## Design notes
 
 - **`matcher.py` is dependency-free stdlib** on purpose: it's the valuable, testable
-  core, and it can later be swapped for a Rust/PyO3 implementation (same tool
-  surface) if you ever want native speed on huge files. For edits, Python is not the
-  bottleneck — correctness is — so it stays Python.
+  core. For edits, Python is not the bottleneck — correctness is.
 - **Exact-first is a feature, not an optimization.** When the bytes already match we
   refuse to normalize, guaranteeing byte-perfect edits in the common case.
 - **Sequential multi-edit** (each edit sees the previous result) sidesteps the

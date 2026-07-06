@@ -10,8 +10,10 @@
 # now live behind the gateway, reachable via gateway.search -> describe -> call.
 name: gateway
 command: uv
-args: ["run", "gateway-mcp"]
-# cwd: /absolute/path/to/continue-mcp/gateway-mcp   # uncomment; point at this dir
+# --project pins the server's uv environment to its package dir, so `cwd` is
+# NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
+# it's the base for relative paths.
+args: ["run", "--project", "/absolute/path/to/continue-mcp/gateway-mcp", "gateway-mcp"]
 env:
+  MCP_WORKSPACE: /absolute/path/to/your/workspace
   # GATEWAY_CONFIG: /absolute/path/to/gateway.config.json   # optional override
-  {}

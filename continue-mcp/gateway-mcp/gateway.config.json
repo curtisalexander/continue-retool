@@ -1,5 +1,5 @@
 {
-  "_comment": "Downstream MCP servers the gateway aggregates. Continue connects ONLY to the gateway; the gateway connects to these. Server names must not contain '_'. cwd is relative to this file (adjust to absolute paths if you run the gateway from elsewhere).",
+  "_comment": "Downstream MCP servers the gateway aggregates. Continue connects ONLY to the gateway; the gateway connects to these. Server names must not contain '_'. Relative cwd entries resolve against this file's directory.",
   "servers": {
     "shell": {
       "command": "uv",

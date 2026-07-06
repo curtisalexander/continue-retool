@@ -87,3 +87,13 @@ def test_files_lists_by_glob(tmp_path):
     res = asyncio.run(server.files(glob=["*.py"], path=str(tmp_path)))
     assert res["count"] == 2
     assert all(p.endswith(".py") for p in res["files"])
+
+
+@needs_rg
+def test_relative_path_resolves_against_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "c.txt").write_text("WORKSPACE_NEEDLE\n")
+    res = asyncio.run(server.grep("WORKSPACE_NEEDLE", path="sub"))
+    assert res["count"] == 1

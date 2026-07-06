@@ -9,9 +9,12 @@
 #   * set  search.grep / search.files  to  Automatic  (read-only; safe to auto-run)
 name: search
 command: uv
-args: ["run", "search-mcp"]
-# cwd: /absolute/path/to/continue-mcp/search-mcp   # uncomment; point at this dir
+# --project pins the server's uv environment to its package dir, so `cwd` is
+# NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
+# it's the base for relative paths.
+args: ["run", "--project", "/absolute/path/to/continue-mcp/search-mcp", "search-mcp"]
 env:
+  MCP_WORKSPACE: /absolute/path/to/your/workspace
   SEARCH_MCP_TIMEOUT: "30"        # seconds per search before it's killed
   SEARCH_MCP_MAX_RESULTS: "1000"  # hard cap so a broad query can't flood context
   # RIPGREP_BIN: /custom/path/to/rg   # optional: pin the rg binary explicitly

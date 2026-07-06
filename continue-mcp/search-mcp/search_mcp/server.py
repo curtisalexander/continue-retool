@@ -30,6 +30,15 @@ DEFAULT_TIMEOUT = float(os.environ.get("SEARCH_MCP_TIMEOUT", "30"))
 MAX_RESULTS_CAP = int(os.environ.get("SEARCH_MCP_MAX_RESULTS", "1000"))
 
 
+def _resolve(path: str) -> str:
+    """Relative paths resolve against MCP_WORKSPACE (falls back to server cwd),
+    so they mean the same thing no matter where Continue launched this process."""
+    if os.path.isabs(path):
+        return path
+    base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
+    return os.path.join(base, path)
+
+
 # --- locate the rg binary --------------------------------------------------
 def rg_bin() -> str:
     """Find the ripgrep binary. Honor RIPGREP_BIN, else PATH."""
@@ -173,6 +182,7 @@ async def grep(
     """Search file contents with ripgrep (regex, gitignore-aware). Returns matching
     lines as {file, line, column, text}; capped at max_results and flagged truncated
     if the cap is hit. Use `glob` (e.g. ['*.py']) to scope by file type."""
+    path = _resolve(path)
     cap = max(1, min(max_results, MAX_RESULTS_CAP))
     args = build_grep_args(
         pattern, path, ignore_case, glob, multiline, context, hidden, no_ignore
@@ -191,6 +201,7 @@ async def files(
     """List files visible to ripgrep, optionally filtered by glob (e.g. ['*.ts',
     '!**/dist/**']). Respects .gitignore unless no_ignore is set. Returns file paths,
     capped at max_results."""
+    path = _resolve(path)
     cap = max(1, min(max_results, MAX_RESULTS_CAP))
     rg = rg_bin()
     args = build_files_args(glob, path, hidden, no_ignore)

@@ -165,3 +165,21 @@ def test_incremental_output_cursor():
     first, again = asyncio.run(scenario())
     assert "1" in first["stdout"] and "3" in first["stdout"]
     assert again["stdout"] == ""          # cursor consumed everything
+
+
+def test_default_cwd_is_workspace(tmp_path, monkeypatch):
+    """With MCP_WORKSPACE set and no cwd argument, commands run in the
+    workspace — not wherever Continue happened to launch the server."""
+    import os
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))
+
+    async def scenario():
+        return await server.run(
+            f'"{PY}" -c "import os; print(os.getcwd())"', shell=sh, timeout=15
+        )
+
+    res = asyncio.run(scenario())
+    assert os.path.realpath(res["stdout"].strip()) == os.path.realpath(str(tmp_path))

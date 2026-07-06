@@ -7,7 +7,7 @@ name = "gateway-mcp"
 version = "0.1.0"
 description = "Progressive-disclosure MCP gateway for Continue.dev (search/describe/call over many downstream tools)"
 requires-python = ">=3.11"
-dependencies = ["fastmcp>=2"]
+dependencies = ["fastmcp>=3,<4"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

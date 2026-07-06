@@ -7,7 +7,7 @@ name = "edit-mcp"
 version = "0.1.0"
 description = "Robust Unicode-aware file-edit MCP for Continue.dev (replaces built-in Create/Edit file)"
 requires-python = ">=3.11"
-dependencies = ["fastmcp>=2"]
+dependencies = ["fastmcp>=3,<4"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

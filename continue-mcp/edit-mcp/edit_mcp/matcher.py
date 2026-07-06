@@ -17,8 +17,7 @@ Strategy (two-tier, matching Pi):
      untouched line is copied verbatim from the original, so exotic characters
      elsewhere in the file are never disturbed.
 
-Deliberately dependency-free (stdlib only) so it's trivially unit-testable and
-could be swapped for a Rust/PyO3 core later without changing the tool surface.
+Deliberately dependency-free (stdlib only) so it's trivially unit-testable.
 """
 from __future__ import annotations
 

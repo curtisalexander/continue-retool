@@ -105,8 +105,7 @@ unambiguous. `call("shell.start", …)` maps back to server `shell`, tool `start
 
 **Why `registry.py` is separate and dependency-free:** the valuable, testable logic
 (catalog, ranking, summarizing) has no MCP or network in it, so it's unit-tested in
-isolation and could be swapped for a Rust/PyO3 core later without touching the tool
-surface.
+isolation.
 
 ---
 

@@ -8,8 +8,7 @@ only when the model asks for it.
 
 This module holds the parts that don't touch MCP or the network: building the
 catalog of downstream tools, summarizing descriptions to one line, and ranking
-tools against a query. Kept stdlib-only so it's trivially testable (and swappable
-for a Rust core later).
+tools against a query. Kept stdlib-only so it's trivially testable.
 """
 from __future__ import annotations
 

@@ -63,7 +63,6 @@ search.files({ "glob": ["*.ts", "!**/dist/**"] })
 - **`context` and `multiline`** map to `rg -C` and `rg --multiline --multiline-dotall`.
 - **Timeout** (`SEARCH_MCP_TIMEOUT`, default 30s) kills a runaway search and returns
   whatever was collected with `timed_out: true`.
-- **Want in-process search with no separate binary?** Swap the subprocess calls for
-  a PyO3 library built on BurntSushi's `grep`/`ignore` crates (maturin
-  `bindings = "pyo3"`) — same result shape, no PATH dependency. Shelling out to the
-  PyPI `rg` is simpler and is the default here.
+- **Shelling out to `rg` is the design**, not a stopgap: the toolkit is pure Python
+  by decision (see the decision log in `../../continue-mcp-toolkit.md`), and
+  CPU-heavy work belongs in proven native binaries invoked as subprocesses.

@@ -48,22 +48,27 @@ class _State:
 STATE = _State()
 
 
-def _load_config() -> dict:
+def _load_config() -> tuple[dict, str]:
+    """Returns (config, base_dir). Relative `cwd` entries in the config resolve
+    against the config file's own directory, as the file documents."""
     path = os.environ.get("GATEWAY_CONFIG") or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "gateway.config.json"
     )
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f), os.path.dirname(os.path.abspath(path))
 
 
-def _connect(spec: dict) -> Client:
+def _connect(spec: dict, base_dir: str) -> Client:
     """Build a client to one downstream stdio MCP server. Using a direct transport
     (not the multi-server mcpServers wrapper) keeps tool names unprefixed."""
+    cwd = spec.get("cwd")
+    if cwd and not os.path.isabs(cwd):
+        cwd = os.path.join(base_dir, cwd)
     transport = StdioTransport(
         command=spec["command"],
         args=spec.get("args", []),
         env=spec.get("env"),
-        cwd=spec.get("cwd"),
+        cwd=cwd,
     )
     return Client(transport)
 
@@ -72,14 +77,14 @@ def _connect(spec: dict) -> Client:
 async def lifespan(_app):
     """On startup: connect to every downstream server, build the catalog, keep the
     connections open for the gateway's lifetime. On shutdown: close them all."""
-    config = _load_config()
+    config, base_dir = _load_config()
     async with AsyncExitStack() as stack:
         clients: dict = {}
         raw: list[dict] = []
         for server, spec in config.get("servers", {}).items():
             if "_" in server:
                 raise ValueError(f"server name {server!r} must not contain '_'")
-            client = await stack.enter_async_context(_connect(spec))
+            client = await stack.enter_async_context(_connect(spec, base_dir))
             clients[server] = client
             for t in await client.list_tools():
                 raw.append({

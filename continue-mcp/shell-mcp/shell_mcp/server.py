@@ -1,16 +1,15 @@
 """
 shell-mcp — a background-job terminal runner for Continue.dev (and any MCP client).
 
-This is a *sketch* to show the shape described in continue-mcp-toolkit.md §2–3:
+Implements the shape described in continue-mcp-toolkit.md §2–3:
   - background-job model:  start -> poll/output -> kill   (never blocks the transport)
   - bash OR powershell/pwsh/cmd, selected explicitly per call
   - stdout AND stderr captured concurrently (no pipe-buffer deadlock)
   - cancel/kill of the WHOLE process tree (process group / new session)
   - server-enforced timeout that kills + reports partial output
 
-Pure-async Python (FastMCP option "B"). The one piece that's genuinely nicer in
-Rust — Windows Job Object tree-kill — is marked with a TODO where a maturin core
-(shell_mcp._core) would slot in. Everything else is production-shaped Python.
+Pure-async Python (FastMCP option "B"). Tree-kill is `setsid` + `killpg` on
+Unix/macOS and `taskkill /T /F` on Windows.
 
 Run:  uv run shell-mcp
 """
@@ -52,8 +51,7 @@ def build_argv(cmd: str, shell: Optional[str]) -> list[str]:
 
 # --- a capped buffer so a runaway command can't blow the context window ----
 class RingBuffer:
-    """Keeps head + tail bytes with a truncation marker in the middle.
-    (In the Rust core this becomes a zero-copy ring buffer — see the design doc.)"""
+    """Keeps head + tail bytes with a truncation marker in the middle."""
 
     def __init__(self, cap: int = MAX_BUFFER_BYTES) -> None:
         self.cap = cap
@@ -121,8 +119,7 @@ def _kill_tree(job: Job, sig: int = signal.SIGTERM) -> None:
         return
     try:
         if IS_WINDOWS:
-            # TODO(rust-core): Windows Job Objects give a clean tree-kill.
-            # Pure-Python fallback: taskkill /T /F walks the child tree.
+            # taskkill /T walks and kills the whole child tree.
             import subprocess
             subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
@@ -152,6 +149,13 @@ async def start(
     """Start a shell command in the background. Returns instantly with a job_id;
     poll it with output()/poll(), stop it with kill(). shell = bash|pwsh|powershell|cmd."""
     argv = build_argv(cmd, shell)
+    # cwd defaults to the workspace, and relative cwd resolves against it — the
+    # server's own cwd (wherever Continue launched it) is never the implicit base.
+    workspace = os.environ.get("MCP_WORKSPACE")
+    if cwd is None:
+        cwd = workspace
+    elif not os.path.isabs(cwd) and workspace:
+        cwd = os.path.join(os.path.abspath(workspace), cwd)
     # new session/group so we can kill the whole tree later
     kwargs: dict = {}
     if IS_WINDOWS:
