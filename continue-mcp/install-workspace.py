@@ -25,18 +25,27 @@ Re-running is safe: an existing .yaml/rule file is only rewritten when its
 content actually changed, and the previous version is saved alongside as
 <file>.bak before it's replaced.
 
+The syncs run in parallel (a thread per server, capped at --jobs). Each
+server's uv output is captured rather than interleaved; you get a live
+[done/total] line as each finishes, a heartbeat naming whatever's still running
+on long cold-cache runs, and the full captured error for any server that fails.
+
 Usage:
   python3 install-workspace.py /path/to/your/project
   python3 install-workspace.py /path/to/your/project --only shell,search,edit
   python3 install-workspace.py /path/to/your/project --no-sync
+  python3 install-workspace.py /path/to/your/project --jobs 1   # sequential
 """
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 KIT_DIR = os.path.dirname(os.path.abspath(__file__))
 SERVERS = ["hello", "shell", "search", "edit", "fs", "sql", "notes"]
@@ -126,9 +135,40 @@ def install(project: str, names: list[str]) -> None:
         write_out(os.path.join(rules_dir, rule), content)
 
 
-def sync_deps(names: list[str]) -> int:
-    """Run `uv sync` in each installed server's package dir so its venv is built
-    now rather than lazily on first launch. Returns the number of failures."""
+def _sync_one(uv: str, name: str, pkg: str) -> dict:
+    """Sync one server package; return its captured result. Runs in a worker
+    thread — subprocess.run releases the GIL while uv works, so N of these
+    overlap. Never raises: a failure is reported via the returned dict."""
+    start = time.monotonic()
+    proc = subprocess.run(
+        [uv, "sync", "--project", pkg],
+        capture_output=True, text=True,
+    )
+    return {
+        "name": name,
+        "rc": proc.returncode,
+        "out": proc.stdout,
+        "err": proc.stderr,
+        "dur": time.monotonic() - start,
+    }
+
+
+def _summary_line(out: str, err: str) -> str:
+    """Pull uv's one-line tally (e.g. 'Installed 67 packages in 87ms') out of the
+    captured output, so a successful sync gets a compact summary instead of its
+    full package dump. Empty string if no such line is found."""
+    markers = ("Installed", "Audited", "Prepared", "Resolved")
+    for line in reversed((out + err).splitlines()):
+        s = line.strip()
+        if "package" in s and any(s.startswith(m) for m in markers):
+            return s
+    return ""
+
+
+def sync_deps(names: list[str], jobs: int = 0) -> int:
+    """Run `uv sync` for each installed server's package (in parallel, up to
+    `jobs` workers; 0 = auto) so venvs are built now rather than lazily on first
+    launch. Returns the number of servers that failed to sync."""
     uv = shutil.which("uv")
     if not uv:
         print("\nWARNING: `uv` not found on PATH — skipping dependency setup.\n"
@@ -139,25 +179,63 @@ def sync_deps(names: list[str]) -> int:
         return len(names)
 
     total = len(names)
-    print(f"\nSyncing dependencies for {total} server(s) (uv sync).")
+    workers = jobs if jobs > 0 else min(total, (os.cpu_count() or 4))
+    workers = max(1, min(workers, total))
+    print(f"\nSyncing dependencies for {total} server(s), up to {workers} in "
+          "parallel (uv sync).")
     print(CORP_NOTE)
-    print("The first run resolves, downloads, and builds wheels, so it can take a\n"
-          "few minutes per server. uv's own live progress is streamed below.")
-    failures = 0
-    for i, name in enumerate(names, 1):
-        pkg = os.path.join(KIT_DIR, f"{name}-mcp")
-        # No capture: uv inherits this terminal, so its progress bars / download
-        # + build lines render live (and it can tell it's a TTY). We report the
-        # per-server exit status; uv has already shown any error inline above.
-        print(f"\n[{i}/{total}] uv sync {name}-mcp ...", flush=True)
-        proc = subprocess.run([uv, "sync", "--project", pkg])
-        if proc.returncode == 0:
-            print(f"[{i}/{total}] synced  {name}-mcp")
-        else:
-            failures += 1
-            print(f"[{i}/{total}] FAILED  {name}-mcp (exit {proc.returncode}) "
-                  "— see uv output above", file=sys.stderr)
-    return failures
+    print("Each server's uv output is captured (not interleaved); a [done/total]\n"
+          "line prints as each finishes. On a cold cache the first run downloads +\n"
+          "builds wheels, so allow a few minutes — a heartbeat names what's left.")
+
+    # Parallelism is safe: uv locks its global cache per entry, so concurrent
+    # `uv sync` processes share one download of any package rather than racing.
+    lock = threading.Lock()
+    running = set(names)
+    stop = threading.Event()
+    start_all = time.monotonic()
+
+    def heartbeat() -> None:
+        while not stop.wait(10):
+            with lock:
+                still = sorted(running)
+                if still:
+                    el = time.monotonic() - start_all
+                    print(f"    ... still syncing ({len(still)}): "
+                          f"{', '.join(n + '-mcp' for n in still)}  [{el:.0f}s]",
+                          flush=True)
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
+
+    results: dict[str, dict] = {}
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_sync_one, uv, n, os.path.join(KIT_DIR, f"{n}-mcp"))
+                for n in names]
+        for fut in concurrent.futures.as_completed(futs):
+            r = fut.result()
+            results[r["name"]] = r
+            done += 1
+            ok = r["rc"] == 0
+            tag = "synced" if ok else f"FAILED (exit {r['rc']})"
+            summary = _summary_line(r["out"], r["err"])
+            extra = f"  — {summary}" if ok and summary else ""
+            with lock:
+                running.discard(r["name"])
+                print(f"[{done}/{total}] {tag:18} {r['name']}-mcp  "
+                      f"({r['dur']:.1f}s){extra}",
+                      file=sys.stdout if ok else sys.stderr, flush=True)
+    stop.set()
+
+    failed = [n for n in names if results[n]["rc"] != 0]
+    if failed:
+        print("\nSync failures — captured uv output:", file=sys.stderr)
+        for n in failed:
+            r = results[n]
+            print(f"  {n}-mcp (exit {r['rc']}):", file=sys.stderr)
+            for line in (r["err"] or r["out"]).strip().splitlines()[-8:]:
+                print(f"    | {line}", file=sys.stderr)
+    return len(failed)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -167,6 +245,9 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"comma-separated subset of: {','.join(SERVERS)}")
     ap.add_argument("--no-sync", action="store_true",
                     help="skip `uv sync` of the server packages (config files only)")
+    ap.add_argument("--jobs", type=int, default=0, metavar="N",
+                    help="parallel `uv sync` workers (default: min(servers, CPUs); "
+                         "1 = sequential)")
     args = ap.parse_args(argv)
 
     project = os.path.abspath(args.project)
@@ -189,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nSkipping `uv sync` (--no-sync). Run it in each *-mcp dir before "
               "the servers will start.")
     else:
-        failures = sync_deps(names)
+        failures = sync_deps(names, args.jobs)
 
     print(POLICY_CHECKLIST)
     if failures:
