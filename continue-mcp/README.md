@@ -104,10 +104,60 @@ python3 install-workspace.py /path/to/proj --only shell,fs      # a subset
 
 Copies every server's yaml into the project's `.continue/mcpServers/` with the
 two absolute paths stamped in (`--project` → this checkout, `MCP_WORKSPACE` →
-the project), copies the two rules into `.continue/rules/`, and prints the
-tool-policy checklist. Re-running updates in place. Then ask the agent to call
-`hello.ping` (MCP is on) and `hello.whoami` (shows the cwd and workspace the
-servers actually see).
+the project), copies the two rules into `.continue/rules/`, and then runs
+`uv sync` in each installed server's package dir so its virtualenv exists before
+Continue ever launches it. Finally it prints the tool-policy checklist. Then ask
+the agent to call `hello.ping` (MCP is on) and `hello.whoami` (shows the cwd and
+workspace the servers actually see).
+
+**Where the venvs land.** Each `*-mcp` is its own uv project, so `uv sync`
+creates one virtualenv *per server* at `<this checkout>/<name>-mcp/.venv` — e.g.
+`continue-mcp/shell-mcp/.venv`. They live inside this toolkit checkout (not your
+workspace) because that's what the yaml's `uv run --project <…>/<name>-mcp`
+points at; all are gitignored. Pass `--no-sync` to skip the build (offline, or
+you'll sync by hand later).
+
+**Re-running is safe.** An existing yaml/rule is only rewritten when its content
+actually changed, and the previous version is saved next to it as `<file>.bak`
+before it's replaced — so a local edit is always recoverable (single-level: the
+`.bak` holds the last replaced version).
+
+### Corporate environments (proxy / private index)
+
+`uv sync` reaches out to a package index, so behind a corporate proxy set two
+environment variables before running the installer (or any `uv` command):
+
+```bash
+export UV_SYSTEM_CERTS=true                       # trust the corp root CA from the OS store
+export UV_DEFAULT_INDEX=https://pypi.example.corp/simple   # your internal mirror
+```
+
+- **`UV_SYSTEM_CERTS=true`** makes uv use the operating system's certificate
+  store instead of its bundled roots, so a proxy's mandatory root CA is trusted.
+- **`UV_DEFAULT_INDEX`** points uv at your internal package mirror instead of
+  public PyPI.
+
+You do **not** need to edit any `pyproject.toml` for this, and you do **not**
+want a config file in each of the eight `*-mcp` dirs. Two options, both global:
+
+- **Env vars (simplest):** export the two above once in your shell/profile (or
+  set them machine-wide). They apply to every `uv` invocation in any directory —
+  nothing per-project.
+- **One uv config file:** put the equivalent keys in a single **user-** or
+  **system-level** `uv.toml`, which uv applies to every project automatically:
+
+  ```toml
+  # ~/.config/uv/uv.toml   (Windows: %APPDATA%\uv\uv.toml)
+  # system-wide: /etc/uv/uv.toml   (Windows: %PROGRAMDATA%\uv\uv.toml)
+  system-certs = true
+  [[index]]
+  url = "https://pypi.example.corp/simple"
+  default = true
+  ```
+
+  Per-directory `pyproject.toml [tool.uv]` / `uv.toml` also work but are read
+  **only** for that directory — which is exactly why you'd otherwise need one in
+  every server dir. Keep it in the user/system file instead.
 
 ## Wiring: paths resolve against YOUR workspace, not the server's cwd
 
