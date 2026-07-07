@@ -8,11 +8,11 @@ version: 0.0.1
 schema: v1
 mcpServers:
   - name: shell
-    command: uv
+    command: /absolute/path/to/uv
     # --project pins the server's uv environment to its package dir, so `cwd` is
     # NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
     # it's the base for relative paths and the default working dir for commands.
-    args: ["run", "--project", "/absolute/path/to/continue-mcp/shell-mcp", "shell-mcp"]
+    args: ["run", "--no-sync", "--project", "/absolute/path/to/continue-mcp/shell-mcp", "shell-mcp"]
     env:
       MCP_WORKSPACE: /absolute/path/to/your/workspace
       SHELL_MCP_DEFAULT_TIMEOUT: "120"    # seconds; server kills + reports on deadline

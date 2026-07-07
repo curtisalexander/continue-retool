@@ -175,14 +175,32 @@ want a config file in each of the eight `*-mcp` dirs. Two options, both global:
 
 ## Wiring: paths resolve against YOUR workspace, not the server's cwd
 
-Every yaml uses the same pattern: `uv run --project <abs path to the package>`
-pins the server's environment (no `cwd` needed for the server itself), and
-`MCP_WORKSPACE` names your workspace root. All relative paths the agent passes
-— and shell-mcp's default working directory — resolve against `MCP_WORKSPACE`,
-falling back to the server's cwd if unset. Without this, relative paths would
-resolve into this toolkit's checkout, not your project. The installer above
-stamps all of this for you; `hello.whoami` reports what the servers actually
-resolved, so you can verify any environment in one call.
+Every yaml uses the same pattern: `<abs path to uv> run --no-sync --project <abs
+path to the package>` pins the server's environment (no `cwd` needed for the
+server itself), and `MCP_WORKSPACE` names your workspace root. All relative paths
+the agent passes — and shell-mcp's default working directory — resolve against
+`MCP_WORKSPACE`, falling back to the server's cwd if unset. Without this,
+relative paths would resolve into this toolkit's checkout, not your project. The
+installer above stamps all of this for you; `hello.whoami` reports what the
+servers actually resolved, so you can verify any environment in one call.
+
+**Why the absolute `uv` path and `--no-sync` (avoiding "Connection timeout").**
+Two launch-time gotchas, both stamped away by the installer:
+
+- **`command` is the absolute path to `uv`, not bare `uv`.** A GUI-launched
+  VS Code often doesn't inherit the shell `PATH` where `uv` lives (e.g.
+  `~/.local/bin`), so `command: uv` can be unresolvable even though `uv` works in
+  your terminal — the server never spawns and Continue reports a connection
+  timeout. Stamping the full path removes the PATH dependency.
+- **`uv run --no-sync`** skips uv's pre-run environment sync. Without it, every
+  launch tries to sync against the package index; behind a corporate proxy (whose
+  `UV_SYSTEM_CERTS`/`UV_DEFAULT_INDEX` the GUI process may not have) that call
+  hangs until Continue's connect timer fires. The installer already built the
+  venv, so `--no-sync` is safe — launch just runs what's there, no network.
+
+If a tool still shows *"already connected to a transport / call close()"* after a
+per-tool **Reload**, that's Continue's reconnect path, not the server — reload the
+whole window (or toggle the MCP server off/on) instead of the single tool.
 
 **Using the gateway?** Register ONLY `gateway.yaml` with Continue (not the
 downstream `shell/search/edit` yamls — the gateway connects to those itself). It's

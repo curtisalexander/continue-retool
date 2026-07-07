@@ -3,11 +3,19 @@
 install-workspace.py — wire this toolkit into a project in one command.
 
 Copies each server's .continue/mcpServers/*.yaml into the target project,
-stamping the two absolute paths as it goes:
-  * --project  -> this toolkit checkout (where the script lives)
+stamping the absolute paths as it goes:
+  * command     -> the absolute path to `uv` (so Continue doesn't depend on the
+                   PATH it was launched with — GUI-launched VS Code often lacks
+                   the shell PATH where uv lives)
+  * --project   -> this toolkit checkout (where the script lives)
   * MCP_WORKSPACE -> the target project root
 and copies the two rules (notes discovery + the rule rule) into
 .continue/rules/. Stdlib only; works on macOS/Linux/Windows.
+
+The yaml launches each server with `uv run --no-sync` so startup never touches
+the network (the venv is already built by this installer). Without --no-sync,
+`uv run` tries to sync against the index on every launch, which hangs behind a
+corporate proxy and shows up in Continue as a connection timeout.
 
 Each *-mcp server is its own self-contained uv project (its own pyproject.toml
 + uv.lock), so after copying the config this script also runs `uv sync` in each
@@ -83,7 +91,8 @@ def _slashes(p: str) -> str:
     return os.path.abspath(p).replace("\\", "/")
 
 
-def stamp(text: str, server: str, workspace: str) -> str:
+def stamp(text: str, server: str, workspace: str, uv_path: str) -> str:
+    text = text.replace("/absolute/path/to/uv", uv_path)
     text = text.replace(
         f"/absolute/path/to/continue-mcp/{server}-mcp",
         _slashes(os.path.join(KIT_DIR, f"{server}-mcp")),
@@ -116,7 +125,7 @@ def write_out(dest: str, content: str) -> None:
     print(f"  installed  {dest}")
 
 
-def install(project: str, names: list[str]) -> None:
+def install(project: str, names: list[str], uv_path: str) -> None:
     mcp_dir = os.path.join(project, ".continue", "mcpServers")
     rules_dir = os.path.join(project, ".continue", "rules")
     os.makedirs(mcp_dir, exist_ok=True)
@@ -125,7 +134,7 @@ def install(project: str, names: list[str]) -> None:
     for name in names:
         src = os.path.join(KIT_DIR, f"{name}-mcp", ".continue", "mcpServers", f"{name}.yaml")
         with open(src, "r", encoding="utf-8") as f:
-            content = stamp(f.read(), name, project)
+            content = stamp(f.read(), name, project, uv_path)
         write_out(os.path.join(mcp_dir, f"{name}.yaml"), content)
 
     for rule in RULES:
@@ -262,8 +271,17 @@ def main(argv: list[str] | None = None) -> int:
               "gateway-mcp/README.md)", file=sys.stderr)
         return 1
 
+    # Stamp uv's absolute path into `command:` so Continue doesn't rely on the
+    # PATH it inherits. Fall back to bare "uv" (PATH lookup) only if uv isn't
+    # found now — the sync step below will warn about that separately.
+    uv = shutil.which("uv")
+    uv_path = _slashes(uv) if uv else "uv"
+    if not uv:
+        print("WARNING: `uv` not found on PATH — leaving command: uv in the yaml "
+              "(Continue must find uv on its own PATH).", file=sys.stderr)
+
     print(f"Installing {len(names)} server(s) + {len(RULES)} rule(s) into {project}")
-    install(project, names)
+    install(project, names, uv_path)
 
     failures = 0
     if args.no_sync:
