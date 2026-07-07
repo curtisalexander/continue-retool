@@ -138,23 +138,25 @@ def sync_deps(names: list[str]) -> int:
               file=sys.stderr)
         return len(names)
 
-    print(f"\nSyncing dependencies for {len(names)} server(s) (uv sync):")
+    total = len(names)
+    print(f"\nSyncing dependencies for {total} server(s) (uv sync).")
     print(CORP_NOTE)
+    print("The first run resolves, downloads, and builds wheels, so it can take a\n"
+          "few minutes per server. uv's own live progress is streamed below.")
     failures = 0
-    for name in names:
+    for i, name in enumerate(names, 1):
         pkg = os.path.join(KIT_DIR, f"{name}-mcp")
-        proc = subprocess.run(
-            [uv, "sync", "--project", pkg],
-            capture_output=True, text=True,
-        )
+        # No capture: uv inherits this terminal, so its progress bars / download
+        # + build lines render live (and it can tell it's a TTY). We report the
+        # per-server exit status; uv has already shown any error inline above.
+        print(f"\n[{i}/{total}] uv sync {name}-mcp ...", flush=True)
+        proc = subprocess.run([uv, "sync", "--project", pkg])
         if proc.returncode == 0:
-            print(f"  synced     {name}-mcp")
+            print(f"[{i}/{total}] synced  {name}-mcp")
         else:
             failures += 1
-            print(f"  FAILED     {name}-mcp (exit {proc.returncode})", file=sys.stderr)
-            tail = (proc.stderr or proc.stdout).strip().splitlines()[-5:]
-            for line in tail:
-                print(f"    | {line}", file=sys.stderr)
+            print(f"[{i}/{total}] FAILED  {name}-mcp (exit {proc.returncode}) "
+                  "— see uv output above", file=sys.stderr)
     return failures
 
 
