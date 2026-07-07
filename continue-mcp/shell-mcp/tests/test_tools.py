@@ -62,7 +62,7 @@ def test_run_captures_stdout_and_exit_code():
         pytest.skip("no usable shell on this host")
 
     async def scenario():
-        return await server.run(f'"{PY}" -c "print(\'hello-out\')"', shell=sh, timeout=15)
+        return (await server.run(f'"{PY}" -c "print(\'hello-out\')"', shell=sh, timeout=15)).structured_content
 
     res = asyncio.run(scenario())
     assert res["exit_code"] == 0
@@ -77,7 +77,7 @@ def test_run_captures_stderr():
 
     async def scenario():
         code = "import sys; sys.stderr.write('err-here')"
-        return await server.run(f'"{PY}" -c "{code}"', shell=sh, timeout=15)
+        return (await server.run(f'"{PY}" -c "{code}"', shell=sh, timeout=15)).structured_content
 
     res = asyncio.run(scenario())
     assert "err-here" in res["stderr"]
@@ -91,16 +91,16 @@ def test_timeout_kills_and_reports():
         pytest.skip("no usable shell on this host")
 
     async def scenario():
-        started = await server.start(
+        started = (await server.start(
             f'"{PY}" -c "import time; time.sleep(10)"', shell=sh, timeout=1
-        )
+        )).structured_content
         jid = started["job_id"]
         for _ in range(60):  # up to ~6s for the 1s watchdog to fire
-            st = await server.poll(jid)
+            st = (await server.poll(jid)).structured_content
             if st["state"] != "running":
                 break
             await asyncio.sleep(0.2)
-        return await server.poll(jid)
+        return (await server.poll(jid)).structured_content
 
     st = asyncio.run(scenario())
     assert st["state"] == "timeout"
@@ -126,12 +126,12 @@ def test_kill_terminates_process_tree(tmp_path):
     )
 
     async def scenario():
-        started = await server.start(
+        started = (await server.start(
             f'"{PY}" "{parent}" "{sentinel}"', shell=sh, timeout=60
-        )
+        )).structured_content
         jid = started["job_id"]
         await asyncio.sleep(1.0)          # let the grandchild spawn
-        killed = await server.kill(jid)
+        killed = (await server.kill(jid)).structured_content
         await asyncio.sleep(4.0)          # outlast the grandchild's 3s timer
         return killed
 
@@ -149,17 +149,17 @@ def test_incremental_output_cursor():
         pytest.skip("no usable shell on this host")
 
     async def scenario():
-        started = await server.start(
+        started = (await server.start(
             f'"{PY}" -c "print(1); print(2); print(3)"', shell=sh, timeout=15
-        )
+        )).structured_content
         jid = started["job_id"]
         for _ in range(60):
-            st = await server.poll(jid)
+            st = (await server.poll(jid)).structured_content
             if st["state"] != "running":
                 break
             await asyncio.sleep(0.1)
-        first = await server.output(jid, since_stdout=0)
-        again = await server.output(jid, since_stdout=first["stdout_cursor"])
+        first = (await server.output(jid, since_stdout=0)).structured_content
+        again = (await server.output(jid, since_stdout=first["stdout_cursor"])).structured_content
         return first, again
 
     first, again = asyncio.run(scenario())
@@ -177,9 +177,17 @@ def test_default_cwd_is_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))
 
     async def scenario():
-        return await server.run(
+        return (await server.run(
             f'"{PY}" -c "import os; print(os.getcwd())"', shell=sh, timeout=15
-        )
+        )).structured_content
 
     res = asyncio.run(scenario())
     assert os.path.realpath(res["stdout"].strip()) == os.path.realpath(str(tmp_path))
+
+
+def test_decode_output_utf8_and_fallback():
+    from shell_mcp.server import decode_output
+    assert decode_output("héllo 😀".encode("utf-8")) == "héllo 😀"   # valid utf-8 incl emoji
+    # cp1252 smart-quote bytes are invalid utf-8 -> must not raise, must not be empty
+    out = decode_output(b"\x93hi\x94")
+    assert out and "hi" in out

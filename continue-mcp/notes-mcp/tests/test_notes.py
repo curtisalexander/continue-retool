@@ -17,19 +17,19 @@ def _in_repo(tmp_path, monkeypatch, subdir=""):
 
 
 def _write(name, content, **kw):
-    return asyncio.run(server.write(name, content, **kw))
+    return asyncio.run(server.write(name, content, **kw)).structured_content
 
 
 def _read(name):
-    return asyncio.run(server.read(name))
+    return asyncio.run(server.read(name)).structured_content
 
 
 def _list():
-    return asyncio.run(server.list())
+    return asyncio.run(server.list()).structured_content
 
 
 def _delete(name):
-    return asyncio.run(server.delete(name))
+    return asyncio.run(server.delete(name)).structured_content
 
 
 # --- storage location -------------------------------------------------------

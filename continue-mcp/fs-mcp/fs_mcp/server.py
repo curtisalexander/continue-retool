@@ -20,8 +20,19 @@ import os
 from typing import Optional
 
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 mcp = FastMCP("fs")
+
+
+def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
+    """content is what Continue's UI shows (summary + optional fenced block);
+    structured_content is what the model/tests read via res.data."""
+    md = summary
+    if block.strip():
+        md += f"\n\n```{lang}\n{block}\n```"
+    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 DEFAULT_LIMIT = int(os.environ.get("FS_MCP_DEFAULT_LIMIT", "2000"))     # lines per read
 MAX_LINE_CHARS = int(os.environ.get("FS_MCP_MAX_LINE_CHARS", "2000"))   # per-line cap
@@ -40,13 +51,14 @@ def _resolve(path: str) -> str:
 
 # --- tools -----------------------------------------------------------------
 @mcp.tool
-async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> dict:
+async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> ToolResult:
     """Read a file as numbered lines: "LINENO<TAB>text". start_line is 1-based;
     limit caps the line count (default 2000). Use the returned total_lines to
     page through big files with follow-up calls."""
     path = _resolve(path)
     if not os.path.isfile(path):
-        return {"ok": False, "path": path, "error": f"file not found: {path}"}
+        data = {"ok": False, "path": path, "error": f"file not found: {path}"}
+        return _result(f"❌ {data['error']}", data)
     limit = max(1, limit if limit is not None else DEFAULT_LIMIT)
     start = max(1, start_line)
 
@@ -62,7 +74,7 @@ async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> d
             ln = ln[:MAX_LINE_CHARS] + f"…[+{len(ln) - MAX_LINE_CHARS} chars]"
         numbered.append(f"{i}\t{ln}")
     end = start - 1 + len(window)
-    return {
+    data = {
         "ok": True,
         "path": path,
         "content": "\n".join(numbered),
@@ -71,16 +83,23 @@ async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> d
         "total_lines": total,
         "truncated": end < total,
     }
+    summary = (
+        f"{data['path']} · lines {data['start_line']}–{data['end_line']} "
+        f"of {data['total_lines']}"
+        + (" (truncated)" if data['truncated'] else "")
+    )
+    return _result(summary, data, data["content"])
 
 
 @mcp.tool
-async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) -> dict:
+async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) -> ToolResult:
     """List a directory as {path, type, size} entries, dirs first, capped at 500.
     depth > 1 recurses that many levels; hidden files and .git are skipped unless
     include_hidden is set (.git is always skipped)."""
     path = _resolve(path)
     if not os.path.isdir(path):
-        return {"ok": False, "path": path, "error": f"not a directory: {path}"}
+        data = {"ok": False, "path": path, "error": f"not a directory: {path}"}
+        return _result(f"❌ {data['error']}", data)
     depth = max(1, depth)
     entries: list[dict] = []
     truncated = False
@@ -117,8 +136,18 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
                 walk(child.path, level + 1)
 
     walk(path, 1)
-    return {"ok": True, "path": path, "entries": entries,
+    data = {"ok": True, "path": path, "entries": entries,
             "count": len(entries), "truncated": truncated}
+    summary = (
+        f"{data['count']} entr(ies) in {data['path']}"
+        + (" (truncated)" if data['truncated'] else "")
+    )
+    block = "\n".join(
+        f"{'d' if e['type'] == 'dir' else 'f'}  {e['path']}"
+        + ("" if e['type'] == 'dir' or e.get('size') is None else f"  ({e['size']}b)")
+        for e in data["entries"]
+    )
+    return _result(summary, data, block)
 
 
 def main() -> None:

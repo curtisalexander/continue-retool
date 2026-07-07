@@ -21,10 +21,24 @@ import difflib
 import os
 
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 from .matcher import EditError, apply_edits, find_and_replace
 
 mcp = FastMCP("edit")
+
+
+def _result(summary: str, data: dict, diff: str = "") -> ToolResult:
+    """Return a ToolResult so Continue's UI shows a rendered summary + diff
+    (content) while the model still gets the structured fields (res.data)."""
+    md = summary
+    if diff.strip():
+        md += "\n\n```diff\n" + diff + "\n```"
+    return ToolResult(
+        content=[TextContent(type="text", text=md)],
+        structured_content=data,
+    )
 
 
 def _resolve(path: str) -> str:
@@ -67,7 +81,7 @@ async def edit(
     old_string: str,
     new_string: str,
     replace_all: bool = False,
-) -> dict:
+) -> ToolResult:
     """Replace old_string with new_string in a file. Matches exactly first, then
     falls back to a Unicode-normalized match (smart quotes, dashes, NBSP, accents,
     trailing whitespace, CRLF) so non-ASCII regions still match. old_string must be
@@ -80,19 +94,21 @@ async def edit(
     try:
         after, strategy, count = find_and_replace(before, old_string, new_string, replace_all)
     except EditError as e:
-        return {"ok": False, "path": path, "error": str(e)}
+        return _result(f"❌ edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
     _write(path, after)
-    return {
+    diff = _preview(before, after, path)
+    data = {
         "ok": True,
         "path": path,
         "strategy": strategy,          # "exact" or "fuzzy"
         "replacements": count,
-        "diff": _preview(before, after, path),
+        "diff": diff,
     }
+    return _result(f"Edited {path} — {count} replacement(s), {strategy} match", data, diff)
 
 
 @mcp.tool
-async def multi_edit(path: str, edits: list[dict]) -> dict:
+async def multi_edit(path: str, edits: list[dict]) -> ToolResult:
     """Apply several edits to one file in a single write. `edits` is a list of
     {old_string, new_string, replace_all?}, applied in order (each sees the prior
     result). All must succeed or the file is left unchanged."""
@@ -104,27 +120,29 @@ async def multi_edit(path: str, edits: list[dict]) -> dict:
     try:
         after, results = apply_edits(before, edits)
     except EditError as e:
-        return {"ok": False, "path": path, "error": str(e)}
+        return _result(f"❌ multi_edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
     _write(path, after)
-    return {
-        "ok": True,
-        "path": path,
-        "edits": results,
-        "diff": _preview(before, after, path),
-    }
+    diff = _preview(before, after, path)
+    data = {"ok": True, "path": path, "edits": results, "diff": diff}
+    return _result(f"Applied {len(results)} edit(s) to {path}", data, diff)
 
 
 @mcp.tool
-async def create_file(path: str, content: str, overwrite: bool = False) -> dict:
+async def create_file(path: str, content: str, overwrite: bool = False) -> ToolResult:
     """Create a new file with the given content. Fails if the file exists unless
     overwrite is set. Creates parent directories as needed."""
     path = _resolve(path)
     if os.path.exists(path) and not overwrite:
-        return {"ok": False, "path": path, "error": "file exists (pass overwrite=true to replace)"}
+        return _result(
+            f"❌ file exists: {path} (pass overwrite=true to replace)",
+            {"ok": False, "path": path, "error": "file exists (pass overwrite=true to replace)"},
+        )
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     _write(path, content)
-    return {"ok": True, "path": path, "bytes": len(content.encode("utf-8"))}
+    n = len(content.encode("utf-8"))
+    diff = _preview("", content, path)
+    return _result(f"Created {path} ({n} bytes)", {"ok": True, "path": path, "bytes": n}, diff)
 
 
 def main() -> None:

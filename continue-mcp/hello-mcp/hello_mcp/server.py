@@ -16,8 +16,19 @@ import os
 import platform
 
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 mcp = FastMCP("hello")
+
+
+def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
+    """content is what Continue's UI shows (summary + optional fenced block);
+    structured_content is what the model/tests read via res.data."""
+    md = summary
+    if block.strip():
+        md += f"\n\n```{lang}\n{block}\n```"
+    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 
 @mcp.tool
@@ -35,11 +46,11 @@ async def echo(text: str) -> str:
 
 
 @mcp.tool
-async def whoami() -> dict:
+async def whoami() -> ToolResult:
     """Report host OS/arch plus the server's cwd, MCP_WORKSPACE, and the base
     that relative paths resolve against. Run this first in any new environment."""
     workspace = os.environ.get("MCP_WORKSPACE")
-    return {
+    d = {
         "system": platform.system(),
         "release": platform.release(),
         "machine": platform.machine(),
@@ -48,6 +59,13 @@ async def whoami() -> dict:
         "mcp_workspace": workspace,
         "resolved_base": os.path.abspath(workspace or os.getcwd()),
     }
+    return _result(
+        f"{d['system']} {d['release']} ({d['machine']}) · Python {d['python']}",
+        d,
+        block=(f"cwd            {d['cwd']}\n"
+               f"MCP_WORKSPACE  {d['mcp_workspace']}\n"
+               f"resolved base  {d['resolved_base']}"),
+    )
 
 
 def main() -> None:

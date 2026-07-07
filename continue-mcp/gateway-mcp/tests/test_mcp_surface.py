@@ -45,7 +45,9 @@ def test_search_describe_call_flow(tmp_path, monkeypatch):
             summed = await c.call_tool("call", {
                 "name": "demo.add", "arguments": {"a": 2, "b": 3},
             })
-            return meta, found.data, desc.data, result.data, summed.data
+            # call now forwards the downstream result faithfully: the displayed
+            # value rides in the content text (primitives arrive as text).
+            return meta, found.data, desc.data, result.content[0].text, summed.content[0].text
 
     meta, found, desc, result, summed = asyncio.run(scenario())
     assert meta == {"search", "describe", "call"}

@@ -23,8 +23,19 @@ import shutil
 from typing import Optional
 
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 mcp = FastMCP("search")
+
+
+def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
+    """content is what Continue's UI shows (summary + optional fenced block);
+    structured_content is what the model/tests read via res.data."""
+    md = summary
+    if block.strip():
+        md += f"\n\n```{lang}\n{block}\n```"
+    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 DEFAULT_TIMEOUT = float(os.environ.get("SEARCH_MCP_TIMEOUT", "30"))
 MAX_RESULTS_CAP = int(os.environ.get("SEARCH_MCP_MAX_RESULTS", "1000"))
@@ -178,7 +189,7 @@ async def grep(
     hidden: bool = False,
     no_ignore: bool = False,
     max_results: int = 200,
-) -> dict:
+) -> ToolResult:
     """Search file contents with ripgrep (regex, gitignore-aware). Returns matching
     lines as {file, line, column, text}; capped at max_results and flagged truncated
     if the cap is hit. Use `glob` (e.g. ['*.py']) to scope by file type."""
@@ -187,7 +198,15 @@ async def grep(
     args = build_grep_args(
         pattern, path, ignore_case, glob, multiline, context, hidden, no_ignore
     )
-    return await _run_capped(args, cap, DEFAULT_TIMEOUT)
+    data = await _run_capped(args, cap, DEFAULT_TIMEOUT)
+    n = data["count"]
+    flags = []
+    if data.get("truncated"): flags.append("truncated")
+    if data.get("timed_out"): flags.append("timed out")
+    if data.get("error"): flags.append("error")
+    summary = f"{n} match(es) for {pattern!r}" + (f" [{', '.join(flags)}]" if flags else "")
+    block = "\n".join(f"{r['file']}:{r['line']}: {r['text']}" for r in data["matches"])
+    return _result(summary, data, block)
 
 
 @mcp.tool
@@ -197,7 +216,7 @@ async def files(
     hidden: bool = False,
     no_ignore: bool = False,
     max_results: int = 500,
-) -> dict:
+) -> ToolResult:
     """List files visible to ripgrep, optionally filtered by glob (e.g. ['*.ts',
     '!**/dist/**']). Respects .gitignore unless no_ignore is set. Returns file paths,
     capped at max_results."""
@@ -231,7 +250,10 @@ async def files(
             await asyncio.wait_for(proc.communicate(), 5)
         except (asyncio.TimeoutError, ValueError):
             pass
-    return {"files": paths, "count": len(paths), "truncated": truncated}
+    data = {"files": paths, "count": len(paths), "truncated": truncated}
+    summary = f"{data['count']} file(s)" + (" [truncated]" if data.get('truncated') else "")
+    block = "\n".join(data["files"])
+    return _result(summary, data, block)
 
 
 def main() -> None:

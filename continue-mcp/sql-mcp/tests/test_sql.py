@@ -7,11 +7,11 @@ from sql_mcp import server
 
 
 def _format(sql: str, **kw) -> dict:
-    return asyncio.run(server.format(sql, **kw))
+    return asyncio.run(server.format(sql, **kw)).structured_content
 
 
 def _lint(sql: str, **kw) -> dict:
-    return asyncio.run(server.lint(sql, **kw))
+    return asyncio.run(server.lint(sql, **kw)).structured_content
 
 
 def test_format_lowercases_everything():

@@ -5,11 +5,11 @@ from fs_mcp import server
 
 
 def _read(path, **kw):
-    return asyncio.run(server.read(str(path), **kw))
+    return asyncio.run(server.read(str(path), **kw)).structured_content
 
 
 def _list(path, **kw):
-    return asyncio.run(server.list(str(path), **kw))
+    return asyncio.run(server.list(str(path), **kw)).structured_content
 
 
 # --- read -------------------------------------------------------------------

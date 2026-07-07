@@ -16,6 +16,7 @@ Run:  uv run shell-mcp
 from __future__ import annotations
 
 import asyncio
+import locale
 import os
 import signal
 import sys
@@ -24,6 +25,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 mcp = FastMCP("shell")
 
@@ -31,6 +34,41 @@ mcp = FastMCP("shell")
 DEFAULT_TIMEOUT = float(os.environ.get("SHELL_MCP_DEFAULT_TIMEOUT", "120"))
 MAX_BUFFER_BYTES = int(os.environ.get("SHELL_MCP_MAX_BUFFER", str(256 * 1024)))
 IS_WINDOWS = sys.platform.startswith("win")
+
+
+# --- output decoding: right encoding per platform --------------------------
+# stdout/stderr come back as raw bytes. UTF-8 is correct for bash and pwsh 7+
+# (emoji and all). But cmd.exe and Windows PowerShell 5.1 emit the console/OEM
+# code page (cp437/cp850/cp1252), which UTF-8 decoding would mangle. So: decode
+# UTF-8 when the bytes are valid UTF-8, else fall back to the platform code page.
+# Force one explicitly with SHELL_MCP_ENCODING (e.g. "cp1252", "cp850", "utf-8").
+_ENCODING_OVERRIDE = os.environ.get("SHELL_MCP_ENCODING")
+
+
+def _fallback_encoding() -> str:
+    if _ENCODING_OVERRIDE:
+        return _ENCODING_OVERRIDE
+    if IS_WINDOWS:
+        try:
+            import ctypes  # the OEM code page is what cmd/PowerShell 5.1 pipe out
+            return "cp" + str(ctypes.windll.kernel32.GetOEMCP())
+        except Exception:
+            return locale.getpreferredencoding(False) or "cp1252"
+    return "utf-8"
+
+
+_FALLBACK_ENCODING = _fallback_encoding()
+
+
+def decode_output(data: bytes) -> str:
+    """Decode child output: UTF-8 if it's valid UTF-8, else the platform code
+    page (never raises — invalid bytes in the fallback are replaced)."""
+    if _ENCODING_OVERRIDE:
+        return data.decode(_ENCODING_OVERRIDE, errors="replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(_FALLBACK_ENCODING, errors="replace")
 
 
 # --- shell selection (§2b) -------------------------------------------------
@@ -68,7 +106,7 @@ class RingBuffer:
             self._data = self._data[:keep] + self._data[-keep:]
 
     def text(self) -> str:
-        s = self._data.decode("utf-8", "replace")
+        s = decode_output(bytes(self._data))
         if self._dropped:
             mid = len(s) // 2
             s = f"{s[:mid]}\n...[{self._dropped} bytes truncated]...\n{s[mid:]}"
@@ -138,16 +176,42 @@ async def _watch_timeout(job: Job, timeout: float) -> None:
         _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
 
 
+# --- rendering: echo the command + output as a terminal-style block --------
+# Returning a ToolResult gives Continue's UI a readable transcript (content)
+# while still handing the model the structured fields (structured_content /
+# res.data). Without this the command and output are buried in escaped JSON.
+def _console_text(cmd: str, snap: dict) -> str:
+    parts = [f"$ {cmd}"]
+    out = (snap.get("stdout") or "").rstrip("\n")
+    err = (snap.get("stderr") or "").rstrip("\n")
+    if out:
+        parts.append(out)
+    if err:
+        parts.append("[stderr]\n" + err)
+    state, ec = snap.get("state"), snap.get("exit_code")
+    tail = f"[{state}]" + (f" exit {ec}" if ec is not None else "")
+    if snap.get("job_id") and ec is None and not out and not err:
+        tail += f" job={snap['job_id']}"
+    parts.append(tail)
+    return "```console\n" + "\n".join(parts) + "\n```"
+
+
+def _shell_result(cmd: str, snap: dict) -> ToolResult:
+    return ToolResult(
+        content=[TextContent(type="text", text=_console_text(cmd, snap))],
+        structured_content=snap,
+    )
+
+
 # --- tools (§2c) -----------------------------------------------------------
-@mcp.tool
-async def start(
+async def _start(
     cmd: str,
     shell: Optional[str] = None,
     cwd: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> dict:
-    """Start a shell command in the background. Returns instantly with a job_id;
-    poll it with output()/poll(), stop it with kill(). shell = bash|pwsh|powershell|cmd."""
+    """Launch the process and register the job. Internal: run()/start() call this;
+    only the @mcp.tool wrappers shape the ToolResult the client sees."""
     shell_name = (shell or ("pwsh" if IS_WINDOWS else "bash")).lower()
     argv = build_argv(cmd, shell_name)  # validates shell_name even on the cmd path
     # cwd defaults to the workspace, and relative cwd resolves against it — the
@@ -190,6 +254,25 @@ async def start(
     return {"job_id": job.job_id, "state": job.state}
 
 
+@mcp.tool
+async def start(
+    cmd: str,
+    shell: Optional[str] = None,
+    cwd: Optional[str] = None,
+    timeout: Optional[float] = None,
+) -> ToolResult:
+    """Start a shell command in the background. Returns instantly with a job_id;
+    poll it with output()/poll(), stop it with kill().
+
+    This tool IS a shell — pass `cmd` exactly as you'd type it at the prompt. Do
+    NOT prefix it with an interpreter name (don't pass `pwsh script.ps1` or
+    `bash script.sh`); pick the interpreter with the `shell` argument instead.
+    shell = bash | pwsh | powershell | cmd (default: pwsh on Windows, bash else).
+    To run a script file, use the shell's own call syntax, e.g. PowerShell
+    `& ./Deploy.ps1 -Env prod`, bash `./deploy.sh`."""
+    return _shell_result(cmd, await _start(cmd, shell=shell, cwd=cwd, timeout=timeout))
+
+
 async def _reap(job: Job) -> None:
     """Wait for exit, finalize state/exit_code once readers have drained."""
     rc = await job.proc.wait()
@@ -217,31 +300,34 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
 
 
 @mcp.tool
-async def output(job_id: str, since_stdout: int = 0, since_stderr: int = 0) -> dict:
+async def output(job_id: str, since_stdout: int = 0, since_stderr: int = 0) -> ToolResult:
     """Return new stdout/stderr for a job since the given cursors (incremental
     injection). Pass the returned *_cursor values back on the next call to stream."""
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"no such job: {job_id}")
-    return _snapshot(job, since_stdout, since_stderr)
+    return _shell_result(job.cmd, _snapshot(job, since_stdout, since_stderr))
 
 
 @mcp.tool
-async def poll(job_id: str) -> dict:
+async def poll(job_id: str) -> ToolResult:
     """Lightweight status check: state, exit_code, runtime. No output payload."""
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"no such job: {job_id}")
-    return {
+    data = {
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
         "runtime_ms": int((time.monotonic() - job.started) * 1000),
     }
+    tail = f"[{data['state']}]" + (f" exit {data['exit_code']}" if data['exit_code'] is not None else "")
+    text = f"{data['job_id']}: {tail} · {data['runtime_ms']}ms · $ {job.cmd}"
+    return ToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
 
 
 @mcp.tool
-async def kill(job_id: str) -> dict:
+async def kill(job_id: str) -> ToolResult:
     """Kill a running job and its whole process tree."""
     job = JOBS.get(job_id)
     if not job:
@@ -249,13 +335,15 @@ async def kill(job_id: str) -> dict:
     if job.proc.returncode is None:
         job.state = "killed"
         _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
-    return {"job_id": job.job_id, "state": job.state}
+    data = {"job_id": job.job_id, "state": job.state}
+    text = f"{data['job_id']}: [{data['state']}] · $ {job.cmd}"
+    return ToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
 
 
 @mcp.tool
-async def list_jobs() -> list[dict]:
+async def list_jobs() -> ToolResult:
     """List all known jobs and their states."""
-    return [
+    jobs = [
         {
             "job_id": j.job_id,
             "cmd": j.cmd,
@@ -264,18 +352,29 @@ async def list_jobs() -> list[dict]:
         }
         for j in JOBS.values()
     ]
+    data = {"jobs": jobs, "count": len(jobs)}
+    block = "\n".join(
+        f"{j['job_id']}  [{j['state']}]  {j['runtime_ms']}ms  $ {j['cmd']}" for j in jobs
+    )
+    md = f"{len(jobs)} job(s)" + (f"\n\n```console\n{block}\n```" if block else "")
+    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 
 @mcp.tool
-async def run(cmd: str, shell: Optional[str] = None, timeout: float = 30.0) -> dict:
+async def run(cmd: str, shell: Optional[str] = None, timeout: float = 30.0) -> ToolResult:
     """Convenience: start a command and wait up to `timeout` for it to finish.
-    For quick one-liners. Long jobs should use start()/output() instead."""
-    started = await start(cmd, shell=shell, timeout=timeout)
+    For quick one-liners; long jobs should use start()/output() instead.
+
+    This tool IS a shell — pass `cmd` as you'd type it at the prompt, without an
+    interpreter prefix (no `pwsh script.ps1`); choose the interpreter with
+    `shell` = bash | pwsh | powershell | cmd (default: pwsh on Windows, bash
+    else). Run a script with the shell's call syntax, e.g. `& ./Deploy.ps1`."""
+    started = await _start(cmd, shell=shell, timeout=timeout)
     job = JOBS[started["job_id"]]
     deadline = time.monotonic() + timeout
     while job.state == "running" and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
-    return _snapshot(job)
+    return _shell_result(cmd, _snapshot(job))
 
 
 def main() -> None:

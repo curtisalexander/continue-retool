@@ -29,8 +29,19 @@ from typing import Optional
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StdioTransport
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 from .registry import build_catalog, rank_tools
+
+
+def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
+    """content is what Continue's UI shows (summary + optional fenced block);
+    structured_content is what the model reads via res.data."""
+    md = summary
+    if block.strip():
+        md += f"\n\n```{lang}\n{block}\n```"
+    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 INSTRUCTIONS = (
     "This server exposes many tools behind three meta-tools. To use ANY capability: "
@@ -123,54 +134,74 @@ def _unwrap(result):
 
 # --- the three meta-tools --------------------------------------------------
 @mcp.tool
-async def search(query: str = "", limit: int = 15) -> dict:
+async def search(query: str = "", limit: int = 15) -> ToolResult:
     """STEP 1 of 3. Find tools by keyword/intent (e.g. 'run a command', 'search
     code', 'replace text in a file'). Returns a shortlist of {name, summary} — NOT
     full schemas. Then call describe(name) for the arguments. Empty query lists
     everything."""
     if STATE.catalog is None:
-        return {"error": "catalog not ready"}
+        return _result("catalog not ready", {"error": "catalog not ready"})
     hits = rank_tools(STATE.catalog, query, limit)
-    return {
+    data = {
         "query": query,
         "count": len(hits),
         "tools": [{"name": e.name, "summary": e.summary} for e in hits],
         "next": "call describe(name) to get a tool's argument schema",
     }
+    block = "\n".join(f"{t['name']} — {t['summary']}" for t in data["tools"])
+    return _result(f"{data['count']} tool(s) for {query!r}", data, block)
 
 
 @mcp.tool
-async def describe(name: str) -> dict:
+async def describe(name: str) -> ToolResult:
     """STEP 2 of 3. Get the full description + JSON argument schema for ONE tool
     (a name from search(), e.g. 'shell.start'). Use it to build the arguments for
     call()."""
     if STATE.catalog is None:
-        return {"error": "catalog not ready"}
+        return _result("catalog not ready", {"error": "catalog not ready"})
     e = STATE.catalog.resolve(name)
     if not e:
-        return {"error": f"unknown tool {name!r}", "did_you_mean": STATE.catalog.suggest(name)}
-    return {"name": e.name, "description": e.description, "input_schema": e.schema}
+        data = {"error": f"unknown tool {name!r}", "did_you_mean": STATE.catalog.suggest(name)}
+        return _result(f"unknown tool {name!r}", data)
+    data = {"name": e.name, "description": e.description, "input_schema": e.schema}
+    return _result(f"{e.name}\n{e.description}", data, json.dumps(e.schema, indent=2), lang="json")
 
 
 @mcp.tool
-async def call(name: str, arguments: Optional[dict] = None) -> object:
+async def call(name: str, arguments: Optional[dict] = None) -> ToolResult:
     """STEP 3 of 3. Run a tool discovered via search()/describe(). `name` is like
     'shell.start'; `arguments` must match that tool's schema (see describe()). The
     tool's result is returned and injected into context just like a native tool."""
     if STATE.catalog is None:
-        return {"error": "catalog not ready"}
+        return _result("catalog not ready", {"error": "catalog not ready"})
     e = STATE.catalog.resolve(name)
     if not e:
-        return {"error": f"unknown tool {name!r}; call search() first",
+        data = {"error": f"unknown tool {name!r}; call search() first",
                 "did_you_mean": STATE.catalog.suggest(name)}
+        return _result(f"unknown tool {name!r}", data)
     client = STATE.clients.get(e.server)
     if client is None:
-        return {"error": f"downstream server {e.server!r} is not connected"}
+        return _result(f"downstream {e.server!r} not connected",
+                       {"error": f"downstream server {e.server!r} is not connected"})
     try:
         result = await client.call_tool(e.tool, arguments or {})
     except Exception as exc:  # surface downstream errors to the model, don't crash
-        return {"error": f"call to {name} failed: {exc}"}
-    return _unwrap(result)
+        return _result(f"call to {name} failed: {exc}", {"error": f"call to {name} failed: {exc}"})
+    # Pass the downstream tool's rendering straight through: keep its content
+    # blocks (so a diff/console still shows in the UI) AND its structured data.
+    content = _list_content(result)
+    structured = getattr(result, "structured_content", None)
+    if not isinstance(structured, dict):
+        structured = None
+    if not content and structured is None:
+        return _result(f"{name} ok", {"result": _unwrap(result)})
+    return ToolResult(content=content, structured_content=structured)
+
+
+def _list_content(result) -> list:
+    """The downstream result's content blocks, ready to re-emit."""
+    blocks = getattr(result, "content", None) or []
+    return [b for b in blocks if b is not None]
 
 
 def main() -> None:

@@ -54,20 +54,20 @@ def test_grep_finds_match(tmp_path):
     (tmp_path / "a.txt").write_text("hello\nNEEDLE here\nbye\n")
     (tmp_path / "b.txt").write_text("nothing\n")
     res = asyncio.run(server.grep("NEEDLE", path=str(tmp_path)))
-    assert res["count"] == 1
-    hit = next(r for r in res["matches"] if r["kind"] == "match")
+    assert res.structured_content["count"] == 1
+    hit = next(r for r in res.structured_content["matches"] if r["kind"] == "match")
     assert hit["file"].endswith("a.txt")
     assert hit["line"] == 2
     assert "NEEDLE" in hit["text"]
-    assert res["truncated"] is False
+    assert res.structured_content["truncated"] is False
 
 
 @needs_rg
 def test_grep_respects_max_results(tmp_path):
     (tmp_path / "many.txt").write_text("x\n" * 50)
     res = asyncio.run(server.grep("x", path=str(tmp_path), max_results=5))
-    assert res["count"] == 5
-    assert res["truncated"] is True
+    assert res.structured_content["count"] == 5
+    assert res.structured_content["truncated"] is True
 
 
 @needs_rg
@@ -75,8 +75,8 @@ def test_grep_glob_filters_by_type(tmp_path):
     (tmp_path / "keep.py").write_text("target\n")
     (tmp_path / "skip.md").write_text("target\n")
     res = asyncio.run(server.grep("target", path=str(tmp_path), glob=["*.py"]))
-    assert res["count"] == 1
-    assert res["matches"][0]["file"].endswith("keep.py")
+    assert res.structured_content["count"] == 1
+    assert res.structured_content["matches"][0]["file"].endswith("keep.py")
 
 
 @needs_rg
@@ -85,8 +85,8 @@ def test_files_lists_by_glob(tmp_path):
     (tmp_path / "two.py").write_text("")
     (tmp_path / "note.md").write_text("")
     res = asyncio.run(server.files(glob=["*.py"], path=str(tmp_path)))
-    assert res["count"] == 2
-    assert all(p.endswith(".py") for p in res["files"])
+    assert res.structured_content["count"] == 2
+    assert all(p.endswith(".py") for p in res.structured_content["files"])
 
 
 @needs_rg
@@ -96,4 +96,4 @@ def test_relative_path_resolves_against_workspace(tmp_path, monkeypatch):
     sub.mkdir()
     (sub / "c.txt").write_text("WORKSPACE_NEEDLE\n")
     res = asyncio.run(server.grep("WORKSPACE_NEEDLE", path="sub"))
-    assert res["count"] == 1
+    assert res.structured_content["count"] == 1

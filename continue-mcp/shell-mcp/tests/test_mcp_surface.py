@@ -70,7 +70,7 @@ def test_start_poll_output_lifecycle_over_mcp():
                 await asyncio.sleep(0.1)
             out = await c.call_tool("output", {"job_id": jid})
             listing = await c.call_tool("list_jobs", {})
-            return st.data, out.data, listing.data
+            return st.data, out.data, listing.data["jobs"]
 
     st, out, listing = asyncio.run(scenario())
     assert st["state"] == "exited" and st["exit_code"] == 0

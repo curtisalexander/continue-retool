@@ -26,8 +26,19 @@ import sys
 from typing import Optional
 
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 mcp = FastMCP("sql")
+
+
+def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
+    """content is what Continue's UI shows (summary + optional fenced block);
+    structured_content is what the model/tests read via res.data."""
+    md = summary
+    if block.strip():
+        md += f"\n\n```{lang}\n{block}\n```"
+    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 DEFAULT_TIMEOUT = float(os.environ.get("SQL_MCP_TIMEOUT", "30"))
 
@@ -86,7 +97,7 @@ def _base_args(cmd: str, dialect: Optional[str]) -> list[str]:
 
 # --- tools -----------------------------------------------------------------
 @mcp.tool
-async def format(sql: str, dialect: Optional[str] = None) -> dict:
+async def format(sql: str, dialect: Optional[str] = None) -> ToolResult:
     """Format SQL to house style (lowercase keywords/identifiers, leading commas;
     Snowflake dialect by default). Returns the rewritten SQL and whether it changed."""
     rc, out, err = await _run_sqruff(_base_args("fix", dialect), sql)
@@ -94,14 +105,17 @@ async def format(sql: str, dialect: Optional[str] = None) -> dict:
     # no usable rewrite — report the error instead of returning garbage.
     if not out.strip():
         detail = err.strip().splitlines()
-        return {"ok": False, "error": "sqruff produced no output (unparsable SQL?)",
+        data = {"ok": False, "error": "sqruff produced no output (unparsable SQL?)",
                 "detail": detail[-5:] if detail else []}
+        return _result(f"❌ {data['error']}", data, block="\n".join(data.get('detail') or []))
     out = out.rstrip("\n") + "\n"  # sqruff pads stdout with an extra newline
-    return {"ok": True, "sql": out, "changed": out.rstrip("\n") != sql.rstrip("\n")}
+    data = {"ok": True, "sql": out, "changed": out.rstrip("\n") != sql.rstrip("\n")}
+    summary = "formatted (changed)" if data["changed"] else "formatted (no change)"
+    return _result(summary, data, block=data["sql"], lang="sql")
 
 
 @mcp.tool
-async def lint(sql: str, dialect: Optional[str] = None) -> dict:
+async def lint(sql: str, dialect: Optional[str] = None) -> ToolResult:
     """Lint SQL against house style (Snowflake dialect by default). Returns
     violations as {code, line, column, message}; empty list means clean."""
     rc, out, err = await _run_sqruff(
@@ -110,8 +124,9 @@ async def lint(sql: str, dialect: Optional[str] = None) -> dict:
     try:
         parsed = json.loads(out) if out.strip() else {}
     except json.JSONDecodeError:
-        return {"ok": False, "error": "could not parse sqruff output",
+        data = {"ok": False, "error": "could not parse sqruff output",
                 "detail": (err or out).strip().splitlines()[-5:]}
+        return _result(f"❌ {data['error']}", data, block="\n".join(data.get('detail') or []))
     violations = []
     for _fname, diags in parsed.items():
         for d in diags:
@@ -122,7 +137,11 @@ async def lint(sql: str, dialect: Optional[str] = None) -> dict:
                 "column": start.get("character"),
                 "message": d.get("message"),
             })
-    return {"ok": True, "violations": violations, "count": len(violations)}
+    data = {"ok": True, "violations": violations, "count": len(violations)}
+    if data["count"] == 0:
+        return _result("clean — 0 violations", data)
+    block = "\n".join(f"{v['line']}:{v['column']} {v['code']} {v['message']}" for v in data["violations"])
+    return _result(f"{data['count']} violation(s)", data, block)
 
 
 def main() -> None:
