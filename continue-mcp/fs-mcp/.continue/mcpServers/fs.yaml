@@ -12,6 +12,10 @@ mcpServers:
     # NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
     # it's the base for relative paths.
     args: ["run", "--no-sync", "--project", "/absolute/path/to/continue-mcp/fs-mcp", "fs-mcp"]
+    # Continue aborts the initial connect after a short default; a cold first
+    # launch (interpreter start + fastmcp import, slower under corp antivirus)
+    # can exceed it and show as "Connection timed out". Give it generous room.
+    connectionTimeout: 120000    # ms
     env:
       MCP_WORKSPACE: /absolute/path/to/your/workspace
       FS_MCP_DEFAULT_LIMIT: "2000"    # max lines per read call

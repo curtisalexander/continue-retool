@@ -14,6 +14,10 @@ mcpServers:
     # NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
     # notes are stored at the enclosing repo's root, found by walking up from it.
     args: ["run", "--no-sync", "--project", "/absolute/path/to/continue-mcp/notes-mcp", "notes-mcp"]
+    # Continue aborts the initial connect after a short default; a cold first
+    # launch (interpreter start + fastmcp import, slower under corp antivirus)
+    # can exceed it and show as "Connection timed out". Give it generous room.
+    connectionTimeout: 120000    # ms
     env:
       MCP_WORKSPACE: /absolute/path/to/your/workspace
       # NOTES_MCP_DIRNAME: .continue-notes   # storage dirname at the repo root
