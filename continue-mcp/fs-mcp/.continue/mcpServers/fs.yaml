@@ -3,12 +3,16 @@
 #   * set the built-in  Read file  and  List dir  policies to  Excluded
 #   * set  fs.read / fs.list  to  Automatic  (read-only tools)
 name: fs
-command: uv
-# --project pins the server's uv environment to its package dir, so `cwd` is
-# NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
-# it's the base for relative paths.
-args: ["run", "--project", "/absolute/path/to/continue-mcp/fs-mcp", "fs-mcp"]
-env:
-  MCP_WORKSPACE: /absolute/path/to/your/workspace
-  FS_MCP_DEFAULT_LIMIT: "2000"    # max lines per read call
-  FS_MCP_MAX_ENTRIES: "500"       # max entries per listing
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: fs
+    command: uv
+    # --project pins the server's uv environment to its package dir, so `cwd` is
+    # NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
+    # it's the base for relative paths.
+    args: ["run", "--project", "/absolute/path/to/continue-mcp/fs-mcp", "fs-mcp"]
+    env:
+      MCP_WORKSPACE: /absolute/path/to/your/workspace
+      FS_MCP_DEFAULT_LIMIT: "2000"    # max lines per read call
+      FS_MCP_MAX_ENTRIES: "500"       # max entries per listing

@@ -3,10 +3,14 @@
 #   * "pong" back  -> MCP is enabled; proceed to shell-mcp.
 #   * tool missing -> MCP is disabled or config is locked by IT. Stop and find out.
 name: hello
-command: uv
-# --project pins the server's uv environment to its package dir, so `cwd` is
-# NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
-# it's the base for relative paths.
-args: ["run", "--project", "/absolute/path/to/continue-mcp/hello-mcp", "hello-mcp"]
-env:
-  MCP_WORKSPACE: /absolute/path/to/your/workspace
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: hello
+    command: uv
+    # --project pins the server's uv environment to its package dir, so `cwd` is
+    # NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
+    # it's the base for relative paths.
+    args: ["run", "--project", "/absolute/path/to/continue-mcp/hello-mcp", "hello-mcp"]
+    env:
+      MCP_WORKSPACE: /absolute/path/to/your/workspace

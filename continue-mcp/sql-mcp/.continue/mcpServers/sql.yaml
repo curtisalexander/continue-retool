@@ -2,12 +2,16 @@
 # sql.format / sql.lint are read-only over your files (they take SQL strings),
 # so Automatic is a reasonable policy once you trust the output.
 name: sql
-command: uv
-# --project pins the server's uv environment to its package dir, so `cwd` is
-# NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
-# it's the base for relative paths.
-args: ["run", "--project", "/absolute/path/to/continue-mcp/sql-mcp", "sql-mcp"]
-env:
-  MCP_WORKSPACE: /absolute/path/to/your/workspace
-  SQL_MCP_TIMEOUT: "30"
-  # SQL_MCP_CONFIG: /wherever/your/own/.sqruff   # optional: override the house style
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: sql
+    command: uv
+    # --project pins the server's uv environment to its package dir, so `cwd` is
+    # NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
+    # it's the base for relative paths.
+    args: ["run", "--project", "/absolute/path/to/continue-mcp/sql-mcp", "sql-mcp"]
+    env:
+      MCP_WORKSPACE: /absolute/path/to/your/workspace
+      SQL_MCP_TIMEOUT: "30"
+      # SQL_MCP_CONFIG: /wherever/your/own/.sqruff   # optional: override the house style
