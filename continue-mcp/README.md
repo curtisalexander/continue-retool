@@ -100,6 +100,8 @@ Then in Continue: add each `.continue/mcpServers/*.yaml` and set tool policies:
 python3 install-workspace.py /path/to/your/project              # macOS/Linux
 python install-workspace.py C:/path/to/your/project             # Windows
 python3 install-workspace.py /path/to/proj --only shell,fs      # a subset
+python3 install-workspace.py /path/to/proj --no-sync            # config only
+python3 install-workspace.py /path/to/proj --jobs 1             # sync one at a time
 ```
 
 Copies every server's yaml into the project's `.continue/mcpServers/` with the
@@ -109,6 +111,18 @@ the project), copies the two rules into `.continue/rules/`, and then runs
 Continue ever launches it. Finally it prints the tool-policy checklist. Then ask
 the agent to call `hello.ping` (MCP is on) and `hello.whoami` (shows the cwd and
 workspace the servers actually see).
+
+**Syncs run in parallel.** Each server is its own uv project, so the installer
+syncs them concurrently — a thread per server, capped at `--jobs` (default
+`min(servers, CPUs)`; `--jobs 1` forces one-at-a-time). This is safe because uv
+locks its global cache per entry, so parallel `uv sync` processes share a single
+download of any shared package rather than racing. Because parallel output would
+interleave, each server's uv output is captured, not streamed: you get a
+`[done/total]` line with a compact `Installed N packages` summary as each
+finishes, a heartbeat naming whatever's still running on long cold-cache runs,
+and the full captured uv error grouped per server for anything that fails (the
+exit code is non-zero if any server failed). Drop to `--jobs 1` if a locked-down
+network throttles concurrent connections, or `--no-sync` to skip the build.
 
 **Where the venvs land.** Each `*-mcp` is its own uv project, so `uv sync`
 creates one virtualenv *per server* at `<this checkout>/<name>-mcp/.venv` — e.g.
