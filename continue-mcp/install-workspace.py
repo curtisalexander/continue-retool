@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 """
 install-workspace.py — wire this toolkit into a project in one command.
 
@@ -38,11 +38,12 @@ server's uv output is captured rather than interleaved; you get a live
 [done/total] line as each finishes, a heartbeat naming whatever's still running
 on long cold-cache runs, and the full captured error for any server that fails.
 
-Usage:
-  python3 install-workspace.py /path/to/your/project
-  python3 install-workspace.py /path/to/your/project --only shell,search,edit
-  python3 install-workspace.py /path/to/your/project --no-sync
-  python3 install-workspace.py /path/to/your/project --jobs 1   # sequential
+Usage (uv runs it via the shebang — `python3` isn't on PATH on Windows):
+  uv run install-workspace.py /path/to/your/project
+  uv run install-workspace.py /path/to/your/project --only shell,search,edit
+  uv run install-workspace.py /path/to/your/project --no-sync
+  uv run install-workspace.py /path/to/your/project --jobs 1   # sequential
+Or, on a Unix shell, directly: ./install-workspace.py /path/to/your/project
 """
 from __future__ import annotations
 

@@ -97,11 +97,12 @@ Then in Continue: add each `.continue/mcpServers/*.yaml` and set tool policies:
 ## Install into a project (one command)
 
 ```bash
-python3 install-workspace.py /path/to/your/project              # macOS/Linux
-python install-workspace.py C:/path/to/your/project             # Windows
-python3 install-workspace.py /path/to/proj --only shell,fs      # a subset
-python3 install-workspace.py /path/to/proj --no-sync            # config only
-python3 install-workspace.py /path/to/proj --jobs 1             # sync one at a time
+# uv runs the script (its shebang is `uv run --script`); works the same on
+# macOS/Linux/Windows, where a bare `python3` often isn't on PATH.
+uv run install-workspace.py /path/to/your/project              # any OS
+uv run install-workspace.py /path/to/proj --only shell,fs      # a subset
+uv run install-workspace.py /path/to/proj --no-sync            # config only
+uv run install-workspace.py /path/to/proj --jobs 1             # sync one at a time
 ```
 
 Copies every server's yaml into the project's `.continue/mcpServers/` with the
