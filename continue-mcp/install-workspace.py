@@ -16,6 +16,11 @@ failures are visible — instead of lazily on first launch, when Continue spawns
 the server headless and a slow first sync looks like a hang. Pass --no-sync to
 skip (e.g. offline, or you'll sync by hand).
 
+Corporate networks: `uv sync` reaches a package index, so behind a proxy set
+UV_SYSTEM_CERTS=true (trust the OS cert store) and UV_DEFAULT_INDEX=<mirror>
+before running this — or put system-certs/index in a user/system uv.toml. Both
+apply to every uv call, so no per-directory pyproject edits. See README.
+
 Re-running is safe: an existing .yaml/rule file is only rewritten when its
 content actually changed, and the previous version is saved alongside as
 <file>.bak before it's replaced.
@@ -45,12 +50,22 @@ Next, in Continue's Agent tool settings:
   * built-in Read file / List dir      -> Excluded;  fs.*     -> Automatic
   * sql.* and notes.*                  -> Automatic (replace no built-ins)
 
-Then ask the agent to call hello.ping (proves MCP is on) and hello.whoami
-(shows the cwd and MCP_WORKSPACE the servers actually see).
+Suggested first prompt — paste this into Continue's Agent chat to confirm MCP
+is live and the servers see the right workspace:
+
+  Call the hello.ping tool and show me the raw result, then call hello.whoami
+  and tell me the cwd and MCP_WORKSPACE it reports.
+
+A "pong" back means MCP is on; whoami's paths should point at THIS project.
 
 Using the gateway instead? Register gateway.yaml by hand and do NOT install
 the downstream servers here too — see gateway-mcp/README.md.
 """
+
+CORP_NOTE = (
+    "  Behind a corporate proxy? `uv sync` needs UV_SYSTEM_CERTS=true and\n"
+    "  UV_DEFAULT_INDEX=<your mirror> set (or a user/system uv.toml). See README."
+)
 
 
 def _slashes(p: str) -> str:
@@ -124,6 +139,7 @@ def sync_deps(names: list[str]) -> int:
         return len(names)
 
     print(f"\nSyncing dependencies for {len(names)} server(s) (uv sync):")
+    print(CORP_NOTE)
     failures = 0
     for name in names:
         pkg = os.path.join(KIT_DIR, f"{name}-mcp")
@@ -177,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print(f"WARNING: {failures} server(s) did not sync — see errors above.",
               file=sys.stderr)
+        print(CORP_NOTE, file=sys.stderr)
         return 1
     return 0
 
