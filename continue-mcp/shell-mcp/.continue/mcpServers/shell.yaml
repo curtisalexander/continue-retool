@@ -21,3 +21,9 @@ mcpServers:
       MCP_WORKSPACE: /absolute/path/to/your/workspace
       SHELL_MCP_DEFAULT_TIMEOUT: "120"    # seconds; server kills + reports on deadline
       SHELL_MCP_MAX_BUFFER: "262144"      # per-stream byte cap before mid-truncation
+      # The installer replaces the next line with SHELL_MCP_PWSH / _POWERSHELL /
+      # _BASH / _CMD = absolute interpreter paths + SHELL_MCP_DEFAULT_SHELL, all
+      # detected from the terminal it runs in (where PATH is correct). This is why
+      # the server doesn't depend on GUI-launched VS Code's stale PATH to find an
+      # interpreter — same reasoning as stamping uv's absolute path into command:.
+      # __SHELL_INTERPRETERS__

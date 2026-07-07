@@ -103,6 +103,64 @@ def stamp(text: str, server: str, workspace: str, uv_path: str) -> str:
     return text
 
 
+# --- shell-mcp interpreter detection ---------------------------------------
+# The shell server spawns an interpreter (pwsh/powershell/bash/cmd) per call and
+# has to *find* it first. From GUI-launched VS Code its inherited PATH is often
+# stale/thin (pwsh lives in Program Files, not a guaranteed dir; pwsh 7 may not
+# be installed at all). So we resolve interpreters HERE — in a real terminal
+# where PATH is correct — and stamp their absolute paths into the yaml env, the
+# same tactic already used for uv in command:. The server still resolves at
+# runtime when these are absent (manual install, or a shell added afterward).
+_SHELL_INTERPRETERS = ["pwsh", "powershell", "cmd", "bash"]
+
+
+def detect_interpreters() -> dict[str, str]:
+    """Resolve which shells exist on THIS machine -> {shell: absolute path}."""
+    found: dict[str, str] = {}
+    for shell in _SHELL_INTERPRETERS:
+        exe = shutil.which(shell)
+        if exe:
+            found[shell] = _slashes(exe)
+    return found
+
+
+def _default_shell_for(found: dict[str, str]) -> str:
+    """Prefer a real interpreter: pwsh > powershell > cmd on Windows, bash off it."""
+    order = ("pwsh", "powershell", "cmd") if os.name == "nt" else ("bash",)
+    for s in order:
+        if s in found:
+            return s
+    return next(iter(found), "bash")
+
+
+def stamp_shell_interpreters(text: str) -> str:
+    """Replace the __SHELL_INTERPRETERS__ marker line in shell.yaml with the
+    detected interpreter paths + default shell, indented to match the marker."""
+    marker = "# __SHELL_INTERPRETERS__"
+    found = detect_interpreters()
+    out: list[str] = []
+    for line in text.splitlines():
+        if marker in line:
+            indent = line[: len(line) - len(line.lstrip())]
+            if found:
+                for shell, path in found.items():
+                    out.append(f'{indent}SHELL_MCP_{shell.upper()}: "{path}"')
+                out.append(f'{indent}SHELL_MCP_DEFAULT_SHELL: "{_default_shell_for(found)}"')
+                shells = ", ".join(found)
+                print(f"  detected shells for shell-mcp: {shells} "
+                      f"(default {_default_shell_for(found)})")
+            else:
+                out.append(f"{indent}# no shells detected at install; "
+                           f"server resolves interpreters at runtime")
+                print("  WARNING: no pwsh/powershell/bash/cmd found on PATH — "
+                      "shell-mcp will resolve interpreters at runtime.",
+                      file=sys.stderr)
+        else:
+            out.append(line)
+    result = "\n".join(out)
+    return result + "\n" if text.endswith("\n") else result
+
+
 def write_out(dest: str, content: str) -> None:
     """Write content to dest, but only if it changed. When an existing file is
     about to be replaced, its old contents are saved to <dest>.bak first so a
@@ -135,6 +193,8 @@ def install(project: str, names: list[str], uv_path: str) -> None:
         src = os.path.join(KIT_DIR, f"{name}-mcp", ".continue", "mcpServers", f"{name}.yaml")
         with open(src, "r", encoding="utf-8") as f:
             content = stamp(f.read(), name, project, uv_path)
+        if name == "shell":
+            content = stamp_shell_interpreters(content)
         write_out(os.path.join(mcp_dir, f"{name}.yaml"), content)
 
     for rule in RULES:

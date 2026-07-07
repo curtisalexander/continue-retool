@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import locale
 import os
+import shutil
 import signal
 import sys
 import time
@@ -71,20 +72,93 @@ def decode_output(data: bytes) -> str:
         return data.decode(_FALLBACK_ENCODING, errors="replace")
 
 
-# --- shell selection (§2b) -------------------------------------------------
+# --- shell selection + interpreter resolution (§2b) ------------------------
+# We spawn the interpreter as argv[0], so it has to be *found* first. Relying on
+# a bare name ("pwsh") means an OS PATH lookup against whatever environment the
+# server inherited — and a GUI-launched VS Code often has a stale/thin PATH that
+# lacks pwsh (installed to Program Files, not a guaranteed dir) or where pwsh 7
+# isn't installed at all (only Windows PowerShell 5.1 ships). That's what drives
+# a client to `where pwsh` and hard-code the path. So we resolve the interpreter
+# ourselves, robustly, and hand create_subprocess_exec an absolute path.
+#
+# name -> (executable to locate, args that wrap the command string)
+_INTERP: dict[str, tuple[str, list[str]]] = {
+    "bash":       ("bash",           ["-lc"]),
+    "pwsh":       ("pwsh",           ["-NoProfile", "-Command"]),
+    "powershell": ("powershell.exe", ["-NoProfile", "-Command"]),
+    "cmd":        ("cmd.exe",        ["/c"]),
+}
+
+
+def _known_locations(shell: str) -> list[str]:
+    """Fixed install paths to try when PATH lookup misses (the stale-GUI-PATH
+    case). These are where each interpreter actually lives on a default box."""
+    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    return {
+        "pwsh": [os.path.join(pf, "PowerShell", "7", "pwsh.exe")],
+        "powershell": [os.path.join(
+            sysroot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")],
+        "cmd": [os.path.join(sysroot, "System32", "cmd.exe")],
+        "bash": ["/bin/bash", "/usr/bin/bash",
+                 os.path.join(pf, "Git", "bin", "bash.exe")],
+    }.get(shell, [])
+
+
+def resolve_interpreter(shell: str, exe_name: Optional[str] = None) -> Optional[str]:
+    """Locate an interpreter binary so the client never has to `where` it and
+    hard-code a path. Order:
+      1. SHELL_MCP_<SHELL> env override — trusted as-is (the installer stamps an
+         absolute path here from a real terminal, mirroring how command: uv is
+         stamped; a stale stamp is a re-run-the-installer situation, like uv).
+      2. PATH lookup (shutil.which).
+      3. known install locations (patches a stale/thin inherited PATH).
+    Returns None if nothing resolves."""
+    if exe_name is None:
+        exe_name = _INTERP.get(shell, (shell, []))[0]
+    override = os.environ.get(f"SHELL_MCP_{shell.upper()}")
+    if override:
+        return override
+    found = shutil.which(exe_name)
+    if found:
+        return found
+    for cand in _known_locations(shell):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _default_shell() -> str:
+    """Pick a default interpreter that actually exists. On Windows that's pwsh
+    (PowerShell 7) when present, else powershell (5.1, always installed) — never
+    a hard default at an interpreter that may be absent. Override with
+    SHELL_MCP_DEFAULT_SHELL (the installer stamps the one it detected)."""
+    forced = os.environ.get("SHELL_MCP_DEFAULT_SHELL")
+    if forced:
+        return forced.lower()
+    if IS_WINDOWS:
+        return "pwsh" if resolve_interpreter("pwsh") else "powershell"
+    return "bash"
+
+
 def build_argv(cmd: str, shell: Optional[str]) -> list[str]:
-    """Map a shell name + a command string to an argv. We pass the whole command
-    to the shell via -c / -Command rather than tokenizing it ourselves."""
-    shell = (shell or ("pwsh" if IS_WINDOWS else "bash")).lower()
-    if shell == "bash":
-        return ["bash", "-lc", cmd]
-    if shell == "pwsh":
-        return ["pwsh", "-NoProfile", "-Command", cmd]
-    if shell == "powershell":
-        return ["powershell.exe", "-NoProfile", "-Command", cmd]
-    if shell == "cmd":
-        return ["cmd.exe", "/c", cmd]
-    raise ValueError(f"unknown shell: {shell!r} (use bash|pwsh|powershell|cmd)")
+    """Map a shell name + a command string to an argv, with argv[0] resolved to
+    an absolute interpreter path. We pass the whole command to the shell via
+    -c / -Command rather than tokenizing it ourselves."""
+    shell = (shell or _default_shell()).lower()
+    if shell not in _INTERP:
+        raise ValueError(f"unknown shell: {shell!r} (use bash|pwsh|powershell|cmd)")
+    exe_name, wrap = _INTERP[shell]
+    exe = resolve_interpreter(shell, exe_name)
+    if exe is None:
+        raise ValueError(
+            f"interpreter for shell={shell!r} ({exe_name}) not found — not on "
+            f"PATH, not in known install locations, and SHELL_MCP_{shell.upper()} "
+            f"is unset. Install it or choose a different shell= "
+            f"(bash|pwsh|powershell|cmd); do NOT prefix cmd with an interpreter "
+            f"name or an absolute path."
+        )
+    return [exe, *wrap, cmd]
 
 
 # --- a capped buffer so a runaway command can't blow the context window ----
@@ -212,8 +286,8 @@ async def _start(
 ) -> dict:
     """Launch the process and register the job. Internal: run()/start() call this;
     only the @mcp.tool wrappers shape the ToolResult the client sees."""
-    shell_name = (shell or ("pwsh" if IS_WINDOWS else "bash")).lower()
-    argv = build_argv(cmd, shell_name)  # validates shell_name even on the cmd path
+    shell_name = (shell or _default_shell()).lower()
+    argv = build_argv(cmd, shell_name)  # resolves + validates, even on the cmd path
     # cwd defaults to the workspace, and relative cwd resolves against it — the
     # server's own cwd (wherever Continue launched it) is never the implicit base.
     workspace = os.environ.get("MCP_WORKSPACE")
@@ -265,11 +339,12 @@ async def start(
     poll it with output()/poll(), stop it with kill().
 
     This tool IS a shell — pass `cmd` exactly as you'd type it at the prompt. Do
-    NOT prefix it with an interpreter name (don't pass `pwsh script.ps1` or
-    `bash script.sh`); pick the interpreter with the `shell` argument instead.
-    shell = bash | pwsh | powershell | cmd (default: pwsh on Windows, bash else).
-    To run a script file, use the shell's own call syntax, e.g. PowerShell
-    `& ./Deploy.ps1 -Env prod`, bash `./deploy.sh`."""
+    NOT prefix it with an interpreter name or absolute path (don't pass
+    `pwsh script.ps1`, `bash script.sh`, or a full path to pwsh.exe); pick the
+    interpreter with the `shell` argument instead — the server locates it for you.
+    shell = bash | pwsh | powershell | cmd (default: bash off Windows; on Windows
+    pwsh if installed, else powershell). To run a script file, use the shell's
+    own call syntax, e.g. PowerShell `& ./Deploy.ps1 -Env prod`, bash `./deploy.sh`."""
     return _shell_result(cmd, await _start(cmd, shell=shell, cwd=cwd, timeout=timeout))
 
 
@@ -366,9 +441,11 @@ async def run(cmd: str, shell: Optional[str] = None, timeout: float = 30.0) -> T
     For quick one-liners; long jobs should use start()/output() instead.
 
     This tool IS a shell — pass `cmd` as you'd type it at the prompt, without an
-    interpreter prefix (no `pwsh script.ps1`); choose the interpreter with
-    `shell` = bash | pwsh | powershell | cmd (default: pwsh on Windows, bash
-    else). Run a script with the shell's call syntax, e.g. `& ./Deploy.ps1`."""
+    interpreter prefix or absolute path (no `pwsh script.ps1`, no full path to
+    pwsh.exe); choose the interpreter with `shell` = bash | pwsh | powershell | cmd (default:
+    bash off Windows; on Windows pwsh if installed, else powershell). The server
+    locates the binary. Run a script with the shell's call syntax, e.g.
+    `& ./Deploy.ps1`."""
     started = await _start(cmd, shell=shell, timeout=timeout)
     job = JOBS[started["job_id"]]
     deadline = time.monotonic() + timeout

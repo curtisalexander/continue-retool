@@ -32,19 +32,55 @@ def default_shell():
 
 
 # --- pure unit tests (fast, no subprocess) --------------------------------
-def test_build_argv_bash():
-    assert build_argv("echo hi", "bash") == ["bash", "-lc", "echo hi"]
+# build_argv now resolves argv[0] to an absolute interpreter path. We pin that
+# resolution with the SHELL_MCP_<SHELL> override so the argv is host-independent
+# (the override is trusted as-is, exactly as the installer stamps it).
+def test_build_argv_bash(monkeypatch):
+    monkeypatch.setenv("SHELL_MCP_BASH", "/opt/bash")
+    assert build_argv("echo hi", "bash") == ["/opt/bash", "-lc", "echo hi"]
 
 
-def test_build_argv_pwsh():
+def test_build_argv_pwsh(monkeypatch):
+    monkeypatch.setenv("SHELL_MCP_PWSH", r"C:/PS/pwsh.exe")
     assert build_argv("Get-ChildItem", "pwsh") == [
-        "pwsh", "-NoProfile", "-Command", "Get-ChildItem",
+        r"C:/PS/pwsh.exe", "-NoProfile", "-Command", "Get-ChildItem",
     ]
 
 
 def test_build_argv_unknown_shell_raises():
     with pytest.raises(ValueError):
         build_argv("whatever", "fish")
+
+
+def test_resolve_interpreter_env_override_wins(monkeypatch):
+    from shell_mcp.server import resolve_interpreter
+    monkeypatch.setenv("SHELL_MCP_PWSH", "/somewhere/pwsh")
+    # override is returned verbatim even if it isn't on PATH / disk
+    assert resolve_interpreter("pwsh") == "/somewhere/pwsh"
+
+
+def test_resolve_interpreter_falls_through_to_which(monkeypatch):
+    from shell_mcp.server import resolve_interpreter
+    monkeypatch.delenv("SHELL_MCP_BASH", raising=False)
+    sh = default_shell()
+    if sh != "bash":
+        pytest.skip("bash not resolvable on this host")
+    resolved = resolve_interpreter("bash")
+    assert resolved and resolved.lower().endswith(("bash", "bash.exe"))
+
+
+def test_default_shell_honors_override(monkeypatch):
+    from shell_mcp.server import _default_shell
+    monkeypatch.setenv("SHELL_MCP_DEFAULT_SHELL", "cmd")
+    assert _default_shell() == "cmd"
+
+
+def test_build_argv_unresolved_interpreter_raises(monkeypatch):
+    # An interpreter that resolves nowhere must raise a clear ValueError rather
+    # than deferring to a raw FileNotFoundError from the subprocess spawn.
+    monkeypatch.setattr(server, "resolve_interpreter", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="not found"):
+        build_argv("echo hi", "pwsh")
 
 
 def test_ring_buffer_caps_and_marks_truncation():
