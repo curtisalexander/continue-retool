@@ -198,6 +198,37 @@ Two launch-time gotchas, both stamped away by the installer:
   hangs until Continue's connect timer fires. The installer already built the
   venv, so `--no-sync` is safe — launch just runs what's there, no network.
 
+### shell-mcp: interpreter resolution
+
+The same PATH story, one level down. `shell.run`/`shell.start` spawn an
+*interpreter* per call (`pwsh`/`powershell`/`bash`/`cmd`), and that binary has to
+be found first. Left as a bare name, it's resolved against the server's inherited
+PATH — the same stale/thin GUI PATH as above — so it can fail even when the shell
+works in your terminal. On Windows it's worse: `pwsh` (PowerShell 7) installs to
+`Program Files` (not a guaranteed dir) and may not be installed at all — only
+`powershell.exe` (5.1) ships with the OS. The symptom is a client that runs
+`where pwsh` and hard-codes the absolute path into its command.
+
+Resolved in two layers, both PATH-independent:
+
+- **Installer stamps interpreters.** Run from a real terminal (where PATH is
+  correct), `install-workspace.py` detects the interpreters present and writes
+  their absolute paths into the shell yaml `env` as `SHELL_MCP_PWSH` /
+  `SHELL_MCP_POWERSHELL` / `SHELL_MCP_BASH` / `SHELL_MCP_CMD`, plus
+  `SHELL_MCP_DEFAULT_SHELL` — exactly the tactic used for `uv` in `command:`. It
+  prints which shells it found; a stale stamp is a re-run-the-installer fix.
+- **Server resolves at runtime too.** When a stamp is absent (manual install, or
+  a shell added later), the server resolves in order: `SHELL_MCP_<SHELL>` override
+  → `PATH` lookup → known install locations. If nothing resolves it returns a
+  clear "pick a different `shell=`" error rather than a bare *file not found*. The
+  Windows default is pwsh-if-installed-else-powershell, never a hard default at a
+  possibly-absent interpreter.
+
+So: **choose the interpreter with the `shell` argument** (`bash | pwsh |
+powershell | cmd`) — don't prefix `cmd` with an interpreter name or an absolute
+path (`pwsh script.ps1`, `C:\...\pwsh.exe ...`). The server locates the binary;
+to run a script use the shell's own call syntax (`& ./Deploy.ps1`, `./deploy.sh`).
+
 If a tool still shows *"already connected to a transport / call close()"* after a
 per-tool **Reload**, that's Continue's reconnect path, not the server — reload the
 whole window (or toggle the MCP server off/on) instead of the single tool.
