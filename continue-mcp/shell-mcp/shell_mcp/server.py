@@ -34,6 +34,7 @@ mcp = FastMCP("shell")
 # --- configuration ---------------------------------------------------------
 DEFAULT_TIMEOUT = float(os.environ.get("SHELL_MCP_DEFAULT_TIMEOUT", "120"))
 MAX_BUFFER_BYTES = int(os.environ.get("SHELL_MCP_MAX_BUFFER", str(256 * 1024)))
+MAX_FINISHED_JOBS = int(os.environ.get("SHELL_MCP_MAX_FINISHED", "20"))
 IS_WINDOWS = sys.platform.startswith("win")
 
 
@@ -70,6 +71,30 @@ def decode_output(data: bytes) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         return data.decode(_FALLBACK_ENCODING, errors="replace")
+
+
+def _decode_slice(data: bytes | bytearray) -> str:
+    """decode_output for an arbitrary byte slice of a stream. A byte cursor can
+    split a multibyte UTF-8 character, which strict decoding would misread as
+    'not UTF-8' and push the whole slice to the code-page fallback. So: skip
+    orphaned continuation bytes at the start, and retry without a partial
+    character at the end, before falling back."""
+    b = bytes(data)
+    i = 0
+    while i < min(len(b), 3) and (b[i] & 0xC0) == 0x80:
+        i += 1
+    b = b[i:]
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        for trim in (1, 2, 3):
+            if trim >= len(b):
+                break
+            try:
+                return b[:-trim].decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        return decode_output(b)
 
 
 # --- shell selection + interpreter resolution (§2b) ------------------------
@@ -141,6 +166,16 @@ def _default_shell() -> str:
     return "bash"
 
 
+if IS_WINDOWS:
+    # The cmd path spawns via create_subprocess_shell (raw-string passthrough),
+    # which builds "%ComSpec% /c <cmd>" from OUR environment — it never sees the
+    # interpreter build_argv resolved. Pointing ComSpec at that resolution makes
+    # the SHELL_MCP_CMD stamp / known-location fallback apply to cmd too.
+    _cmd_exe = resolve_interpreter("cmd")
+    if _cmd_exe:
+        os.environ["ComSpec"] = _cmd_exe
+
+
 def build_argv(cmd: str, shell: Optional[str]) -> list[str]:
     """Map a shell name + a command string to an argv, with argv[0] resolved to
     an absolute interpreter path. We pass the whole command to the shell via
@@ -163,31 +198,60 @@ def build_argv(cmd: str, shell: Optional[str]) -> list[str]:
 
 # --- a capped buffer so a runaway command can't blow the context window ----
 class RingBuffer:
-    """Keeps head + tail bytes with a truncation marker in the middle."""
+    """Capped stream buffer: keeps the head (start of the stream) and the most
+    recent tail, dropping the middle once the cap is exceeded.
+
+    Offsets are STABLE LOGICAL BYTE POSITIONS counted from the start of the
+    stream, so a reader's cursor stays valid across truncation — read_from()
+    returns whatever of [offset:] still exists, with a marker standing in for
+    any bytes that were dropped in between. (Character-offset cursors into the
+    decoded text would shift every time the buffer truncated.)"""
 
     def __init__(self, cap: int = MAX_BUFFER_BYTES) -> None:
         self.cap = cap
-        self._data = bytearray()
-        self._dropped = 0
+        self._head = bytearray()   # first bytes of the stream; frozen after 1st drop
+        self._tail = bytearray()   # most recent bytes
+        self._dropped = 0          # bytes dropped between head and tail
+        self.total = 0             # logical bytes ever written
 
     def write(self, chunk: bytes) -> None:
-        self._data.extend(chunk)
-        if len(self._data) > self.cap:
-            overflow = len(self._data) - self.cap
-            # drop from the middle: keep head/2 and tail/2
-            keep = self.cap // 2
+        self.total += len(chunk)
+        keep = self.cap // 2
+        if not self._dropped:
+            self._head.extend(chunk)
+            if len(self._head) > self.cap:
+                self._tail = self._head[-keep:]
+                self._dropped = len(self._head) - 2 * keep
+                del self._head[keep:]
+            return
+        self._tail.extend(chunk)
+        if len(self._tail) > keep:
+            overflow = len(self._tail) - keep
             self._dropped += overflow
-            self._data = self._data[:keep] + self._data[-keep:]
+            del self._tail[:overflow]
+
+    def read_from(self, offset: int) -> str:
+        """Decoded text of the stream from logical byte `offset` to the end.
+        Any part of that range that was dropped is replaced by one marker."""
+        offset = max(0, min(offset, self.total))
+        if not self._dropped:
+            return _decode_slice(self._head[offset:])
+        tail_start = self.total - len(self._tail)
+        if offset >= tail_start:
+            return _decode_slice(self._tail[offset - tail_start:])
+        parts = []
+        if offset < len(self._head):
+            parts.append(_decode_slice(self._head[offset:]))
+        gap = tail_start - max(offset, len(self._head))
+        parts.append(f"\n...[{gap} bytes truncated]...\n")
+        parts.append(_decode_slice(self._tail))
+        return "".join(parts)
 
     def text(self) -> str:
-        s = decode_output(bytes(self._data))
-        if self._dropped:
-            mid = len(s) // 2
-            s = f"{s[:mid]}\n...[{self._dropped} bytes truncated]...\n{s[mid:]}"
-        return s
+        return self.read_from(0)
 
     def __len__(self) -> int:
-        return len(self._data) + self._dropped
+        return self.total
 
 
 # --- the job registry ------------------------------------------------------
@@ -213,6 +277,15 @@ def _next_id() -> str:
     global _counter
     _counter += 1
     return f"j{_counter}"
+
+
+def _prune_finished() -> None:
+    """Cap how many finished jobs (and their buffers) we keep, so a long
+    daily-driver session can't grow the registry without bound. Running jobs
+    are never pruned; dict insertion order == start order, so oldest go first."""
+    finished = [j for j in JOBS.values() if j.state != "running"]
+    for j in finished[: max(0, len(finished) - MAX_FINISHED_JOBS)]:
+        del JOBS[j.job_id]
 
 
 async def _drain(stream: asyncio.StreamReader, buf: RingBuffer) -> None:
@@ -283,9 +356,12 @@ async def _start(
     shell: Optional[str] = None,
     cwd: Optional[str] = None,
     timeout: Optional[float] = None,
+    env: Optional[dict[str, str]] = None,
+    interactive: bool = False,
 ) -> dict:
     """Launch the process and register the job. Internal: run()/start() call this;
     only the @mcp.tool wrappers shape the ToolResult the client sees."""
+    _prune_finished()
     shell_name = (shell or _default_shell()).lower()
     argv = build_argv(cmd, shell_name)  # resolves + validates, even on the cmd path
     # cwd defaults to the workspace, and relative cwd resolves against it — the
@@ -301,8 +377,13 @@ async def _start(
         kwargs["creationflags"] = 0x00000200  # CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True  # setsid -> own process group
+    if env:
+        kwargs["env"] = {**os.environ, **env}
 
     common: dict = dict(
+        # stdin defaults to DEVNULL, not inherit: the server's own stdin IS the
+        # MCP transport, and a child that reads it would eat protocol bytes.
+        stdin=asyncio.subprocess.PIPE if interactive else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
@@ -311,7 +392,8 @@ async def _start(
     if IS_WINDOWS and shell_name == "cmd":
         # cmd.exe parses its command line with its own rules; the \"-escaping
         # that list-based spawning applies breaks any quoted command. Hand
-        # cmd.exe the raw string instead (COMSPEC /c passthrough).
+        # cmd.exe the raw string instead (ComSpec /c passthrough — ComSpec is
+        # pointed at the resolved cmd.exe at import time above).
         proc = await asyncio.create_subprocess_shell(cmd, **common)
     else:
         proc = await asyncio.create_subprocess_exec(*argv, **common)
@@ -328,15 +410,18 @@ async def _start(
     return {"job_id": job.job_id, "state": job.state}
 
 
-@mcp.tool
+@mcp.tool(annotations={"openWorldHint": True})
 async def start(
     cmd: str,
     shell: Optional[str] = None,
     cwd: Optional[str] = None,
     timeout: Optional[float] = None,
+    env: Optional[dict[str, str]] = None,
+    interactive: bool = False,
 ) -> ToolResult:
     """Start a shell command in the background. Returns instantly with a job_id;
-    poll it with output()/poll(), stop it with kill().
+    poll it with output()/poll(), stop it with kill(). `env` adds/overrides
+    environment variables; interactive=true opens stdin for send().
 
     This tool IS a shell — pass `cmd` exactly as you'd type it at the prompt. Do
     NOT prefix it with an interpreter name or absolute path (don't pass
@@ -345,7 +430,11 @@ async def start(
     shell = bash | pwsh | powershell | cmd (default: bash off Windows; on Windows
     pwsh if installed, else powershell). To run a script file, use the shell's
     own call syntax, e.g. PowerShell `& ./Deploy.ps1 -Env prod`, bash `./deploy.sh`."""
-    return _shell_result(cmd, await _start(cmd, shell=shell, cwd=cwd, timeout=timeout))
+    return _shell_result(
+        cmd,
+        await _start(cmd, shell=shell, cwd=cwd, timeout=timeout, env=env,
+                     interactive=interactive),
+    )
 
 
 async def _reap(job: Job) -> None:
@@ -359,32 +448,44 @@ async def _reap(job: Job) -> None:
         job.state = "exited"
 
 
+def _last_lines(text: str, n: int) -> str:
+    lines = text.splitlines()
+    return "\n".join(lines[-n:])
+
+
 def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
-    out = job.stdout.text()
-    err = job.stderr.text()
+    """Cursors are logical byte offsets into each stream (stable across the
+    RingBuffer's truncation), NOT character offsets into the decoded text."""
     return {
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
         "runtime_ms": int((time.monotonic() - job.started) * 1000),
-        "stdout": out[since_out:],
-        "stderr": err[since_err:],
-        "stdout_cursor": len(out),
-        "stderr_cursor": len(err),
+        "stdout": job.stdout.read_from(since_out),
+        "stderr": job.stderr.read_from(since_err),
+        "stdout_cursor": job.stdout.total,
+        "stderr_cursor": job.stderr.total,
     }
 
 
-@mcp.tool
-async def output(job_id: str, since_stdout: int = 0, since_stderr: int = 0) -> ToolResult:
+@mcp.tool(annotations={"readOnlyHint": True})
+async def output(
+    job_id: str, since_stdout: int = 0, since_stderr: int = 0, tail: int = 0
+) -> ToolResult:
     """Return new stdout/stderr for a job since the given cursors (incremental
-    injection). Pass the returned *_cursor values back on the next call to stream."""
+    injection). Pass the returned *_cursor values back on the next call to stream.
+    tail=N ignores the cursors and returns only the last N lines of each stream."""
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"no such job: {job_id}")
-    return _shell_result(job.cmd, _snapshot(job, since_stdout, since_stderr))
+    snap = _snapshot(job, since_stdout, since_stderr)
+    if tail > 0:
+        snap["stdout"] = _last_lines(job.stdout.text(), tail)
+        snap["stderr"] = _last_lines(job.stderr.text(), tail)
+    return _shell_result(job.cmd, snap)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def poll(job_id: str) -> ToolResult:
     """Lightweight status check: state, exit_code, runtime. No output payload."""
     job = JOBS.get(job_id)
@@ -401,7 +502,7 @@ async def poll(job_id: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
 
 
-@mcp.tool
+@mcp.tool(annotations={"destructiveHint": True, "idempotentHint": True})
 async def kill(job_id: str) -> ToolResult:
     """Kill a running job and its whole process tree."""
     job = JOBS.get(job_id)
@@ -415,7 +516,7 @@ async def kill(job_id: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def list_jobs() -> ToolResult:
     """List all known jobs and their states."""
     jobs = [
@@ -435,8 +536,14 @@ async def list_jobs() -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 
-@mcp.tool
-async def run(cmd: str, shell: Optional[str] = None, timeout: float = 30.0) -> ToolResult:
+@mcp.tool(annotations={"openWorldHint": True})
+async def run(
+    cmd: str,
+    shell: Optional[str] = None,
+    cwd: Optional[str] = None,
+    timeout: float = 30.0,
+    env: Optional[dict[str, str]] = None,
+) -> ToolResult:
     """Convenience: start a command and wait up to `timeout` for it to finish.
     For quick one-liners; long jobs should use start()/output() instead.
 
@@ -446,12 +553,51 @@ async def run(cmd: str, shell: Optional[str] = None, timeout: float = 30.0) -> T
     bash off Windows; on Windows pwsh if installed, else powershell). The server
     locates the binary. Run a script with the shell's call syntax, e.g.
     `& ./Deploy.ps1`."""
-    started = await _start(cmd, shell=shell, timeout=timeout)
+    started = await _start(cmd, shell=shell, cwd=cwd, timeout=timeout, env=env)
     job = JOBS[started["job_id"]]
-    deadline = time.monotonic() + timeout
-    while job.state == "running" and time.monotonic() < deadline:
+    # Wait on the process itself, not a poll loop. The watchdog fires at
+    # `timeout` and kills the tree; the margin here covers the kill landing.
+    try:
+        await asyncio.wait_for(job.proc.wait(), timeout + 10.0)
+    except asyncio.TimeoutError:
+        pass
+    # Let the reaper/watchdog settle final state (drain readers, set exit_code)
+    # so the snapshot can't report "running" for a process that just ended.
+    for _ in range(100):
+        if job.state != "running":
+            break
         await asyncio.sleep(0.05)
     return _shell_result(cmd, _snapshot(job))
+
+
+@mcp.tool(annotations={"openWorldHint": True})
+async def send(job_id: str, text: str, eof: bool = False) -> ToolResult:
+    """Write text to the stdin of a job started with interactive=true (include
+    any trailing newline yourself). eof=true closes stdin afterwards."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise ValueError(f"no such job: {job_id}")
+    stdin = job.proc.stdin
+    if stdin is None:
+        data = {"ok": False, "job_id": job_id,
+                "error": "job has no stdin pipe (start it with interactive=true)"}
+        return ToolResult(content=[TextContent(type="text", text=f"❌ {data['error']}")],
+                          structured_content=data)
+    if job.proc.returncode is not None:
+        data = {"ok": False, "job_id": job_id, "error": "job already exited"}
+        return ToolResult(content=[TextContent(type="text", text=f"❌ {data['error']}")],
+                          structured_content=data)
+    stdin.write(text.encode("utf-8"))
+    await stdin.drain()
+    if eof:
+        stdin.close()
+    data = {"ok": True, "job_id": job_id, "sent_bytes": len(text.encode("utf-8")),
+            "eof": eof, "state": job.state}
+    return ToolResult(
+        content=[TextContent(type="text", text=f"{job_id}: sent {data['sent_bytes']} byte(s)"
+                             + (" + EOF" if eof else ""))],
+        structured_content=data,
+    )
 
 
 def main() -> None:

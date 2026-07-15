@@ -27,8 +27,38 @@ def test_tools_advertised():
 
     tools = asyncio.run(scenario())
     assert {t.name for t in tools} == {
-        "start", "output", "poll", "kill", "list_jobs", "run",
+        "start", "output", "poll", "kill", "list_jobs", "run", "send",
     }
+
+
+# House-style conformance, enforced mechanically (see rules/rule-rule.md):
+# every tool describes itself, descriptions can't grow without bound, and
+# read-only tools say so via annotations.
+DESCRIPTION_BUDGET_CHARS = 1000  # ~250 tokens; catches runaway growth
+
+
+def test_descriptions_present_and_within_budget():
+    async def scenario():
+        async with Client(mcp) as c:
+            return await c.list_tools()
+
+    for t in asyncio.run(scenario()):
+        assert t.description, f"{t.name} has no description"
+        assert len(t.description) <= DESCRIPTION_BUDGET_CHARS, (
+            f"{t.name} description is {len(t.description)} chars "
+            f"(budget {DESCRIPTION_BUDGET_CHARS})"
+        )
+
+
+def test_read_only_tools_are_annotated():
+    async def scenario():
+        async with Client(mcp) as c:
+            return await c.list_tools()
+
+    tools = {t.name: t for t in asyncio.run(scenario())}
+    for name in ("poll", "output", "list_jobs"):
+        ann = tools[name].annotations
+        assert ann and ann.readOnlyHint is True, f"{name} should be readOnlyHint"
 
 
 def test_run_over_mcp():

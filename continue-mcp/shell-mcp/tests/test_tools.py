@@ -91,6 +91,126 @@ def test_ring_buffer_caps_and_marks_truncation():
     assert len(rb) == 500               # logical length preserved for cursors
 
 
+def test_ring_buffer_cursor_stable_across_truncation():
+    """A cursor taken BEFORE the buffer truncates must never re-serve consumed
+    bytes or skip new ones — offsets are logical stream positions, not indexes
+    into the (shifting) decoded text."""
+    rb = RingBuffer(cap=100)
+    rb.write(b"A" * 40)
+    cursor = rb.total
+    assert rb.read_from(0) == "A" * 40
+    rb.write(b"B" * 300)                # forces head/tail truncation
+    new = rb.read_from(cursor)
+    assert "A" not in new               # already-consumed bytes never reappear
+    assert "B" in new                   # new bytes (what survived) are delivered
+    assert "truncated" in new           # the dropped middle is marked, not silent
+    assert rb.read_from(rb.total) == ""  # end-cursor -> nothing
+    # a cursor pointing into the dropped gap degrades to marker + tail, no error
+    gap_read = rb.read_from(150)
+    assert "truncated" in gap_read and gap_read.endswith("B" * 50)
+
+
+def test_ring_buffer_cursor_mid_multibyte_char():
+    """A byte cursor that splits a UTF-8 character must not push the slice into
+    the code-page fallback (mojibake) — orphan continuation bytes are skipped."""
+    rb = RingBuffer(cap=10_000)
+    rb.write(("é" * 10).encode("utf-8"))
+    out = rb.read_from(1)               # 1 lands inside the first 2-byte é
+    assert out == "é" * 9
+
+
+def test_finished_jobs_are_pruned(monkeypatch):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    monkeypatch.setattr(server, "MAX_FINISHED_JOBS", 2)
+
+    async def scenario():
+        server.JOBS.clear()
+        for _ in range(5):
+            await server.run(f'"{PY}" -c "print(1)"', shell=sh, timeout=15)
+        return sum(1 for j in server.JOBS.values() if j.state != "running")
+
+    finished = asyncio.run(scenario())
+    assert finished <= 3  # prune runs on each start: 2 kept + the newest
+
+
+def test_run_honors_cwd(tmp_path):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    import os
+
+    async def scenario():
+        return (await server.run(
+            f'"{PY}" -c "import os; print(os.getcwd())"',
+            shell=sh, cwd=str(tmp_path), timeout=15,
+        )).structured_content
+
+    res = asyncio.run(scenario())
+    assert os.path.realpath(res["stdout"].strip()) == os.path.realpath(str(tmp_path))
+
+
+def test_run_env_overlay():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def scenario():
+        return (await server.run(
+            f'"{PY}" -c "import os; print(os.environ[\'SHELL_MCP_TEST_VAR\'])"',
+            shell=sh, timeout=15, env={"SHELL_MCP_TEST_VAR": "overlay-42"},
+        )).structured_content
+
+    res = asyncio.run(scenario())
+    assert "overlay-42" in res["stdout"]
+
+
+def test_interactive_send_reaches_stdin():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def scenario():
+        started = (await server.start(
+            f'"{PY}" -c "print(\'got:\' + input())"',
+            shell=sh, timeout=15, interactive=True,
+        )).structured_content
+        jid = started["job_id"]
+        await server.send(jid, "ping-from-test\n", eof=True)
+        for _ in range(100):
+            st = (await server.poll(jid)).structured_content
+            if st["state"] != "running":
+                break
+            await asyncio.sleep(0.1)
+        return (await server.output(jid)).structured_content
+
+    res = asyncio.run(scenario())
+    assert "got:ping-from-test" in res["stdout"]
+
+
+def test_output_tail_mode():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def scenario():
+        started = (await server.start(
+            f'"{PY}" -c "[print(i) for i in range(10)]"', shell=sh, timeout=15,
+        )).structured_content
+        jid = started["job_id"]
+        for _ in range(100):
+            st = (await server.poll(jid)).structured_content
+            if st["state"] != "running":
+                break
+            await asyncio.sleep(0.1)
+        return (await server.output(jid, tail=2)).structured_content
+
+    res = asyncio.run(scenario())
+    lines = res["stdout"].splitlines()
+    assert lines == ["8", "9"]
+
+
 # --- subprocess behavior ---------------------------------------------------
 def test_run_captures_stdout_and_exit_code():
     sh = default_shell()
