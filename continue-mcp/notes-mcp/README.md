@@ -17,6 +17,7 @@ rule = memory nobody reads.
 |---|---|
 | `notes.list()` | Cheap index: `{name, hook, age_days}` per note |
 | `notes.read(name)` | Full content of one note |
+| `notes.search(query)` | Case-insensitive substring search across all notes — for when the hooks aren't enough |
 | `notes.write(name, content, append?)` | Create/update; first line becomes the hook |
 | `notes.delete(name)` | Remove a wrong or stale note |
 

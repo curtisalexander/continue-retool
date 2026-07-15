@@ -58,6 +58,26 @@ def test_search_describe_call_flow(tmp_path, monkeypatch):
     assert summed in (5, "5")  # downstream returns int; content may arrive as text
 
 
+# House-style conformance, enforced mechanically (see rules/rule-rule.md).
+DESCRIPTION_BUDGET_CHARS = 1000  # ~250 tokens; catches runaway growth
+
+
+def test_descriptions_and_annotations(tmp_path, monkeypatch):
+    client = _gateway_client(tmp_path, monkeypatch)
+
+    async def scenario():
+        async with client as c:
+            return await c.list_tools()
+
+    tools = {t.name: t for t in asyncio.run(scenario())}
+    for t in tools.values():
+        assert t.description, f"{t.name} has no description"
+        assert len(t.description) <= DESCRIPTION_BUDGET_CHARS
+    for name in ("search", "describe"):
+        ann = tools[name].annotations
+        assert ann and ann.readOnlyHint is True, f"{name} should be readOnlyHint"
+
+
 def test_unknown_tool_suggests_alternatives(tmp_path, monkeypatch):
     client = _gateway_client(tmp_path, monkeypatch)
 

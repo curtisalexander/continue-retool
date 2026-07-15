@@ -31,21 +31,21 @@ def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolRe
     return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def ping() -> str:
     """Health check. Returns 'pong'. Use this to confirm MCP is enabled and this
     server is reachable from the agent."""
     return "pong"
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def echo(text: str) -> str:
     """Echo the given text back verbatim. Confirms arguments round-trip across the
     MCP boundary (schema in, result out)."""
     return text
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def whoami() -> ToolResult:
     """Report host OS/arch plus the server's cwd, MCP_WORKSPACE, and the base
     that relative paths resolve against. Run this first in any new environment."""

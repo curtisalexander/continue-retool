@@ -118,9 +118,12 @@ def test_missing_note_read(tmp_path, monkeypatch):
     "../escape", "a/b", "a\\b", ".hidden", "", "with space", "..",
 ])
 def test_bad_names_rejected(tmp_path, monkeypatch, bad):
+    """Invalid names come back as structured {ok: false} — the same failure
+    shape as every other error, never a raised exception."""
     _in_repo(tmp_path, monkeypatch)
-    with pytest.raises(ValueError):
-        asyncio.run(server.write(bad, "x"))
+    res = asyncio.run(server.write(bad, "x")).structured_content
+    assert res["ok"] is False
+    assert "invalid note name" in res["error"]
 
 
 def test_hook_truncated():

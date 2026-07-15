@@ -16,9 +16,10 @@ progressive-disclosure pattern, reproduced locally so it works with any model.
 Config: gateway.config.json (or $GATEWAY_CONFIG) lists the downstream servers.
 See README.md for the purpose/design/use writeup and the head/tail tradeoff.
 
-NOTE: exact FastMCP client symbols move between versions. This targets FastMCP 2.x
-(Client + StdioTransport). If your installed version differs, the only thing to
-adjust is how a downstream client is constructed in `_connect`.
+NOTE: exact FastMCP client symbols move between versions. This targets FastMCP 3.x
+(Client + StdioTransport; the pyproject pins fastmcp>=3,<4). If your installed
+version differs, the only thing to adjust is how a downstream client is
+constructed in `_connect`.
 """
 from __future__ import annotations
 
@@ -133,7 +134,7 @@ def _unwrap(result):
 
 
 # --- the three meta-tools --------------------------------------------------
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def search(query: str = "", limit: int = 15) -> ToolResult:
     """STEP 1 of 3. Find tools by keyword/intent (e.g. 'run a command', 'search
     code', 'replace text in a file'). Returns a shortlist of {name, summary} — NOT
@@ -152,7 +153,7 @@ async def search(query: str = "", limit: int = 15) -> ToolResult:
     return _result(f"{data['count']} tool(s) for {query!r}", data, block)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def describe(name: str) -> ToolResult:
     """STEP 2 of 3. Get the full description + JSON argument schema for ONE tool
     (a name from search(), e.g. 'shell.start'). Use it to build the arguments for
@@ -167,7 +168,7 @@ async def describe(name: str) -> ToolResult:
     return _result(f"{e.name}\n{e.description}", data, json.dumps(e.schema, indent=2), lang="json")
 
 
-@mcp.tool
+@mcp.tool(annotations={"openWorldHint": True})
 async def call(name: str, arguments: Optional[dict] = None) -> ToolResult:
     """STEP 3 of 3. Run a tool discovered via search()/describe(). `name` is like
     'shell.start'; `arguments` must match that tool's schema (see describe()). The

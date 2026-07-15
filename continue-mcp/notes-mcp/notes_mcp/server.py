@@ -14,6 +14,7 @@ greppable, hand-editable, committable if a note graduates to shared truth.
 Tools (progressive disclosure — the index is cheap, contents load on demand):
   notes.list()                      -> [{name, hook, age_days}]
   notes.read(name)                  -> full content of one note
+  notes.search(query)               -> matching lines across all notes
   notes.write(name, content, append?)
   notes.delete(name)
 
@@ -86,8 +87,14 @@ def hook_line(text: str) -> str:
     return ""
 
 
+def _bad_name(e: ValueError) -> ToolResult:
+    """Invalid names come back as the same structured {ok: false} shape as any
+    other failure — never a raised protocol-level exception."""
+    return _result(f"❌ {e}", {"ok": False, "error": str(e)})
+
+
 # --- tools -----------------------------------------------------------------
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def list() -> ToolResult:
     """List all notes as a cheap index: {name, hook, age_days}. Call at the start
     of a task, then read(name) for anything relevant — don't guess from hooks."""
@@ -116,10 +123,13 @@ async def list() -> ToolResult:
     return _result(summary, data, block)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def read(name: str) -> ToolResult:
     """Read one note in full (a name from list())."""
-    p = note_path(name)
+    try:
+        p = note_path(name)
+    except ValueError as e:
+        return _bad_name(e)
     if not os.path.isfile(p):
         data = {"ok": False, "error": f"no note named {name!r}"}
         return _result(f"❌ {data['error']}", data)
@@ -132,7 +142,10 @@ async def read(name: str) -> ToolResult:
 async def write(name: str, content: str, append: bool = False) -> ToolResult:
     """Create or update a note (markdown). Make the FIRST line a one-line summary —
     it becomes the hook shown by list(). append adds to the end instead of replacing."""
-    p = note_path(name)
+    try:
+        p = note_path(name)
+    except ValueError as e:
+        return _bad_name(e)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     if append and os.path.isfile(p) and os.path.getsize(p) > 0:
         content = "\n" + content
@@ -142,10 +155,38 @@ async def write(name: str, content: str, append: bool = False) -> ToolResult:
     return _result(f"saved note {data['name']} → {data['path']}", data)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
+async def search(query: str) -> ToolResult:
+    """Case-insensitive substring search across all notes. Returns matching
+    lines as {name, line, text} — use it when the list() hooks aren't enough."""
+    d = notes_dir()
+    matches: list[dict] = []
+    q = query.lower()
+    if q and os.path.isdir(d):
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(".md"):
+                continue
+            try:
+                with open(os.path.join(d, fn), "r", encoding="utf-8",
+                          errors="replace") as f:
+                    for i, line in enumerate(f, 1):
+                        if q in line.lower():
+                            matches.append({"name": fn[:-3], "line": i,
+                                            "text": line.rstrip("\n")})
+            except OSError:
+                continue
+    data = {"query": query, "matches": matches, "count": len(matches)}
+    block = "\n".join(f"{m['name']}:{m['line']}: {m['text']}" for m in matches)
+    return _result(f"{data['count']} match(es) for {query!r}", data, block)
+
+
+@mcp.tool(annotations={"destructiveHint": True, "idempotentHint": True})
 async def delete(name: str) -> ToolResult:
     """Delete a note that is wrong or no longer needed."""
-    p = note_path(name)
+    try:
+        p = note_path(name)
+    except ValueError as e:
+        return _bad_name(e)
     if not os.path.isfile(p):
         data = {"ok": False, "error": f"no note named {name!r}"}
         return _result(f"❌ {data['error']}", data)

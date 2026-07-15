@@ -201,9 +201,10 @@ matching the published Tool Search numbers — freeing that window for actual co
 
 - **Round-trip latency:** search→describe→call is up to three model turns before the
   work happens. That's the cost of near-zero resting tokens. Keep the head direct.
-- **FastMCP version:** the client wiring targets FastMCP 2.x (`Client` +
-  `StdioTransport`). If your installed version constructs downstream clients
-  differently, that's the only spot in `server.py` to adjust (`_connect`).
+- **FastMCP version:** the client wiring targets FastMCP 3.x (`Client` +
+  `StdioTransport`; the pyproject pins `fastmcp>=3,<4`). If a future version
+  constructs downstream clients differently, that's the only spot in
+  `server.py` to adjust (`_connect`).
 - **Startup cost:** the gateway spawns all downstream servers at startup to build the
   catalog. For a very large tail, consider lazy connection or a persisted catalog
   snapshot (noted in the code as a future option).
