@@ -74,3 +74,18 @@ def test_dialect_override():
     # generate_series is fine in postgres; the override must reach sqruff
     res = _lint("select * from generate_series(1, 10);", dialect="postgres")
     assert res["ok"] is True
+
+
+def test_lint_sqruff_failure_is_not_clean(monkeypatch):
+    """When sqruff dies without a report (bad config, crashed binary), lint must
+    surface an error — never 'clean — 0 violations'."""
+    monkeypatch.setenv("SQL_MCP_CONFIG", "/nonexistent/.sqruff")
+    res = _lint("select 1")
+    assert res["ok"] is False
+    assert "violations" not in res
+
+
+def test_format_sqruff_failure_is_an_error(monkeypatch):
+    monkeypatch.setenv("SQL_MCP_CONFIG", "/nonexistent/.sqruff")
+    res = _format("select 1")
+    assert res["ok"] is False

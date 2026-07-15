@@ -96,7 +96,7 @@ def _base_args(cmd: str, dialect: Optional[str]) -> list[str]:
 
 
 # --- tools -----------------------------------------------------------------
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 async def format(sql: str, dialect: Optional[str] = None) -> ToolResult:
     """Format SQL to house style (lowercase keywords/identifiers, leading commas;
     Snowflake dialect by default). Returns the rewritten SQL and whether it changed."""
@@ -114,13 +114,21 @@ async def format(sql: str, dialect: Optional[str] = None) -> ToolResult:
     return _result(summary, data, block=data["sql"], lang="sql")
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 async def lint(sql: str, dialect: Optional[str] = None) -> ToolResult:
     """Lint SQL against house style (Snowflake dialect by default). Returns
     violations as {code, line, column, message}; empty list means clean."""
     rc, out, err = await _run_sqruff(
         _base_args("lint", dialect) + ["-f", "json"], sql
     )
+    if rc != 0 and not out.strip():
+        # sqruff died without producing a report (bad config, crashed binary).
+        # This must NOT read as "clean" — a false clean is the worst failure
+        # mode a linter can have.
+        detail = err.strip().splitlines()
+        data = {"ok": False, "error": f"sqruff failed (exit {rc}) with no report",
+                "detail": detail[-5:] if detail else []}
+        return _result(f"❌ {data['error']}", data, block="\n".join(data["detail"]))
     try:
         parsed = json.loads(out) if out.strip() else {}
     except json.JSONDecodeError:
