@@ -49,36 +49,76 @@ def _resolve(path: str) -> str:
     return os.path.join(base, path)
 
 
+# --- workspace jail (default ON) --------------------------------------------
+# The recommended tool policy runs this server on Automatic — no human approval
+# per call — so a prompt-injected "read ~/.ssh/id_rsa" must fail closed, not
+# silently succeed. Every path is realpath'd (a symlink inside the workspace
+# can't tunnel out) and must live under the workspace root or an extra root
+# from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
+# sanctioned escape hatch for a legitimate out-of-workspace file is the shell
+# tool, which is approval-gated by policy.
+def _jail_roots() -> list[str]:
+    if os.environ.get("MCP_JAIL", "1").strip().lower() in ("0", "false", "off", "no"):
+        return []
+    roots = [os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())]
+    for extra in (os.environ.get("MCP_JAIL_EXTRA") or "").split(os.pathsep):
+        if extra.strip():
+            roots.append(os.path.abspath(extra.strip()))
+    return [os.path.normcase(os.path.realpath(r)) for r in roots]
+
+
+def jail_error(path: str) -> str | None:
+    """None if `path` is allowed; else a model-facing refusal that names the
+    escalation paths (ask the user / approval-gated shell)."""
+    roots = _jail_roots()
+    if not roots:
+        return None
+    real = os.path.normcase(os.path.realpath(path))
+    for root in roots:
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            return None
+    return (
+        f"path is outside the workspace jail: {path} (workspace: "
+        f"{os.environ.get('MCP_WORKSPACE') or os.getcwd()}). This tool only "
+        "touches the workspace (MCP_JAIL_EXTRA adds roots; MCP_JAIL=0 "
+        "disables). For a legitimate outside file, ask the user or use a "
+        "shell command, which requires approval."
+    )
+
+
 # --- tools -----------------------------------------------------------------
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> ToolResult:
     """Read a file as numbered lines: "LINENO<TAB>text". start_line is 1-based;
     limit caps the line count (default 2000). Use the returned total_lines to
     page through big files with follow-up calls."""
     path = _resolve(path)
+    if err := jail_error(path):
+        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
     if not os.path.isfile(path):
         data = {"ok": False, "path": path, "error": f"file not found: {path}"}
         return _result(f"❌ {data['error']}", data)
     limit = max(1, limit if limit is not None else DEFAULT_LIMIT)
     start = max(1, start_line)
+    stop = start + limit  # exclusive
 
-    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
-        text = f.read()
-    lines = text.splitlines()
-    total = len(lines)
-
-    window = lines[start - 1 : start - 1 + limit]
-    numbered = []
-    for i, ln in enumerate(window, start=start):
-        if len(ln) > MAX_LINE_CHARS:
-            ln = ln[:MAX_LINE_CHARS] + f"…[+{len(ln) - MAX_LINE_CHARS} chars]"
-        numbered.append(f"{i}\t{ln}")
-    end = start - 1 + len(window)
+    # Stream line by line — a multi-GB log must never be slurped into memory
+    # to serve a 50-line window. Lines outside the window are only counted.
+    numbered: list[str] = []
+    total = 0
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+        for total, ln in enumerate(f, start=1):
+            if start <= total < stop:
+                ln = ln.rstrip("\n")
+                if len(ln) > MAX_LINE_CHARS:
+                    ln = ln[:MAX_LINE_CHARS] + f"…[+{len(ln) - MAX_LINE_CHARS} chars]"
+                numbered.append(f"{total}\t{ln}")
+    end = start - 1 + len(numbered)
     data = {
         "ok": True,
         "path": path,
         "content": "\n".join(numbered),
-        "start_line": start if window else 0,
+        "start_line": start if numbered else 0,
         "end_line": end,
         "total_lines": total,
         "truncated": end < total,
@@ -91,12 +131,14 @@ async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> T
     return _result(summary, data, data["content"])
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) -> ToolResult:
     """List a directory as {path, type, size} entries, dirs first, capped at 500.
     depth > 1 recurses that many levels; hidden files and .git are skipped unless
     include_hidden is set (.git is always skipped)."""
     path = _resolve(path)
+    if err := jail_error(path):
+        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
     if not os.path.isdir(path):
         data = {"ok": False, "path": path, "error": f"not a directory: {path}"}
         return _result(f"❌ {data['error']}", data)

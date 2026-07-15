@@ -126,10 +126,18 @@ def _closest_hint(content_lf: str, old_lf: str, max_lines: int = 5000) -> str | 
     content_lines = content_lf.split("\n")[:max_lines]
     old_lines = old_lf.split("\n")
     n = max(1, len(old_lines))
+    # One matcher, seq2 fixed: set_seq2 caches its index, and the cheap
+    # upper-bound ratios skip most windows before the O(len²) ratio() runs —
+    # this loop fires on every failed match, when latency hurts most.
+    sm = difflib.SequenceMatcher(None)
+    sm.set_seq2(old_lf)
     best = (0.0, 0, "")
     for i in range(0, max(1, len(content_lines) - n + 1)):
         window = "\n".join(content_lines[i:i + n])
-        ratio = difflib.SequenceMatcher(None, old_lf, window).ratio()
+        sm.set_seq1(window)
+        if sm.real_quick_ratio() <= best[0] or sm.quick_ratio() <= best[0]:
+            continue
+        ratio = sm.ratio()
         if ratio > best[0]:
             best = (ratio, i, window)
     if best[0] < 0.5:

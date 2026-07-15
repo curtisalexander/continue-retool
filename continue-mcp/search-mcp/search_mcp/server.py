@@ -49,6 +49,42 @@ def _resolve(path: str) -> str:
     base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
     return os.path.join(base, path)
 
+# --- workspace jail (default ON) --------------------------------------------
+# The recommended tool policy runs this server on Automatic — no human approval
+# per call — so a prompt-injected "read ~/.ssh/id_rsa" must fail closed, not
+# silently succeed. Every path is realpath'd (a symlink inside the workspace
+# can't tunnel out) and must live under the workspace root or an extra root
+# from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
+# sanctioned escape hatch for a legitimate out-of-workspace file is the shell
+# tool, which is approval-gated by policy.
+def _jail_roots() -> list[str]:
+    if os.environ.get("MCP_JAIL", "1").strip().lower() in ("0", "false", "off", "no"):
+        return []
+    roots = [os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())]
+    for extra in (os.environ.get("MCP_JAIL_EXTRA") or "").split(os.pathsep):
+        if extra.strip():
+            roots.append(os.path.abspath(extra.strip()))
+    return [os.path.normcase(os.path.realpath(r)) for r in roots]
+
+
+def jail_error(path: str) -> str | None:
+    """None if `path` is allowed; else a model-facing refusal that names the
+    escalation paths (ask the user / approval-gated shell)."""
+    roots = _jail_roots()
+    if not roots:
+        return None
+    real = os.path.normcase(os.path.realpath(path))
+    for root in roots:
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            return None
+    return (
+        f"path is outside the workspace jail: {path} (workspace: "
+        f"{os.environ.get('MCP_WORKSPACE') or os.getcwd()}). This tool only "
+        "touches the workspace (MCP_JAIL_EXTRA adds roots; MCP_JAIL=0 "
+        "disables). For a legitimate outside file, ask the user or use a "
+        "shell command, which requires approval."
+    )
+
 
 # --- locate the rg binary --------------------------------------------------
 def rg_bin() -> str:
@@ -178,7 +214,7 @@ async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict
 
 
 # --- tools -----------------------------------------------------------------
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def grep(
     pattern: str,
     path: str = ".",
@@ -194,22 +230,25 @@ async def grep(
     lines as {file, line, column, text}; capped at max_results and flagged truncated
     if the cap is hit. Use `glob` (e.g. ['*.py']) to scope by file type."""
     path = _resolve(path)
+    if err := jail_error(path):
+        return _result(f"❌ {err}",
+                       {"matches": [], "count": 0, "truncated": False,
+                        "timed_out": False, "error": err})
     cap = max(1, min(max_results, MAX_RESULTS_CAP))
     args = build_grep_args(
         pattern, path, ignore_case, glob, multiline, context, hidden, no_ignore
     )
     data = await _run_capped(args, cap, DEFAULT_TIMEOUT)
     n = data["count"]
-    flags = []
-    if data.get("truncated"): flags.append("truncated")
-    if data.get("timed_out"): flags.append("timed out")
-    if data.get("error"): flags.append("error")
+    flags = [label for key, label in (
+        ("truncated", "truncated"), ("timed_out", "timed out"), ("error", "error"),
+    ) if data.get(key)]
     summary = f"{n} match(es) for {pattern!r}" + (f" [{', '.join(flags)}]" if flags else "")
     block = "\n".join(f"{r['file']}:{r['line']}: {r['text']}" for r in data["matches"])
     return _result(summary, data, block)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True})
 async def files(
     glob: Optional[list[str]] = None,
     path: str = ".",
@@ -221,6 +260,10 @@ async def files(
     '!**/dist/**']). Respects .gitignore unless no_ignore is set. Returns file paths,
     capped at max_results."""
     path = _resolve(path)
+    if err := jail_error(path):
+        return _result(f"❌ {err}",
+                       {"files": [], "count": 0, "truncated": False,
+                        "timed_out": False, "error": err})
     cap = max(1, min(max_results, MAX_RESULTS_CAP))
     rg = rg_bin()
     args = build_files_args(glob, path, hidden, no_ignore)
@@ -231,6 +274,7 @@ async def files(
     )
     paths: list[str] = []
     truncated = False
+    timed_out = False
     assert proc.stdout is not None
     try:
         async def _read() -> bool:
@@ -242,7 +286,7 @@ async def files(
 
         truncated = await asyncio.wait_for(_read(), DEFAULT_TIMEOUT)
     except asyncio.TimeoutError:
-        pass
+        timed_out = True  # a timeout is not a complete listing — say so
     finally:
         if proc.returncode is None:
             proc.kill()
@@ -250,8 +294,10 @@ async def files(
             await asyncio.wait_for(proc.communicate(), 5)
         except (asyncio.TimeoutError, ValueError):
             pass
-    data = {"files": paths, "count": len(paths), "truncated": truncated}
-    summary = f"{data['count']} file(s)" + (" [truncated]" if data.get('truncated') else "")
+    data = {"files": paths, "count": len(paths), "truncated": truncated,
+            "timed_out": timed_out}
+    flags = [f for f, on in (("truncated", truncated), ("timed out", timed_out)) if on]
+    summary = f"{data['count']} file(s)" + (f" [{', '.join(flags)}]" if flags else "")
     block = "\n".join(data["files"])
     return _result(summary, data, block)
 

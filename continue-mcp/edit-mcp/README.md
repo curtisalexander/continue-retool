@@ -8,9 +8,22 @@ so exact `str.replace` misses it — especially anywhere non-ASCII is involved.
 
 | Tool | Replaces | Notes |
 |---|---|---|
-| `edit.edit(path, old_string, new_string, replace_all?)` | Edit file | exact → fuzzy fallback; unique unless `replace_all` |
-| `edit.multi_edit(path, edits)` | — | several edits, one atomic write |
+| `edit.edit(path, old_string, new_string, replace_all?, dry_run?)` | Edit file | exact → fuzzy fallback; unique unless `replace_all`; `dry_run` previews the diff without writing |
+| `edit.multi_edit(path, edits, dry_run?)` | — | several edits, one atomic write |
 | `edit.create_file(path, content, overwrite?)` | Create file | makes parent dirs |
+| `edit.delete_file(path)` | — | file deletion gets its own policy lane (not `rm` via the shell tool) |
+| `edit.move_file(path, new_path, overwrite?)` | — | move/rename; refuses to clobber unless `overwrite` |
+
+Files that aren't UTF-8 are handled too: a cp1252/latin-1 file is detected,
+edited, and **written back in its own encoding** — never transcoded, never a
+raw `UnicodeDecodeError`. Every failure (no match, ambiguous match, missing
+file) comes back as structured `{ok: false, error}` the model can react to.
+
+All five tools are **workspace-jailed by default**: every path (including
+`move_file`'s destination) must live under `MCP_WORKSPACE` after realpath
+resolution, so an injected instruction can't write or delete outside the
+project even if you promote `edit.*` to Automatic. `MCP_JAIL_EXTRA` adds
+roots; `MCP_JAIL=0` disables. See the kit README.
 
 ## Why your current tool fails on non-ASCII (and how this fixes it)
 

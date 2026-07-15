@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import shutil
 
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
@@ -49,17 +50,63 @@ def _resolve(path: str) -> str:
     base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
     return os.path.join(base, path)
 
+# --- workspace jail (default ON) --------------------------------------------
+# The recommended tool policy runs this server on Automatic — no human approval
+# per call — so a prompt-injected "read ~/.ssh/id_rsa" must fail closed, not
+# silently succeed. Every path is realpath'd (a symlink inside the workspace
+# can't tunnel out) and must live under the workspace root or an extra root
+# from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
+# sanctioned escape hatch for a legitimate out-of-workspace file is the shell
+# tool, which is approval-gated by policy.
+def _jail_roots() -> list[str]:
+    if os.environ.get("MCP_JAIL", "1").strip().lower() in ("0", "false", "off", "no"):
+        return []
+    roots = [os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())]
+    for extra in (os.environ.get("MCP_JAIL_EXTRA") or "").split(os.pathsep):
+        if extra.strip():
+            roots.append(os.path.abspath(extra.strip()))
+    return [os.path.normcase(os.path.realpath(r)) for r in roots]
+
+
+def jail_error(path: str) -> str | None:
+    """None if `path` is allowed; else a model-facing refusal that names the
+    escalation paths (ask the user / approval-gated shell)."""
+    roots = _jail_roots()
+    if not roots:
+        return None
+    real = os.path.normcase(os.path.realpath(path))
+    for root in roots:
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            return None
+    return (
+        f"path is outside the workspace jail: {path} (workspace: "
+        f"{os.environ.get('MCP_WORKSPACE') or os.getcwd()}). This tool only "
+        "touches the workspace (MCP_JAIL_EXTRA adds roots; MCP_JAIL=0 "
+        "disables). For a legitimate outside file, ask the user or use a "
+        "shell command, which requires approval."
+    )
+
 
 # --- file IO that preserves bytes we don't touch ---------------------------
-def _read(path: str) -> str:
-    # newline="" stops Python from translating line endings; the matcher handles
-    # CRLF/BOM itself so what we read is what's really on disk.
-    with open(path, "r", encoding="utf-8", newline="") as f:
-        return f.read()
+def _read(path: str) -> tuple[str, str]:
+    """Returns (content, encoding). UTF-8 first; a corporate cp1252/latin-1 file
+    — the very environment this tool targets — must not blow up with a raw
+    UnicodeDecodeError, and must be written back in ITS encoding, not silently
+    transcoded to UTF-8. latin-1 is the final fallback (any byte decodes, and
+    the read→write round-trip preserves every byte). Line endings and BOM are
+    the matcher's job, so no newline translation happens here."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    for enc in ("utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    raise AssertionError("unreachable: latin-1 decodes any byte string")
 
 
-def _write(path: str, content: str) -> None:
-    with open(path, "w", encoding="utf-8", newline="") as f:
+def _write(path: str, content: str, encoding: str = "utf-8") -> None:
+    with open(path, "w", encoding=encoding, newline="") as f:
         f.write(content)
 
 
@@ -81,50 +128,62 @@ async def edit(
     old_string: str,
     new_string: str,
     replace_all: bool = False,
+    dry_run: bool = False,
 ) -> ToolResult:
     """Replace old_string with new_string in a file. Matches exactly first, then
     falls back to a Unicode-normalized match (smart quotes, dashes, NBSP, accents,
     trailing whitespace, CRLF) so non-ASCII regions still match. old_string must be
-    unique unless replace_all is set."""
+    unique unless replace_all is set. dry_run previews the diff without writing."""
     path = _resolve(path)
-    try:
-        before = _read(path)
-    except FileNotFoundError:
-        raise EditError(f"file not found: {path}")
+    if err := jail_error(path):
+        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
+    if not os.path.isfile(path):
+        return _result(f"❌ file not found: {path}",
+                       {"ok": False, "path": path, "error": f"file not found: {path}"})
+    before, encoding = _read(path)
     try:
         after, strategy, count = find_and_replace(before, old_string, new_string, replace_all)
     except EditError as e:
         return _result(f"❌ edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
-    _write(path, after)
+    if not dry_run:
+        _write(path, after, encoding)
     diff = _preview(before, after, path)
     data = {
         "ok": True,
         "path": path,
         "strategy": strategy,          # "exact" or "fuzzy"
         "replacements": count,
+        "encoding": encoding,
+        "dry_run": dry_run,
         "diff": diff,
     }
-    return _result(f"Edited {path} — {count} replacement(s), {strategy} match", data, diff)
+    verb = "Would edit (dry run)" if dry_run else "Edited"
+    return _result(f"{verb} {path} — {count} replacement(s), {strategy} match", data, diff)
 
 
 @mcp.tool
-async def multi_edit(path: str, edits: list[dict]) -> ToolResult:
+async def multi_edit(path: str, edits: list[dict], dry_run: bool = False) -> ToolResult:
     """Apply several edits to one file in a single write. `edits` is a list of
     {old_string, new_string, replace_all?}, applied in order (each sees the prior
-    result). All must succeed or the file is left unchanged."""
+    result). All must succeed or the file is left unchanged. dry_run previews only."""
     path = _resolve(path)
-    try:
-        before = _read(path)
-    except FileNotFoundError:
-        raise EditError(f"file not found: {path}")
+    if err := jail_error(path):
+        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
+    if not os.path.isfile(path):
+        return _result(f"❌ file not found: {path}",
+                       {"ok": False, "path": path, "error": f"file not found: {path}"})
+    before, encoding = _read(path)
     try:
         after, results = apply_edits(before, edits)
     except EditError as e:
         return _result(f"❌ multi_edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
-    _write(path, after)
+    if not dry_run:
+        _write(path, after, encoding)
     diff = _preview(before, after, path)
-    data = {"ok": True, "path": path, "edits": results, "diff": diff}
-    return _result(f"Applied {len(results)} edit(s) to {path}", data, diff)
+    data = {"ok": True, "path": path, "edits": results, "encoding": encoding,
+            "dry_run": dry_run, "diff": diff}
+    verb = "Would apply (dry run)" if dry_run else "Applied"
+    return _result(f"{verb} {len(results)} edit(s) to {path}", data, diff)
 
 
 @mcp.tool
@@ -132,6 +191,8 @@ async def create_file(path: str, content: str, overwrite: bool = False) -> ToolR
     """Create a new file with the given content. Fails if the file exists unless
     overwrite is set. Creates parent directories as needed."""
     path = _resolve(path)
+    if err := jail_error(path):
+        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
     if os.path.exists(path) and not overwrite:
         return _result(
             f"❌ file exists: {path} (pass overwrite=true to replace)",
@@ -143,6 +204,49 @@ async def create_file(path: str, content: str, overwrite: bool = False) -> ToolR
     n = len(content.encode("utf-8"))
     diff = _preview("", content, path)
     return _result(f"Created {path} ({n} bytes)", {"ok": True, "path": path, "bytes": n}, diff)
+
+
+@mcp.tool(annotations={"destructiveHint": True, "idempotentHint": True})
+async def delete_file(path: str) -> ToolResult:
+    """Delete one file (not a directory). Gives file deletion its own policy
+    lane instead of routing rm through the shell tool."""
+    path = _resolve(path)
+    if err := jail_error(path):
+        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
+    if not os.path.isfile(path):
+        return _result(f"❌ file not found: {path}",
+                       {"ok": False, "path": path, "error": f"file not found: {path}"})
+    os.remove(path)
+    return _result(f"Deleted {path}", {"ok": True, "path": path})
+
+
+@mcp.tool(annotations={"destructiveHint": True})
+async def move_file(path: str, new_path: str, overwrite: bool = False) -> ToolResult:
+    """Move or rename a file. Fails if the destination exists unless overwrite
+    is set. Creates destination parent directories as needed."""
+    src = _resolve(path)
+    dest = _resolve(new_path)
+    for p in (src, dest):
+        if err := jail_error(p):
+            return _result(f"❌ {err}", {"ok": False, "path": p, "error": err})
+    if not os.path.isfile(src):
+        return _result(f"❌ file not found: {src}",
+                       {"ok": False, "path": src, "error": f"file not found: {src}"})
+    if os.path.exists(dest) and not overwrite:
+        return _result(
+            f"❌ destination exists: {dest} (pass overwrite=true to replace)",
+            {"ok": False, "path": dest,
+             "error": "destination exists (pass overwrite=true to replace)"},
+        )
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    try:
+        os.replace(src, dest)      # atomic when src/dest share a filesystem
+    except OSError:                # cross-device (EXDEV): copy + delete
+        if os.path.exists(dest):
+            os.remove(dest)
+        shutil.move(src, dest)
+    data = {"ok": True, "from": src, "to": dest}
+    return _result(f"Moved {src} → {dest}", data)
 
 
 def main() -> None:

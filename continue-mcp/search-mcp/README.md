@@ -11,6 +11,11 @@ context window.
 | `search.grep(pattern, …)` | Grep search | matching lines as `{file, line, column, text}` |
 | `search.files(glob, …)` | Glob search | file paths matching a glob |
 
+Both tools are **workspace-jailed by default**: the search path must live under
+`MCP_WORKSPACE` (realpath'd), because `search.*` runs on Automatic — no human
+approves each call. `MCP_JAIL_EXTRA` adds roots; `MCP_JAIL=0` disables. See
+the kit README for the full policy story.
+
 ## 1. Install the `rg` binary (the thing we call out to)
 
 This MCP does **not** bundle ripgrep — it calls the `rg` binary on your PATH.

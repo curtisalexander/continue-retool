@@ -21,7 +21,98 @@ def test_tools_advertised():
             return await c.list_tools()
 
     tools = asyncio.run(scenario())
-    assert {t.name for t in tools} == {"edit", "multi_edit", "create_file"}
+    assert {t.name for t in tools} == {
+        "edit", "multi_edit", "create_file", "delete_file", "move_file",
+    }
+
+
+# House-style conformance, enforced mechanically (see rules/rule-rule.md).
+DESCRIPTION_BUDGET_CHARS = 1000  # ~250 tokens; catches runaway growth
+
+
+def test_descriptions_present_and_within_budget():
+    async def scenario():
+        async with Client(mcp) as c:
+            return await c.list_tools()
+
+    for t in asyncio.run(scenario()):
+        assert t.description, f"{t.name} has no description"
+        assert len(t.description) <= DESCRIPTION_BUDGET_CHARS, (
+            f"{t.name} description is {len(t.description)} chars "
+            f"(budget {DESCRIPTION_BUDGET_CHARS})"
+        )
+
+
+def test_destructive_tools_are_annotated():
+    async def scenario():
+        async with Client(mcp) as c:
+            return await c.list_tools()
+
+    tools = {t.name: t for t in asyncio.run(scenario())}
+    for name in ("delete_file", "move_file"):
+        ann = tools[name].annotations
+        assert ann and ann.destructiveHint is True, f"{name} should be destructiveHint"
+
+
+def test_edit_missing_file_is_structured_error(tmp_path):
+    """File-not-found comes back as {ok: false}, the same failure shape as a
+    match error — never a raised protocol-level exception."""
+    res = _call("edit", {
+        "path": str(tmp_path / "nope.txt"), "old_string": "a", "new_string": "b",
+    })
+    assert res.data["ok"] is False
+    assert "not found" in res.data["error"]
+
+
+def test_edit_cp1252_file_round_trips(tmp_path):
+    """A non-UTF-8 (cp1252) file must be editable — and written back in its own
+    encoding, not transcoded or crashed on."""
+    f = tmp_path / "legacy.txt"
+    f.write_bytes("café — “legacy”\nplain line\n".encode("cp1252"))
+    res = _call("edit", {
+        "path": str(f), "old_string": "plain line", "new_string": "edited line",
+    })
+    assert res.data["ok"] is True
+    assert res.data["encoding"] == "cp1252"
+    raw = f.read_bytes()
+    assert "edited line" in raw.decode("cp1252")
+    assert raw.decode("cp1252").startswith("café — “legacy”")
+
+
+def test_edit_dry_run_leaves_file_untouched(tmp_path):
+    f = tmp_path / "d.txt"
+    f.write_text("keep me\n", encoding="utf-8")
+    res = _call("edit", {
+        "path": str(f), "old_string": "keep", "new_string": "change",
+        "dry_run": True,
+    })
+    assert res.data["ok"] is True and res.data["dry_run"] is True
+    assert "change" in res.data["diff"]
+    assert f.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_delete_file(tmp_path):
+    f = tmp_path / "gone.txt"
+    f.write_text("x\n", encoding="utf-8")
+    res = _call("delete_file", {"path": str(f)})
+    assert res.data["ok"] is True and not f.exists()
+    res2 = _call("delete_file", {"path": str(f)})
+    assert res2.data["ok"] is False
+
+
+def test_move_file_and_overwrite_guard(tmp_path):
+    src = tmp_path / "src.txt"
+    src.write_text("payload\n", encoding="utf-8")
+    dest = tmp_path / "sub" / "dest.txt"
+    res = _call("move_file", {"path": str(src), "new_path": str(dest)})
+    assert res.data["ok"] is True
+    assert not src.exists() and dest.read_text(encoding="utf-8") == "payload\n"
+    # refuse to clobber without overwrite
+    src2 = tmp_path / "src2.txt"
+    src2.write_text("other\n", encoding="utf-8")
+    res2 = _call("move_file", {"path": str(src2), "new_path": str(dest)})
+    assert res2.data["ok"] is False
+    assert dest.read_text(encoding="utf-8") == "payload\n"
 
 
 def test_edit_exact_match(tmp_path):
@@ -77,3 +168,42 @@ def test_relative_path_resolves_against_workspace(tmp_path, monkeypatch):
     })
     assert res.data["ok"] is True
     assert (tmp_path / "rel.txt").read_text(encoding="utf-8") == "bbb\n"
+
+
+# --- workspace jail (default ON; conftest pins MCP_WORKSPACE to tmp_path) ----
+def test_jail_blocks_outside_edit_and_create(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    victim = outside / "victim.txt"
+    victim.write_text("keep\n", encoding="utf-8")
+    res = _call("edit", {"path": str(victim), "old_string": "keep", "new_string": "x"})
+    assert res.data["ok"] is False and "workspace jail" in res.data["error"]
+    assert victim.read_text(encoding="utf-8") == "keep\n"
+    res2 = _call("create_file", {"path": str(outside / "new.txt"), "content": "x"})
+    assert res2.data["ok"] is False and "workspace jail" in res2.data["error"]
+
+
+def test_jail_blocks_move_dest_outside(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside-move")
+    src = tmp_path / "inside.txt"
+    src.write_text("payload\n", encoding="utf-8")
+    res = _call("move_file", {"path": str(src), "new_path": str(outside / "out.txt")})
+    assert res.data["ok"] is False and "workspace jail" in res.data["error"]
+    assert src.exists()
+
+
+def test_jail_blocks_delete_outside(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside-del")
+    f = outside / "keep.txt"
+    f.write_text("x\n", encoding="utf-8")
+    res = _call("delete_file", {"path": str(f)})
+    assert res.data["ok"] is False and "workspace jail" in res.data["error"]
+    assert f.exists()
+
+
+def test_jail_opt_out_allows_outside(tmp_path, tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("MCP_JAIL", "0")
+    outside = tmp_path_factory.mktemp("outside-optout")
+    f = outside / "e.txt"
+    f.write_text("aaa\n", encoding="utf-8")
+    res = _call("edit", {"path": str(f), "old_string": "aaa", "new_string": "bbb"})
+    assert res.data["ok"] is True

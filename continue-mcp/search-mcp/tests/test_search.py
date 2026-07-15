@@ -97,3 +97,33 @@ def test_relative_path_resolves_against_workspace(tmp_path, monkeypatch):
     (sub / "c.txt").write_text("WORKSPACE_NEEDLE\n")
     res = asyncio.run(server.grep("WORKSPACE_NEEDLE", path="sub"))
     assert res.structured_content["count"] == 1
+
+
+# --- workspace jail (default ON; conftest pins MCP_WORKSPACE to tmp_path) ----
+# The jail check runs before rg is even located, so these need no ripgrep.
+def _grep(path):
+    return asyncio.run(server.grep("x", path=str(path))).structured_content
+
+
+def test_jail_blocks_outside_grep(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    res = _grep(outside)
+    assert res["count"] == 0
+    assert "workspace jail" in res["error"]
+
+
+def test_jail_blocks_outside_files(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside-files")
+    res = asyncio.run(server.files(path=str(outside))).structured_content
+    assert res["count"] == 0
+    assert "workspace jail" in res["error"]
+
+
+def test_jail_opt_out(tmp_path, tmp_path_factory, monkeypatch):
+    if not HAVE_RG:
+        pytest.skip("ripgrep (rg) not installed")
+    monkeypatch.setenv("MCP_JAIL", "0")
+    outside = tmp_path_factory.mktemp("outside-optout")
+    (outside / "a.txt").write_text("needle\n", encoding="utf-8")
+    res = asyncio.run(server.grep("needle", path=str(outside))).structured_content
+    assert res["count"] == 1

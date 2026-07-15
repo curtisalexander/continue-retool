@@ -21,6 +21,10 @@ Design points:
   `FS_MCP_DEFAULT_LIMIT` lines, listings at `FS_MCP_MAX_ENTRIES` entries.
 - **Windows-friendly.** UTF-8 BOM stripped, CRLF handled, undecodable bytes
   replaced rather than erroring.
+- **Workspace-jailed (default ON).** Both tools run on Automatic, so paths are
+  confined to `MCP_WORKSPACE` (realpath'd — symlinks can't tunnel out). A
+  prompt-injected read of `~/.ssh/…` fails closed with a structured refusal.
+  `MCP_JAIL_EXTRA` adds roots; `MCP_JAIL=0` disables. See the kit README.
 
 ## Setup
 
@@ -33,5 +37,6 @@ Then register `.continue/mcpServers/fs.yaml` with Continue, set the built-in
 **Read file** and **List dir** to **Excluded**, and `fs.*` to **Automatic**
 (both tools are read-only).
 
-Relative paths resolve against the server's working directory — set `cwd` in
-the yaml to your workspace root, or have the agent use absolute paths.
+Relative paths resolve against `MCP_WORKSPACE` (stamped into the yaml by the
+installer), falling back to the server's cwd — so they mean your project, not
+wherever Continue happened to launch the process.

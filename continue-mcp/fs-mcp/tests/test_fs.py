@@ -1,5 +1,8 @@
 """Golden tests for fs-mcp. Run: uv run --extra test pytest -q"""
 import asyncio
+import os
+
+import pytest
 
 from fs_mcp import server
 
@@ -142,3 +145,59 @@ def test_relative_path_resolves_against_workspace(tmp_path, monkeypatch):
     assert res["content"] == "1\tfound"
     res = _list(".")
     assert any(e["path"] == "rel.txt" for e in res["entries"])
+
+
+# --- workspace jail (default ON; conftest pins MCP_WORKSPACE to tmp_path) ----
+def test_jail_blocks_outside_read(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    secret = outside / "secret.txt"
+    secret.write_text("s3cret\n", encoding="utf-8")
+    res = _read(secret)
+    assert res["ok"] is False
+    assert "workspace jail" in res["error"]
+
+
+def test_jail_blocks_outside_list(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside-list")
+    res = _list(outside)
+    assert res["ok"] is False
+    assert "workspace jail" in res["error"]
+
+
+def test_jail_blocks_relative_escape(tmp_path):
+    res = _read("../escape.txt")
+    assert res["ok"] is False
+    assert "workspace jail" in res["error"]
+
+
+def test_jail_blocks_symlink_escape(tmp_path, tmp_path_factory):
+    """A symlink INSIDE the workspace must not read a target OUTSIDE it —
+    paths are realpath'd before the containment check."""
+    if os.name == "nt":
+        pytest.skip("symlink creation needs privileges on Windows")
+    outside = tmp_path_factory.mktemp("outside-link")
+    target = outside / "target.txt"
+    target.write_text("tunneled\n", encoding="utf-8")
+    link = tmp_path / "innocent.txt"
+    os.symlink(target, link)
+    res = _read(link)
+    assert res["ok"] is False
+    assert "workspace jail" in res["error"]
+
+
+def test_jail_opt_out(tmp_path, tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("MCP_JAIL", "0")
+    outside = tmp_path_factory.mktemp("outside-optout")
+    f = outside / "ok.txt"
+    f.write_text("fine\n", encoding="utf-8")
+    res = _read(f)
+    assert res["ok"] is True
+
+
+def test_jail_extra_root_allows(tmp_path, tmp_path_factory, monkeypatch):
+    outside = tmp_path_factory.mktemp("extra-root")
+    monkeypatch.setenv("MCP_JAIL_EXTRA", str(outside))
+    f = outside / "ok.txt"
+    f.write_text("fine\n", encoding="utf-8")
+    res = _read(f)
+    assert res["ok"] is True
