@@ -1,0 +1,8 @@
+# Lint config for the whole toolkit (CI runs `uvx ruff check continue-mcp`).
+# Default rule set (E4/E7/E9 + F) — real errors only, no style churn.
+target-version = "py311"
+
+[lint.per-file-ignores]
+# fs.list / notes.list / sql.format deliberately mirror the tool names the
+# model sees; shadowing the builtin inside these modules is a non-issue.
+"**/server.py" = ["A001"]
