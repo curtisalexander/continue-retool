@@ -7,7 +7,9 @@ tool-factory skill for growing the kit.
 
 The premise: the default agent tools are fine, but *your own* tools can be more
 Unicode-robust, cheaper on tokens, and safer to grant — and once you can build
-one MCP, you can build the rest.
+one MCP, you can build the rest. "Safer to grant" is literal: the read/edit
+servers are **workspace-jailed by default**, so the tools you set to Automatic
+can't touch anything outside your project.
 
 **Status:** daily-driver software, pure Python throughout, tested
 deterministically (fastmcp in-process client — no LLM in the test loop) on
@@ -34,7 +36,9 @@ Linux/macOS/Windows via CI. Direction decisions live in the
 
 See [`continue-mcp/README.md`](continue-mcp/README.md) for the order of
 operations and per-server setup. To wire the whole kit into a project in one
-command: `python3 continue-mcp/install-workspace.py /path/to/your/project`.
+command: `uv run continue-mcp/install-workspace.py /path/to/your/project`
+(and `--check` afterwards runs a doctor that verifies the install end-to-end,
+live MCP handshake included).
 
 ## The site
 

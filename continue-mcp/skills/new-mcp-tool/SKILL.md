@@ -52,6 +52,10 @@ generation can discover it.
      <name>_mcp/server.py         # FastMCP() + @mcp.tool functions
      tests/conftest.py            # sys.path shim (copy from any sibling)
      tests/test_tools.py          # golden tests
+     tests/test_mcp_surface.py    # MCP-boundary tests (copy a sibling's:
+                                  # list_tools + calls via fastmcp Client,
+                                  # incl. the description-budget and
+                                  # annotation conformance checks)
      .continue/mcpServers/<name>.yaml
      README.md                    # one paragraph + the tool list
    ```
@@ -60,6 +64,11 @@ generation can discover it.
    `edit_mcp/matcher.py` and `gateway_mcp/registry.py`.
 3. **Write the tool(s).** Each `@mcp.tool` is one decorated async function.
    The docstring becomes the description the model sees — enforce rule 1 on it.
+   House style (see the template): return a `ToolResult` whose `content` is a
+   readable summary for Continue's UI and whose `structured_content` is the
+   dict the model consumes; failures are structured `{ok: false, error}`, not
+   raised exceptions; annotate read-only tools `readOnlyHint` and destructive
+   ones `destructiveHint` so clients can derive policy.
 4. **Test through our own shell MCP** (the ouroboros step):
    `shell.run("cd <name>-mcp && uv run --extra test pytest -q")`.
    Iterate until green.
@@ -86,7 +95,7 @@ name = "<name>-mcp"
 version = "0.1.0"
 description = "<one line>"
 requires-python = ">=3.11"
-dependencies = ["fastmcp>=2"]
+dependencies = ["fastmcp>=3,<4"]   # the toolkit-wide pin — do not loosen
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
@@ -98,21 +107,37 @@ test = ["pytest>=8"]
 packages = ["<name>_mcp"]
 ```
 
-## Template: a minimal tool
+## Template: a minimal tool (house style)
 
 ```python
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 mcp = FastMCP("<name>")
 
-@mcp.tool
-async def do_thing(target: str, mode: str = "default") -> dict:
+
+def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
+    """content is what Continue's UI shows (summary + optional fenced block);
+    structured_content is what the model/tests read via res.data."""
+    md = summary
+    if block.strip():
+        md += f"\n\n```{lang}\n{block}\n```"
+    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})   # or destructiveHint for writes
+async def do_thing(target: str, mode: str = "default") -> ToolResult:
     """<= 2 sentences. What it does + what it returns. That's the whole budget."""
+    if not_possible:
+        return _result("❌ <why>", {"ok": False, "error": "<why>"})  # structured, never raised
     ...
-    return {"ok": True, "result": ...}
+    return _result("<one-line summary>", {"ok": True, "result": ...})
+
 
 def main() -> None:
     mcp.run()  # stdio transport
+
 
 if __name__ == "__main__":
     main()

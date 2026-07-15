@@ -25,6 +25,52 @@ Dated, newest-first. Where a later entry contradicts earlier prose in this doc,
 **the decision log wins** — superseded sections are kept for the reasoning, not
 as the plan.
 
+**2026-07-15 (later)**
+
+- **Workspace jail built — default ON.** fs, search, and edit confine every
+  path (after workspace resolution) to `MCP_WORKSPACE`: paths are realpath'd —
+  a symlink inside the workspace can't tunnel out — and checked against the
+  workspace root plus any `MCP_JAIL_EXTRA` roots (os.pathsep-separated);
+  `MCP_JAIL=0` disables. Rationale: the recommended policy runs these servers
+  on **Automatic**, so a prompt-injected "read `~/.ssh/id_rsa`" would execute
+  with no human in the loop. The coherent policy story is now: **Automatic =
+  workspace-jailed; Ask-First (shell) = human-gated** — shell is deliberately
+  NOT jailed (you can't path-check an arbitrary command string) and is the
+  sanctioned, approval-gated escape hatch for legitimate out-of-workspace
+  access. notes was already jailed by design (repo-root storage); sql takes no
+  paths. A jail refusal is a structured error that tells the model exactly how
+  to escalate.
+
+**2026-07-15**
+
+- **Hardening pass: house style is now enforced, not trusted.** Decisions locked
+  in by this pass:
+  - **Errors are structured, never raised.** Every expected failure (missing
+    file, bad note name, no match, downstream error) returns
+    `{ok: false, error}` through the normal result channel; raised exceptions
+    are reserved for genuine bugs. Previously the two styles were mixed
+    per-tool.
+  - **Cursors are logical byte offsets.** shell-mcp's `output()` cursors index
+    the *stream*, not the decoded text, so they survive RingBuffer truncation
+    (the old character cursors silently duplicated/dropped chunks on long
+    chatty jobs — the exact target workload).
+  - **MCP tool annotations adopted toolkit-wide.** Read-only tools carry
+    `readOnlyHint`, destructive ones `destructiveHint`, so a client can derive
+    the Ask-First/Automatic split mechanically; the surface tests assert it.
+  - **`_result`/`_resolve` duplication is deliberate.** Each server stays a
+    self-contained uv project (no shared internal package to version and sync);
+    the cost is ~20 duplicated lines per server, and conformance is enforced by
+    the shared surface-test assertions instead of shared code. Revisit only if
+    the copies actually diverge.
+  - **Cost is measured, not estimated.** `bench/audit.py` prints per-server
+    cold-start and per-tool resting token cost (CI prints it every run);
+    `install-workspace.py --check` is a doctor that ends with a live MCP
+    handshake per server. Baseline at adoption: ~2,770 tokens at rest for all
+    7 servers, cold starts ~300 ms.
+  - **A false clean is the worst lint result.** sql-mcp now reports a sqruff
+    hard failure (non-zero exit, no report) as an error; previously it read as
+    "clean — 0 violations".
+
 **2026-07-06 (evening)**
 
 - **`notes` built — repo-local, never the home directory.** Files-plus-thin-MCP
@@ -696,7 +742,7 @@ when they drift, the SKILL.md is the source of truth.)
 
 ---
 
-## 8. Open questions — status as of 2026-07-06
+## 8. Open questions — status as of 2026-07-15
 
 1. **Is MCP enabled in the reskinned/corporate Continue build?** ***Still open —
    and deferred.*** The corporate machine (the only one with the extension) is

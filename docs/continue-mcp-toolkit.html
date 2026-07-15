@@ -100,9 +100,9 @@ The ouroboros — a framework + skill that builds new tools</a></li>
 <li><a href="#7-recommended-foundations-the-order-id-build-in"
 id="toc-7-recommended-foundations-the-order-id-build-in">7. Recommended
 foundations (the order I'd build in)</a></li>
-<li><a href="#8-open-questions--status-as-of-2026-07-06"
-id="toc-8-open-questions--status-as-of-2026-07-06">8. Open questions —
-status as of 2026-07-06</a></li>
+<li><a href="#8-open-questions--status-as-of-2026-07-15"
+id="toc-8-open-questions--status-as-of-2026-07-15">8. Open questions —
+status as of 2026-07-15</a></li>
 <li><a href="#sources" id="toc-sources">Sources</a></li>
 </ul></li>
 </ul>
@@ -183,6 +183,61 @@ This is your ouroboros.</td>
 <p>Dated, newest-first. Where a later entry contradicts earlier prose in
 this doc, <strong>the decision log wins</strong> — superseded sections
 are kept for the reasoning, not as the plan.</p>
+<p><strong>2026-07-15 (later)</strong></p>
+<ul>
+<li><strong>Workspace jail built — default ON.</strong> fs, search, and
+edit confine every path (after workspace resolution) to
+<code>MCP_WORKSPACE</code>: paths are realpath'd — a symlink inside the
+workspace can't tunnel out — and checked against the workspace root plus
+any <code>MCP_JAIL_EXTRA</code> roots (os.pathsep-separated);
+<code>MCP_JAIL=0</code> disables. Rationale: the recommended policy runs
+these servers on <strong>Automatic</strong>, so a prompt-injected "read
+<code>~/.ssh/id_rsa</code>" would execute with no human in the loop. The
+coherent policy story is now: <strong>Automatic = workspace-jailed;
+Ask-First (shell) = human-gated</strong> — shell is deliberately NOT
+jailed (you can't path-check an arbitrary command string) and is the
+sanctioned, approval-gated escape hatch for legitimate out-of-workspace
+access. notes was already jailed by design (repo-root storage); sql
+takes no paths. A jail refusal is a structured error that tells the
+model exactly how to escalate.</li>
+</ul>
+<p><strong>2026-07-15</strong></p>
+<ul>
+<li><strong>Hardening pass: house style is now enforced, not
+trusted.</strong> Decisions locked in by this pass:
+<ul>
+<li><strong>Errors are structured, never raised.</strong> Every expected
+failure (missing file, bad note name, no match, downstream error)
+returns <code>{ok: false, error}</code> through the normal result
+channel; raised exceptions are reserved for genuine bugs. Previously the
+two styles were mixed per-tool.</li>
+<li><strong>Cursors are logical byte offsets.</strong> shell-mcp's
+<code>output()</code> cursors index the <em>stream</em>, not the decoded
+text, so they survive RingBuffer truncation (the old character cursors
+silently duplicated/dropped chunks on long chatty jobs — the exact
+target workload).</li>
+<li><strong>MCP tool annotations adopted toolkit-wide.</strong>
+Read-only tools carry <code>readOnlyHint</code>, destructive ones
+<code>destructiveHint</code>, so a client can derive the
+Ask-First/Automatic split mechanically; the surface tests assert
+it.</li>
+<li><strong><code>_result</code>/<code>_resolve</code> duplication is
+deliberate.</strong> Each server stays a self-contained uv project (no
+shared internal package to version and sync); the cost is ~20 duplicated
+lines per server, and conformance is enforced by the shared surface-test
+assertions instead of shared code. Revisit only if the copies actually
+diverge.</li>
+<li><strong>Cost is measured, not estimated.</strong>
+<code>bench/audit.py</code> prints per-server cold-start and per-tool
+resting token cost (CI prints it every run);
+<code>install-workspace.py --check</code> is a doctor that ends with a
+live MCP handshake per server. Baseline at adoption: ~2,770 tokens at
+rest for all 7 servers, cold starts ~300 ms.</li>
+<li><strong>A false clean is the worst lint result.</strong> sql-mcp now
+reports a sqruff hard failure (non-zero exit, no report) as an error;
+previously it read as "clean — 0 violations".</li>
+</ul></li>
+</ul>
 <p><strong>2026-07-06 (evening)</strong></p>
 <ul>
 <li><strong><code>notes</code> built — repo-local, never the home
@@ -1049,8 +1104,8 @@ the token math favors it.</li>
 skill.</strong> Now the toolkit builds itself.</li>
 </ol>
 <hr />
-<h2 id="8-open-questions--status-as-of-2026-07-06">8. Open questions —
-status as of 2026-07-06</h2>
+<h2 id="8-open-questions--status-as-of-2026-07-15">8. Open questions —
+status as of 2026-07-15</h2>
 <ol type="1">
 <li><strong>Is MCP enabled in the reskinned/corporate Continue
 build?</strong> <em><strong>Still open — and deferred.</strong></em> The

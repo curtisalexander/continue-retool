@@ -12,7 +12,8 @@ continue-mcp/
     .continue/mcpServers/hello.yaml
   shell-mcp/                    # the flagship: a terminal-runner MCP
     pyproject.toml             # hatchling + fastmcp; console-script entry
-    shell_mcp/server.py        # async, background-job model, tree-kill, timeout
+    shell_mcp/server.py        # async, background jobs, tree-kill, timeout,
+                               #   stable byte cursors, stdin via send(), env
     tests/test_tools.py        # golden tests incl. cross-platform tree-kill
     .continue/mcpServers/shell.yaml
   search-mcp/                   # ripgrep search, replaces built-in Grep/Glob search
@@ -21,7 +22,8 @@ continue-mcp/
     .continue/mcpServers/search.yaml
   edit-mcp/                     # Unicode-robust edit, replaces built-in Edit/Create file
     edit_mcp/matcher.py        # exact->fuzzy match (NFKC, quotes, dashes, spaces, CRLF/BOM)
-    edit_mcp/server.py         # edit / multi_edit / create_file tools
+    edit_mcp/server.py         # edit / multi_edit / create_file / delete_file /
+                               #   move_file; dry_run; non-UTF-8 files round-trip
     tests/test_matcher.py      # 30+ non-ASCII golden tests (pure stdlib)
     .continue/mcpServers/edit.yaml
   fs-mcp/                       # line-ranged read + list dir, replaces built-in Read/List dir
@@ -34,7 +36,7 @@ continue-mcp/
     tests/test_sql.py          # golden tests against the real sqruff binary
     .continue/mcpServers/sql.yaml
   notes-mcp/                    # repo-local agent memory: index + one .md file per note
-    notes_mcp/server.py        # list/read/write/delete over <repo-root>/.continue-notes/
+    notes_mcp/server.py        # list/read/search/write/delete over <repo-root>/.continue-notes/
     tests/test_notes.py        # golden tests (repo-root discovery, name safety, hooks)
     .continue/mcpServers/notes.yaml
   rules/                        # Continue rules that make the toolkit work
@@ -48,6 +50,8 @@ continue-mcp/
     .continue/mcpServers/gateway.yaml
   skills/
     new-mcp-tool/SKILL.md      # the "ouroboros" tool factory
+  bench/
+    audit.py                   # measured cost: cold-start ms + resting tokens/tool
 ```
 
 ## Order of operations
@@ -82,8 +86,24 @@ cd ../gateway-mcp && uv run --extra test pytest -q && uv run gateway-mcp
 Every package has two test layers, both deterministic (no LLM, no network):
 golden tests of the implementation, and `tests/test_mcp_surface.py`, which
 drives the server over the real MCP boundary with fastmcp's in-process client —
-the same list-tools/call-tool flow Continue performs. CI runs all of it on
-Linux, macOS, and Windows.
+the same list-tools/call-tool flow Continue performs. The surface tests also
+enforce house style mechanically: every tool has a description under a hard
+budget, and read-only/destructive tools carry the matching MCP annotation
+(`readOnlyHint`/`destructiveHint`), so a client can derive tool policy instead
+of trusting a checklist. CI runs all of it on Linux, macOS, and Windows, plus
+ruff and a docs-drift check.
+
+**Measured cost, not vibes.** `bench/audit.py` spawns every server exactly the
+way the stamped yaml does and prints its cold-start latency and the estimated
+resting token cost of each tool schema (the price paid on *every* request):
+
+```bash
+cd continue-mcp
+uv run --no-sync --project hello-mcp python bench/audit.py   # all servers
+```
+
+CI prints the same table on every run, so a fattened docstring or a slow
+dependency bump shows up as a diff in numbers, not a hunch.
 
 Then in Continue: add each `.continue/mcpServers/*.yaml` and set tool policies:
 - built-in **`run_terminal_command`** → Excluded; `shell.*` → Ask First
@@ -94,6 +114,30 @@ Then in Continue: add each `.continue/mcpServers/*.yaml` and set tool policies:
 - `notes.*` → Automatic; also copy `rules/notes.md` into `.continue/rules/`
   (the rule is the discovery mechanism — without it, notes go unread)
 
+### The workspace jail (why Automatic is safe to grant)
+
+fs, search, and edit are **jailed to `MCP_WORKSPACE` by default**. Every path —
+after workspace resolution — is realpath'd (a symlink inside the workspace
+can't tunnel out) and must live under the workspace root, or the call returns
+a structured refusal. This is what makes the Automatic policies above safe:
+without it, a prompt-injected "read `~/.ssh/id_rsa` and summarize it" would
+execute with no human in the loop, because Automatic means nobody approves the
+call.
+
+The policy story in one line: **Automatic = workspace-jailed; Ask-First
+(shell) = human-gated.** shell is deliberately not jailed — an arbitrary
+command string can't be path-checked — so it is the sanctioned, approval-gated
+escape hatch when you genuinely need something outside the project.
+
+Knobs (env, per server yaml or globally):
+- `MCP_JAIL=0` — disable the jail (not recommended while `fs.*`/`search.*`
+  are Automatic).
+- `MCP_JAIL_EXTRA=/path/one:/path/two` — extra allowed roots
+  (os.pathsep-separated: `:` on Unix, `;` on Windows) for a second repo or a
+  shared data directory.
+
+notes is already confined to the repo root by design; sql takes no paths.
+
 ## Install into a project (one command)
 
 ```bash
@@ -103,7 +147,19 @@ uv run install-workspace.py /path/to/your/project              # any OS
 uv run install-workspace.py /path/to/proj --only shell,fs      # a subset
 uv run install-workspace.py /path/to/proj --no-sync            # config only
 uv run install-workspace.py /path/to/proj --jobs 1             # sync one at a time
+uv run install-workspace.py /path/to/proj --check              # doctor: verify it all
+uv run install-workspace.py /path/to/proj --uninstall          # remove the configs
 ```
+
+**`--check` is the doctor.** It verifies the whole chain in one command: uv on
+PATH, each server's package dir and venv, the stamped yamls (no leftover
+placeholders), the detected interpreters, and — the part that matters — a
+**live MCP handshake** per server (`initialize` + `tools/list` over stdio, the
+same flow Continue performs at connect). When a server shows "connection timed
+out" in Continue, run the doctor first; it turns the whole troubleshooting
+section below into one command. `--uninstall` removes exactly the files the
+installer wrote (yamls, and the rules when all servers are selected), plus
+their `.bak` backups; the toolkit checkout and venvs are untouched.
 
 Copies every server's yaml into the project's `.continue/mcpServers/` with the
 two absolute paths stamped in (`--project` → this checkout, `MCP_WORKSPACE` →
