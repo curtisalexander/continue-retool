@@ -43,7 +43,15 @@ Usage (uv runs it via the shebang — `python3` isn't on PATH on Windows):
   uv run install-workspace.py /path/to/your/project --only shell,search,edit
   uv run install-workspace.py /path/to/your/project --no-sync
   uv run install-workspace.py /path/to/your/project --jobs 1   # sequential
+  uv run install-workspace.py /path/to/your/project --check    # doctor: verify
+  uv run install-workspace.py /path/to/your/project --uninstall
 Or, on a Unix shell, directly: ./install-workspace.py /path/to/your/project
+
+Doctor mode (--check) verifies an install end-to-end: uv present, each server's
+package dir + venv, the stamped yamls in the project, detected interpreters,
+and a LIVE MCP handshake (initialize + tools/list over stdio — the same flow
+Continue performs at connect). It compresses the troubleshooting checklist
+into one command; run it whenever a server shows "connection timed out".
 """
 from __future__ import annotations
 
@@ -67,6 +75,11 @@ Next, in Continue's Agent tool settings:
   * built-in Edit file / Create file   -> Excluded;  edit.*   -> Ask First
   * built-in Read file / List dir      -> Excluded;  fs.*     -> Automatic
   * sql.* and notes.*                  -> Automatic (replace no built-ins)
+
+The Automatic grants are safe because fs/search/edit are workspace-JAILED by
+default: paths outside MCP_WORKSPACE are refused (realpath'd, so symlinks
+can't tunnel out). MCP_JAIL_EXTRA adds roots; MCP_JAIL=0 disables. shell is
+the approval-gated escape hatch for legitimate out-of-workspace access.
 
 Suggested first prompt — paste this into Continue's Agent chat to confirm MCP
 is live and the servers see the right workspace:
@@ -115,11 +128,32 @@ def stamp(text: str, server: str, workspace: str, uv_path: str) -> str:
 _SHELL_INTERPRETERS = ["pwsh", "powershell", "cmd", "bash"]
 
 
+def _interp_known_locations(shell: str) -> list[str]:
+    """Fixed install paths to try when PATH lookup misses. Mirrors
+    shell_mcp.server._known_locations — keep in sync by hand (this stdlib-only
+    script can't import the server package before its venv exists)."""
+    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    return {
+        "pwsh": [os.path.join(pf, "PowerShell", "7", "pwsh.exe")],
+        "powershell": [os.path.join(
+            sysroot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")],
+        "cmd": [os.path.join(sysroot, "System32", "cmd.exe")],
+        "bash": ["/bin/bash", "/usr/bin/bash",
+                 os.path.join(pf, "Git", "bin", "bash.exe")],
+    }.get(shell, [])
+
+
 def detect_interpreters() -> dict[str, str]:
-    """Resolve which shells exist on THIS machine -> {shell: absolute path}."""
+    """Resolve which shells exist on THIS machine -> {shell: absolute path}.
+    PATH first, then the known install locations — so a pwsh that lives in
+    Program Files but not on PATH still gets stamped."""
     found: dict[str, str] = {}
     for shell in _SHELL_INTERPRETERS:
         exe = shutil.which(shell)
+        if not exe:
+            exe = next((c for c in _interp_known_locations(shell)
+                        if os.path.isfile(c)), None)
         if exe:
             found[shell] = _slashes(exe)
     return found
@@ -308,6 +342,145 @@ def sync_deps(names: list[str], jobs: int = 0) -> int:
     return len(failed)
 
 
+# --- doctor (--check): verify an install end-to-end -------------------------
+def _mcp_handshake(cmd: list[str], timeout: float = 30.0) -> tuple[bool, str]:
+    """Spawn a stdio MCP server and drive a real initialize -> tools/list
+    handshake with plain newline-delimited JSON-RPC (stdlib only). This is the
+    same flow Continue performs at connect, so a pass here means the yaml's
+    command actually produces a working server."""
+    import json
+    import queue
+
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+        )
+    except OSError as e:
+        return False, f"spawn failed: {e}"
+
+    q: queue.Queue = queue.Queue()
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            q.put(line)
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+    def send(obj: dict) -> None:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(obj) + "\n")
+        proc.stdin.flush()
+
+    def recv(want_id: int) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            try:
+                line = q.get(timeout=remaining)
+            except queue.Empty:
+                raise TimeoutError from None
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("id") == want_id:
+                return msg
+
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "install-workspace-doctor", "version": "1.0"}}})
+        recv(1)
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tools = recv(2).get("result", {}).get("tools", [])
+        return True, f"{len(tools)} tool(s): {', '.join(t['name'] for t in tools)}"
+    except TimeoutError:
+        return False, f"no reply within {timeout:.0f}s"
+    except Exception as e:  # any protocol surprise is a failed check, not a crash
+        return False, f"handshake error: {e}"
+    finally:
+        proc.kill()
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+
+
+def doctor(project: str, names: list[str]) -> int:
+    """Verify the install: uv, package dirs + venvs, stamped yamls, detected
+    interpreters, and a LIVE MCP handshake per server. Returns failure count."""
+    failures = 0
+
+    def check(ok: bool, label: str, detail: str = "") -> None:
+        nonlocal failures
+        mark = "ok " if ok else "FAIL"
+        print(f"  [{mark}] {label}" + (f" — {detail}" if detail else ""))
+        if not ok:
+            failures += 1
+
+    uv = shutil.which("uv")
+    print("doctor: toolkit checkout")
+    check(bool(uv), "uv on PATH", uv or "not found — install https://docs.astral.sh/uv/")
+    for name in names:
+        pkg = os.path.join(KIT_DIR, f"{name}-mcp")
+        venv = os.path.join(pkg, ".venv")
+        check(os.path.isdir(pkg), f"{name}-mcp package dir", pkg)
+        check(os.path.isdir(venv), f"{name}-mcp venv",
+              venv if os.path.isdir(venv) else "missing — run the installer (or uv sync)")
+
+    print("doctor: shells for shell-mcp")
+    found = detect_interpreters()
+    check(bool(found), "interpreters detected",
+          ", ".join(f"{k}={v}" for k, v in found.items()) or "none found")
+
+    print(f"doctor: project config ({project})")
+    mcp_dir = os.path.join(project, ".continue", "mcpServers")
+    for name in names:
+        dest = os.path.join(mcp_dir, f"{name}.yaml")
+        if not os.path.isfile(dest):
+            check(False, f"{name}.yaml", "not installed")
+            continue
+        with open(dest, "r", encoding="utf-8") as f:
+            content = f.read()
+        stamped = "/absolute/path/to" not in content
+        check(stamped, f"{name}.yaml stamped",
+              dest if stamped else "unstamped placeholders — re-run the installer")
+
+    print("doctor: live MCP handshake (initialize + tools/list, like Continue does)")
+    if not uv:
+        check(False, "handshake", "skipped — no uv")
+        return failures
+    for name in names:
+        pkg = os.path.join(KIT_DIR, f"{name}-mcp")
+        ok, detail = _mcp_handshake(
+            [uv, "run", "--no-sync", "--project", pkg, f"{name}-mcp"])
+        check(ok, f"{name}-mcp responds", detail)
+    return failures
+
+
+def uninstall(project: str, names: list[str], all_selected: bool) -> None:
+    """Remove the stamped yamls (and rules, when every server is selected) from
+    the project. Only files this installer writes are touched; .bak too."""
+    removed = 0
+    targets = [os.path.join(project, ".continue", "mcpServers", f"{n}.yaml")
+               for n in names]
+    if all_selected:
+        targets += [os.path.join(project, ".continue", "rules", r) for r in RULES]
+    for t in targets:
+        for path in (t, t + ".bak"):
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+                print(f"  removed  {path}")
+    print(f"Uninstalled {removed} file(s) from {project}. The toolkit checkout "
+          "and its venvs are untouched.")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Install the MCP toolkit into a project.")
     ap.add_argument("project", help="path to the project (workspace root)")
@@ -318,6 +491,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--jobs", type=int, default=0, metavar="N",
                     help="parallel `uv sync` workers (default: min(servers, CPUs); "
                          "1 = sequential)")
+    ap.add_argument("--check", action="store_true",
+                    help="doctor mode: verify venvs, stamps, interpreters, and a "
+                         "live MCP handshake per server; installs nothing")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="remove the installed yamls/rules from the project")
     args = ap.parse_args(argv)
 
     project = os.path.abspath(args.project)
@@ -331,6 +509,18 @@ def main(argv: list[str] | None = None) -> int:
               "(the gateway is deliberately not installable here — see "
               "gateway-mcp/README.md)", file=sys.stderr)
         return 1
+
+    if args.check:
+        failures = doctor(project, names)
+        if failures:
+            print(f"\ndoctor: {failures} check(s) failed.", file=sys.stderr)
+        else:
+            print("\ndoctor: all checks passed.")
+        return 1 if failures else 0
+
+    if args.uninstall:
+        uninstall(project, names, set(names) == set(SERVERS))
+        return 0
 
     # Stamp uv's absolute path into `command:` so Continue doesn't rely on the
     # PATH it inherits. Fall back to bare "uv" (PATH lookup) only if uv isn't
