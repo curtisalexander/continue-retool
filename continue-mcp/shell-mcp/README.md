@@ -25,12 +25,15 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
 - **Server-enforced timeout.** A command that outlives its `timeout` is killed
   and reported as `state: "timeout"` with partial output — never a hung tool
   call.
-- **Capped buffers, stable cursors.** Each stream keeps head + most-recent tail
-  under `SHELL_MCP_MAX_BUFFER` (default 256 KiB). Output cursors are *logical
-  byte offsets into the stream*, so they stay valid across truncation — a
-  chatty job streams incrementally without duplicated or silently dropped
-  chunks (any dropped middle arrives as one `...[N bytes truncated]...`
-  marker).
+- **Capped buffers, stable cursors, recoverable overflow.** Each stream keeps
+  head + most-recent tail under `SHELL_MCP_MAX_BUFFER` (default 256 KiB). Output
+  cursors are *logical byte offsets into the stream*, so they stay valid across
+  truncation — a chatty job streams incrementally without duplicated or silently
+  dropped chunks. When a stream overflows, the **full** output is spilled to
+  `.continue-mcp/logs/` inside the workspace (so the jailed `fs.read`/`search`
+  tools can open it), and the `...[N bytes truncated — full output: …]...` marker
+  names the file. A job that fits in the buffer never touches disk.
+  `SHELL_MCP_SPILL=0` disables spilling; `SHELL_MCP_SPILL_DIR` relocates it.
 - **Right encoding per platform.** UTF-8 when the bytes are UTF-8; otherwise
   the Windows OEM code page that cmd/PowerShell 5.1 actually emit. Force one
   with `SHELL_MCP_ENCODING`.

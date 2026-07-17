@@ -17,7 +17,13 @@ so exact `str.replace` misses it — especially anywhere non-ASCII is involved.
 Files that aren't UTF-8 are handled too: a cp1252/latin-1 file is detected,
 edited, and **written back in its own encoding** — never transcoded, never a
 raw `UnicodeDecodeError`. Every failure (no match, ambiguous match, missing
-file) comes back as structured `{ok: false, error}` the model can react to.
+file, or an `old_string` **identical** to `new_string` — a no-op that would
+otherwise report a phantom success) comes back as structured `{ok: false, error}`
+the model can react to. The same Unicode-robust matching applies to the
+**filename**: an NFC path finds its NFD twin on disk, so a macOS-pasted name
+edits the file it names instead of a spurious "file not found". And because some
+models double-encode array arguments, `multi_edit` accepts `edits` as a JSON
+**string** as well as a list.
 
 All five tools are **workspace-jailed by default**: every path (including
 `move_file`'s destination) must live under `MCP_WORKSPACE` after realpath

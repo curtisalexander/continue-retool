@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 target/
 .venv/
+
+# shell-mcp spills full output here when a command overflows the buffer
+.continue-mcp/logs/

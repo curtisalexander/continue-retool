@@ -25,6 +25,47 @@ Dated, newest-first. Where a later entry contradicts earlier prose in this doc,
 **the decision log wins** — superseded sections are kept for the reasoning, not
 as the plan.
 
+**2026-07-17**
+
+- **Read/edit/shell hardening, cross-checked against Pi's tools.** A pass
+  comparing our servers to Pi's (`earendil-works/pi`, `packages/coding-agent`)
+  fixed five things and extended one of our own theses. Each fix was verified by
+  driving the server in-process, not by reading alone.
+  - **fs.read now caps total bytes, not just lines.** The 2000-line and
+    2000-char/line caps *multiply* — a 3000-line file of 1500-char lines
+    returned ~3MB in one result, the exact context-flood the tool's docstring
+    claims it prevents. Added a 50KB byte cap (`FS_MCP_MAX_BYTES`, Pi's number);
+    reads report `truncated_by` and `next_start_line`, and the continuation hint
+    is echoed into the output block so it survives in what the model reads back.
+  - **fs.read refuses binary files** instead of returning replacement-character
+    mojibake as `ok: true`. Heuristic is NUL-byte / high-byte-density / invalid
+    UTF-8 (file(1)-style), tuned so cp1252 *text* — the corporate files this kit
+    targets — is still read as text.
+  - **shell overflow is recoverable.** The RingBuffer still drops the middle to
+    stay bounded, but now spills the full stream to `.continue-mcp/logs/` and the
+    truncation marker names the file. Deliberately **inside the workspace**, not
+    Pi's system tmpdir: our fs/search tools are jailed, so a tmp path would be
+    one the model is told to read and then can't. `SHELL_MCP_SPILL=0` disables.
+  - **edit rejects a no-op** (`old_string == new_string`), which previously
+    reported a phantom "1 replacement" with an empty diff. **multi_edit accepts
+    `edits` as a JSON string**, not just a list — several models double-encode
+    array args (Pi hard-codes the same workaround, naming Opus 4.6 / GLM-5.1).
+  - **Unicode-robust *paths*, extending matcher.py from content to filenames.**
+    Our fuzzy matcher already fixes "the model's `old_string` looks identical but
+    differs in bytes"; the same failure on the *filename* just returned "not
+    found". fs and edit now retry NFC/NFD, curly-apostrophe, and narrow-NBSP
+    (macOS screenshot) spellings for paths that must already exist — but never
+    for a path being *created*, where the literal spelling is the answer. We take
+    the cross product of the three transforms rather than Pi's fixed four-rung
+    ladder, which can't match a name needing all three at once (the French
+    screenshot Pi's own comment cites). Kept as per-server copies, consistent
+    with the `_resolve`/`_result` duplication decision below.
+  - **Not adopted: a file-mutation queue.** Pi serializes same-file writes
+    because Node fs is async; our edit is a synchronous read-modify-write with no
+    `await` between read and write, so asyncio can't interleave it. Verified
+    concurrent edits to one file are safe. It is one stray `await` from breaking
+    — a comment now marks that.
+
 **2026-07-15 (later)**
 
 - **Workspace jail built — default ON.** fs, search, and edit confine every
