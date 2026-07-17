@@ -22,7 +22,8 @@ Linux/macOS/Windows via CI. Direction decisions live in the
   you enable in Continue.
   - `hello-mcp/` — start here; proves MCP is enabled in your build
   - `shell-mcp/` — the flagship terminal runner (async, background jobs, tree-kill, timeouts)
-  - `search-mcp/` — ripgrep-backed search, replaces built-in Grep/Glob
+  - `search-mcp/` — ripgrep-backed search, replaces built-in Grep/Glob (needs an
+    `rg` binary you provide — see below)
   - `edit-mcp/` — Unicode-robust edit, replaces built-in Edit/Create file
   - `fs-mcp/` — line-ranged read + list dir, replaces built-in Read file/List dir
   - `sql-mcp/` — SQL format/lint via sqruff (Snowflake, lowercase, leading commas)
@@ -39,6 +40,20 @@ operations and per-server setup. To wire the whole kit into a project in one
 command: `uv run continue-mcp/install-workspace.py /path/to/your/project`
 (and `--check` afterwards runs a doctor that verifies the install end-to-end,
 live MCP handshake included).
+
+**One external prerequisite: `ripgrep`.** Everything installs from PyPI via `uv`
+except the `rg` binary that `search-mcp` shells out to — it's deliberately *not*
+a default dependency, so you provide it however you like:
+
+- a system ripgrep — `brew install ripgrep` (or `apt` / `choco` / your package manager)
+- `uv tool install ripgrep-bin` — a global prebuilt `rg` that survives project re-syncs
+- point `RIPGREP_BIN` at an `rg` you already have
+
+`ripgrep-bin` is a third-party repackage of ripgrep's official binaries (the only
+one covering Windows); prefer a system `rg` or `RIPGREP_BIN` if you'd rather not
+pull it. The installer's `--check` doctor reports whether `rg` resolves, so a
+missing binary surfaces at setup rather than on your first search. See
+[`search-mcp/README.md`](continue-mcp/search-mcp/README.md) for the full rundown.
 
 ## The site
 
