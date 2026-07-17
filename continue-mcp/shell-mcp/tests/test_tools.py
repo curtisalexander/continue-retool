@@ -413,7 +413,11 @@ def test_run_reports_spill_path_for_a_noisy_command(tmp_path, monkeypatch):
     monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))
 
     async def scenario():
-        code = "import sys\nfor i in range(60000): sys.stdout.write('line %d\\n' % i)"
+        # No embedded newline in the code string: cmd.exe (default_shell() on
+        # Windows) treats a raw \n as a command terminator, silently truncating
+        # everything after it — the child would then exit 0 having printed
+        # nothing, and this test would fail for the wrong reason.
+        code = "import sys; [sys.stdout.write('line %d\\n' % i) for i in range(60000)]"
         res = await server.run(cmd=f'{PY} -c "{code}"', shell=default_shell(), timeout=60)
         return res.structured_content
 
