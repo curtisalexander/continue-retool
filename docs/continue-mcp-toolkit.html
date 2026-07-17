@@ -183,6 +183,60 @@ This is your ouroboros.</td>
 <p>Dated, newest-first. Where a later entry contradicts earlier prose in
 this doc, <strong>the decision log wins</strong> — superseded sections
 are kept for the reasoning, not as the plan.</p>
+<p><strong>2026-07-17</strong></p>
+<ul>
+<li><strong>Read/edit/shell hardening, cross-checked against Pi's
+tools.</strong> A pass comparing our servers to Pi's
+(<code>earendil-works/pi</code>, <code>packages/coding-agent</code>)
+fixed five things and extended one of our own theses. Each fix was
+verified by driving the server in-process, not by reading alone.
+<ul>
+<li><strong>fs.read now caps total bytes, not just lines.</strong> The
+2000-line and 2000-char/line caps <em>multiply</em> — a 3000-line file
+of 1500-char lines returned ~3MB in one result, the exact context-flood
+the tool's docstring claims it prevents. Added a 50KB byte cap
+(<code>FS_MCP_MAX_BYTES</code>, Pi's number); reads report
+<code>truncated_by</code> and <code>next_start_line</code>, and the
+continuation hint is echoed into the output block so it survives in what
+the model reads back.</li>
+<li><strong>fs.read refuses binary files</strong> instead of returning
+replacement-character mojibake as <code>ok: true</code>. Heuristic is
+NUL-byte / high-byte-density / invalid UTF-8 (file(1)-style), tuned so
+cp1252 <em>text</em> — the corporate files this kit targets — is still
+read as text.</li>
+<li><strong>shell overflow is recoverable.</strong> The RingBuffer still
+drops the middle to stay bounded, but now spills the full stream to
+<code>.continue-mcp/logs/</code> and the truncation marker names the
+file. Deliberately <strong>inside the workspace</strong>, not Pi's
+system tmpdir: our fs/search tools are jailed, so a tmp path would be
+one the model is told to read and then can't.
+<code>SHELL_MCP_SPILL=0</code> disables.</li>
+<li><strong>edit rejects a no-op</strong>
+(<code>old_string == new_string</code>), which previously reported a
+phantom "1 replacement" with an empty diff. <strong>multi_edit accepts
+<code>edits</code> as a JSON string</strong>, not just a list — several
+models double-encode array args (Pi hard-codes the same workaround,
+naming Opus 4.6 / GLM-5.1).</li>
+<li><strong>Unicode-robust <em>paths</em>, extending matcher.py from
+content to filenames.</strong> Our fuzzy matcher already fixes "the
+model's <code>old_string</code> looks identical but differs in bytes";
+the same failure on the <em>filename</em> just returned "not found". fs
+and edit now retry NFC/NFD, curly-apostrophe, and narrow-NBSP (macOS
+screenshot) spellings for paths that must already exist — but never for
+a path being <em>created</em>, where the literal spelling is the answer.
+We take the cross product of the three transforms rather than Pi's fixed
+four-rung ladder, which can't match a name needing all three at once
+(the French screenshot Pi's own comment cites). Kept as per-server
+copies, consistent with the <code>_resolve</code>/<code>_result</code>
+duplication decision below.</li>
+<li><strong>Not adopted: a file-mutation queue.</strong> Pi serializes
+same-file writes because Node fs is async; our edit is a synchronous
+read-modify-write with no <code>await</code> between read and write, so
+asyncio can't interleave it. Verified concurrent edits to one file are
+safe. It is one stray <code>await</code> from breaking — a comment now
+marks that.</li>
+</ul></li>
+</ul>
 <p><strong>2026-07-15 (later)</strong></p>
 <ul>
 <li><strong>Workspace jail built — default ON.</strong> fs, search, and

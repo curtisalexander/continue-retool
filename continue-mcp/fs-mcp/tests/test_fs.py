@@ -201,3 +201,110 @@ def test_jail_extra_root_allows(tmp_path, tmp_path_factory, monkeypatch):
     f.write_text("fine\n", encoding="utf-8")
     res = _read(f)
     assert res["ok"] is True
+
+
+# --- byte cap: the line and per-line caps multiply, so bytes must bind --------
+def test_read_byte_cap_binds_on_wide_files(tmp_path):
+    """2000 lines x 1500 chars is ~3MB and passes both the line and per-line cap.
+    Only the total-byte cap keeps that out of the context window."""
+    f = tmp_path / "wide.txt"
+    f.write_text(("x" * 1500 + "\n") * 3000, encoding="utf-8")
+    res = _read(f)
+    assert len(res["content"].encode("utf-8")) <= server.MAX_BYTES + 2000
+    assert res["truncated"] is True
+    assert res["truncated_by"] == "bytes"
+    assert res["total_lines"] == 3000
+
+
+def test_read_reports_line_limit_when_lines_bind_first(tmp_path):
+    f = tmp_path / "narrow.txt"
+    f.write_text("x\n" * 5000, encoding="utf-8")
+    res = _read(f)
+    assert res["end_line"] == 2000
+    assert res["truncated_by"] == "lines"
+
+
+def test_read_next_start_line_pages_to_the_end(tmp_path):
+    f = tmp_path / "wide.txt"
+    f.write_text(("y" * 1000 + "\n") * 200, encoding="utf-8")
+    seen, start, hops = 0, 1, 0
+    while True:
+        res = _read(f, start_line=start)
+        seen += res["end_line"] - res["start_line"] + 1
+        hops += 1
+        if not res["truncated"]:
+            break
+        start = res["next_start_line"]
+        assert hops < 20, "paging failed to terminate"
+    assert seen == 200  # every line delivered exactly once, no gap or overlap
+
+
+def test_read_emits_first_line_even_if_it_busts_the_budget(tmp_path, monkeypatch):
+    """A read must always make progress; returning zero lines would wedge the
+    caller re-requesting the same start_line forever. Only reachable with a
+    small FS_MCP_MAX_BYTES, since MAX_LINE_CHARS clips any line long before
+    it can exhaust the default 50KB on its own."""
+    monkeypatch.setattr(server, "MAX_BYTES", 64)
+    f = tmp_path / "lines.txt"
+    f.write_text("z" * 400 + "\nsecond\n", encoding="utf-8")
+    res = _read(f)
+    assert res["start_line"] == 1 and res["end_line"] == 1
+    assert res["truncated"] is True and res["next_start_line"] == 2
+
+
+def test_read_truncation_hint_reaches_the_model(tmp_path):
+    f = tmp_path / "wide.txt"
+    f.write_text(("q" * 1200 + "\n") * 500, encoding="utf-8")
+    md = asyncio.run(server.read(str(f))).content[0].text
+    assert f"start_line={_read(f)['next_start_line']}" in md
+
+
+# --- binary files ------------------------------------------------------------
+def test_read_refuses_binary_instead_of_returning_mojibake(tmp_path):
+    f = tmp_path / "a.bin"
+    f.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256)) * 4)
+    res = _read(f)
+    assert res["ok"] is False and res["binary"] is True
+    assert "�" not in res["error"]
+
+
+def test_read_does_not_mistake_legacy_encoded_text_for_binary(tmp_path):
+    """cp1252 prose is invalid UTF-8 but is emphatically text — the corporate
+    files this kit exists to handle must not be refused as binary."""
+    f = tmp_path / "cp.txt"
+    f.write_bytes("Grüße, naïve café — résumé\n".encode("cp1252"))
+    assert _read(f)["ok"] is True
+
+
+def test_read_allows_empty_and_emoji_files(tmp_path):
+    empty = tmp_path / "e.txt"
+    empty.write_text("", encoding="utf-8")
+    assert _read(empty)["ok"] is True
+    emoji = tmp_path / "u.txt"
+    emoji.write_text("héllo 🎉 世界\n", encoding="utf-8")
+    assert _read(emoji)["ok"] is True
+
+
+# --- Unicode-robust path resolution -----------------------------------------
+def test_read_finds_nfd_file_from_nfc_request(tmp_path):
+    """macOS stores filenames decomposed; models emit composed."""
+    import unicodedata
+    f = tmp_path / unicodedata.normalize("NFD", "café-résumé.txt")
+    f.write_text("accented\n", encoding="utf-8")
+    res = _read(tmp_path / unicodedata.normalize("NFC", "café-résumé.txt"))
+    assert res["ok"] is True and res["content"] == "1\taccented"
+
+
+def test_read_finds_macos_screenshot_needing_all_three_transforms(tmp_path):
+    """Curly apostrophe AND narrow NBSP before PM AND NFD accents, at once —
+    the combination Pi's fixed variant ladder can't reach."""
+    import unicodedata
+    real = unicodedata.normalize("NFD", "Capture d’écran à 3.42.11 PM.txt")
+    (tmp_path / real).write_text("shot\n", encoding="utf-8")
+    asked = unicodedata.normalize("NFC", "Capture d'écran à 3.42.11 PM.txt")
+    assert _read(tmp_path / asked)["ok"] is True
+
+
+def test_missing_file_still_reports_the_path_that_was_asked_for(tmp_path):
+    res = _read(tmp_path / "nope.txt")
+    assert res["ok"] is False and "nope.txt" in res["error"]

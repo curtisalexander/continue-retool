@@ -37,6 +37,21 @@ MAX_BUFFER_BYTES = int(os.environ.get("SHELL_MCP_MAX_BUFFER", str(256 * 1024)))
 MAX_FINISHED_JOBS = int(os.environ.get("SHELL_MCP_MAX_FINISHED", "20"))
 IS_WINDOWS = sys.platform.startswith("win")
 
+# Where full output goes when the ring buffer has to drop the middle. Pi spills
+# to the system tmpdir, but that would be unreadable HERE: fs-mcp/search-mcp are
+# workspace-jailed, so a /tmp path is one the model is told to read and then
+# can't. Inside the workspace it stays greppable by the very tools this kit ships.
+# SHELL_MCP_SPILL=0 turns spilling off.
+SPILL_DIR = os.environ.get("SHELL_MCP_SPILL_DIR") or os.path.join(".continue-mcp", "logs")
+SPILL_ENABLED = os.environ.get("SHELL_MCP_SPILL", "1").strip().lower() not in (
+    "0", "false", "off", "no",
+)
+
+
+def _spill_root() -> str:
+    base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
+    return SPILL_DIR if os.path.isabs(SPILL_DIR) else os.path.join(base, SPILL_DIR)
+
 
 # --- output decoding: right encoding per platform --------------------------
 # stdout/stderr come back as raw bytes. UTF-8 is correct for bash and pwsh 7+
@@ -205,17 +220,46 @@ class RingBuffer:
     stream, so a reader's cursor stays valid across truncation — read_from()
     returns whatever of [offset:] still exists, with a marker standing in for
     any bytes that were dropped in between. (Character-offset cursors into the
-    decoded text would shift every time the buffer truncated.)"""
+    decoded text would shift every time the buffer truncated.)
 
-    def __init__(self, cap: int = MAX_BUFFER_BYTES) -> None:
+    Dropped bytes are not lost: once the cap is passed the whole stream is also
+    written to a spill file, and the truncation marker names it. Until then
+    chunks are held in `_pending` so the head can still be flushed to the file
+    retroactively — a job that stays under the cap never touches the disk."""
+
+    def __init__(self, cap: int = MAX_BUFFER_BYTES, spill_target: str | None = None) -> None:
         self.cap = cap
         self._head = bytearray()   # first bytes of the stream; frozen after 1st drop
         self._tail = bytearray()   # most recent bytes
         self._dropped = 0          # bytes dropped between head and tail
         self.total = 0             # logical bytes ever written
+        self.spill_target = spill_target   # path to use IF we overflow; None = never
+        self.spill_path: str | None = None  # set once the file actually exists
+        self._spill_file = None
+        self._pending: list[bytes] = []      # raw chunks not yet on disk
+
+    def _open_spill(self) -> None:
+        if self._spill_file is not None or not self.spill_target:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.spill_target), exist_ok=True)
+            self._spill_file = open(self.spill_target, "wb")
+        except OSError:
+            self.spill_target = None  # read-only workspace: degrade, don't crash
+            self._pending.clear()
+            return
+        self.spill_path = self.spill_target
+        for chunk in self._pending:
+            self._spill_file.write(chunk)
+        self._pending.clear()
 
     def write(self, chunk: bytes) -> None:
         self.total += len(chunk)
+        if self.spill_target:
+            if self._spill_file is not None:
+                self._spill_file.write(chunk)
+            else:
+                self._pending.append(chunk)
         keep = self.cap // 2
         if not self._dropped:
             self._head.extend(chunk)
@@ -223,12 +267,21 @@ class RingBuffer:
                 self._tail = self._head[-keep:]
                 self._dropped = len(self._head) - 2 * keep
                 del self._head[keep:]
-            return
+                self._open_spill()  # first drop: from here the file is the only
+            return                  # complete copy of the stream
         self._tail.extend(chunk)
         if len(self._tail) > keep:
             overflow = len(self._tail) - keep
             self._dropped += overflow
             del self._tail[:overflow]
+
+    def close(self) -> None:
+        """Called once the process exits. Under the cap nothing was dropped, so
+        the pending chunks are simply discarded and no file is ever created."""
+        self._pending.clear()
+        if self._spill_file is not None:
+            self._spill_file.close()
+            self._spill_file = None
 
     def read_from(self, offset: int) -> str:
         """Decoded text of the stream from logical byte `offset` to the end.
@@ -243,7 +296,8 @@ class RingBuffer:
         if offset < len(self._head):
             parts.append(_decode_slice(self._head[offset:]))
         gap = tail_start - max(offset, len(self._head))
-        parts.append(f"\n...[{gap} bytes truncated]...\n")
+        where = f" — full output: {self.spill_path}" if self.spill_path else ""
+        parts.append(f"\n...[{gap} bytes truncated{where}]...\n")
         parts.append(_decode_slice(self._tail))
         return "".join(parts)
 
@@ -397,7 +451,13 @@ async def _start(
         proc = await asyncio.create_subprocess_shell(cmd, **common)
     else:
         proc = await asyncio.create_subprocess_exec(*argv, **common)
-    job = Job(job_id=_next_id(), cmd=cmd, proc=proc, started=time.monotonic())
+    jid = _next_id()
+    root = _spill_root() if SPILL_ENABLED else None
+    job = Job(
+        job_id=jid, cmd=cmd, proc=proc, started=time.monotonic(),
+        stdout=RingBuffer(spill_target=os.path.join(root, f"{jid}-stdout.log") if root else None),
+        stderr=RingBuffer(spill_target=os.path.join(root, f"{jid}-stderr.log") if root else None),
+    )
     job._readers = [
         asyncio.create_task(_drain(proc.stdout, job.stdout)),
         asyncio.create_task(_drain(proc.stderr, job.stderr)),
@@ -443,6 +503,8 @@ async def _reap(job: Job) -> None:
     await asyncio.gather(*job._readers, return_exceptions=True)
     if job._timeout_task:
         job._timeout_task.cancel()
+    job.stdout.close()
+    job.stderr.close()
     job.exit_code = rc
     if job.state == "running":
         job.state = "exited"
@@ -465,6 +527,10 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
         "stderr": job.stderr.read_from(since_err),
         "stdout_cursor": job.stdout.total,
         "stderr_cursor": job.stderr.total,
+        # Only present once the buffer actually overflowed and spilled; a job
+        # that fit in the buffer has nothing more to offer than what's above.
+        "stdout_full_output": job.stdout.spill_path,
+        "stderr_full_output": job.stderr.spill_path,
     }
 
 

@@ -18,8 +18,12 @@ Run:  uv run edit-mcp
 from __future__ import annotations
 
 import difflib
+import json
 import os
+import re
 import shutil
+import unicodedata
+from typing import Union
 
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
@@ -49,6 +53,61 @@ def _resolve(path: str) -> str:
         return path
     base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
     return os.path.join(base, path)
+
+
+# --- Unicode-robust path resolution ----------------------------------------
+# matcher.py fixes "the model's old_string looks identical but differs in bytes"
+# for file CONTENT. The same thing happens to the FILENAME, where it surfaces as
+# a bogus "file not found". The three that actually bite, all from pasting a name
+# out of a macOS UI:
+#   NFC vs NFD  — HFS+/APFS store decomposed ("é" = e + U+0301); models emit NFC
+#   ' vs U+2019 — screenshot names use the curly apostrophe ("Capture d'écran")
+#   NBSP + AM/PM — macOS screenshots put U+202F, not a space, before AM/PM
+# Ported from pi's packages/coding-agent/src/core/tools/path-utils.ts. Kept in
+# sync with fs-mcp's copy by hand — each server stays standalone by design.
+_NARROW_NBSP = " "
+_AMPM = re.compile(r" (AM|PM)\.", re.IGNORECASE)
+
+
+def _path_variants(path: str) -> list[str]:
+    """Byte-different spellings of `path` to try when the literal one misses.
+    Deduped, literal path excluded.
+
+    The three transforms are independent, so this takes their cross product
+    rather than a fixed ladder. Pi hand-picks four rungs (nfd, curly, nfd+curly,
+    am/pm) and so can't match a name that needs three at once — which is exactly
+    the French macOS screenshot its own comment cites: curly apostrophe AND
+    narrow NBSP AND NFD. The extra combinations cost only stat calls, and only
+    on the miss path, where we were about to fail anyway."""
+    quoted = [path, path.replace("'", "’")]
+    spaced = []
+    for p in quoted:
+        spaced.append(p)
+        alt = _AMPM.sub(_NARROW_NBSP + r"\1.", p)
+        if alt != p:
+            spaced.append(alt)
+    seen = {path}
+    out = []
+    for p in spaced:
+        for form in (p, unicodedata.normalize("NFD", p), unicodedata.normalize("NFC", p)):
+            if form not in seen:
+                seen.add(form)
+                out.append(form)
+    return out
+
+
+def _resolve_existing(path: str) -> str:
+    """_resolve, then fall back to Unicode variants if nothing is there. Only for
+    paths that must ALREADY exist (edit/delete/move source) — never for a path
+    being created, where the literal spelling the caller asked for is the answer."""
+    resolved = _resolve(path)
+    if os.path.exists(resolved):
+        return resolved
+    for variant in _path_variants(resolved):
+        if os.path.exists(variant):
+            return variant
+    return resolved
+
 
 # --- workspace jail (default ON) --------------------------------------------
 # The recommended tool policy runs this server on Automatic — no human approval
@@ -89,7 +148,16 @@ def jail_error(path: str) -> str | None:
 
 # --- file IO that preserves bytes we don't touch ---------------------------
 def _read(path: str) -> tuple[str, str]:
-    """Returns (content, encoding). UTF-8 first; a corporate cp1252/latin-1 file
+    """Returns (content, encoding).
+
+    Concurrency note: the tools below do a synchronous read-modify-write —
+    `before, enc = _read(path)` ... `_write(path, after, enc)` with NO `await`
+    between the read and the write. That's what makes same-file edits safe under
+    asyncio without a mutation queue (Pi needs one because Node fs is async).
+    Keep it that way: an `await` inserted between _read and _write here reopens
+    the lost-update race and would require serializing writes per path.
+
+    UTF-8 first; a corporate cp1252/latin-1 file
     — the very environment this tool targets — must not blow up with a raw
     UnicodeDecodeError, and must be written back in ITS encoding, not silently
     transcoded to UTF-8. latin-1 is the final fallback (any byte decodes, and
@@ -134,7 +202,7 @@ async def edit(
     falls back to a Unicode-normalized match (smart quotes, dashes, NBSP, accents,
     trailing whitespace, CRLF) so non-ASCII regions still match. old_string must be
     unique unless replace_all is set. dry_run previews the diff without writing."""
-    path = _resolve(path)
+    path = _resolve_existing(path)
     if err := jail_error(path):
         return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
     if not os.path.isfile(path):
@@ -161,12 +229,39 @@ async def edit(
     return _result(f"{verb} {path} — {count} replacement(s), {strategy} match", data, diff)
 
 
+def _coerce_edits(edits: Union[list[dict], str]) -> list[dict]:
+    """Accept `edits` as a JSON string as well as a list. Several models emit the
+    array double-encoded (Pi hard-codes the same workaround, naming Opus 4.6 and
+    GLM-5.1); without this the call dies in schema validation before the tool ever
+    runs, and the model gets a pydantic dump instead of anything actionable."""
+    if isinstance(edits, str):
+        try:
+            parsed = json.loads(edits)
+        except json.JSONDecodeError as e:
+            raise EditError(
+                f"edits was a string but not valid JSON ({e}). Pass a list of "
+                f"{{old_string, new_string, replace_all?}} objects."
+            ) from e
+        if not isinstance(parsed, list):
+            raise EditError(f"edits must be a list, got {type(parsed).__name__}.")
+        edits = parsed
+    for i, e in enumerate(edits):
+        if not isinstance(e, dict):
+            raise EditError(f"edits[{i}] must be an object, got {type(e).__name__}.")
+        for key in ("old_string", "new_string"):
+            if key not in e:
+                raise EditError(f"edits[{i}] is missing {key}.")
+    return edits
+
+
 @mcp.tool
-async def multi_edit(path: str, edits: list[dict], dry_run: bool = False) -> ToolResult:
+async def multi_edit(
+    path: str, edits: Union[list[dict], str], dry_run: bool = False
+) -> ToolResult:
     """Apply several edits to one file in a single write. `edits` is a list of
     {old_string, new_string, replace_all?}, applied in order (each sees the prior
     result). All must succeed or the file is left unchanged. dry_run previews only."""
-    path = _resolve(path)
+    path = _resolve_existing(path)
     if err := jail_error(path):
         return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
     if not os.path.isfile(path):
@@ -174,7 +269,7 @@ async def multi_edit(path: str, edits: list[dict], dry_run: bool = False) -> Too
                        {"ok": False, "path": path, "error": f"file not found: {path}"})
     before, encoding = _read(path)
     try:
-        after, results = apply_edits(before, edits)
+        after, results = apply_edits(before, _coerce_edits(edits))
     except EditError as e:
         return _result(f"❌ multi_edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
     if not dry_run:
@@ -210,7 +305,7 @@ async def create_file(path: str, content: str, overwrite: bool = False) -> ToolR
 async def delete_file(path: str) -> ToolResult:
     """Delete one file (not a directory). Gives file deletion its own policy
     lane instead of routing rm through the shell tool."""
-    path = _resolve(path)
+    path = _resolve_existing(path)
     if err := jail_error(path):
         return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
     if not os.path.isfile(path):
@@ -224,8 +319,8 @@ async def delete_file(path: str) -> ToolResult:
 async def move_file(path: str, new_path: str, overwrite: bool = False) -> ToolResult:
     """Move or rename a file. Fails if the destination exists unless overwrite
     is set. Creates destination parent directories as needed."""
-    src = _resolve(path)
-    dest = _resolve(new_path)
+    src = _resolve_existing(path)
+    dest = _resolve(new_path)  # literal: the destination is being created
     for p in (src, dest):
         if err := jail_error(p):
             return _result(f"❌ {err}", {"ok": False, "path": p, "error": err})

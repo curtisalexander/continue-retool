@@ -164,6 +164,14 @@ def find_and_replace(
     replace_all is False."""
     if old == "":
         raise EditError("old_string must not be empty.")
+    if old == new:
+        # Otherwise this reports "1 replacement, exact match" with an empty diff
+        # and the model believes the edit landed. A no-op is always a mistake in
+        # the caller's reasoning, so it has to fail loudly. (Pi raises the same.)
+        raise EditError(
+            "old_string and new_string are identical — this edit would change "
+            "nothing. Check whether the change is already applied."
+        )
 
     bom, body = strip_bom(content)
     eol = detect_line_ending(body)

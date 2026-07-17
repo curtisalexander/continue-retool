@@ -207,3 +207,74 @@ def test_jail_opt_out_allows_outside(tmp_path, tmp_path_factory, monkeypatch):
     f.write_text("aaa\n", encoding="utf-8")
     res = _call("edit", {"path": str(f), "old_string": "aaa", "new_string": "bbb"})
     assert res.data["ok"] is True
+
+
+# --- no-op edits must fail loudly -------------------------------------------
+def test_identical_old_and_new_is_rejected(tmp_path):
+    """Otherwise this reports '1 replacement, exact match' with an empty diff and
+    the model believes a change landed that never happened."""
+    f = tmp_path / "a.txt"
+    f.write_text("hello world\n", encoding="utf-8")
+    res = _call("edit", {"path": str(f), "old_string": "hello", "new_string": "hello"})
+    assert res.data["ok"] is False
+    assert "identical" in res.data["error"]
+    assert f.read_text(encoding="utf-8") == "hello world\n"
+
+
+# --- models that double-encode the edits array ------------------------------
+def test_multi_edit_accepts_edits_as_a_json_string(tmp_path):
+    """Several models emit `edits` as a JSON string rather than an array; without
+    coercion the call dies in schema validation before the tool ever runs."""
+    f = tmp_path / "a.txt"
+    f.write_text("alpha beta\n", encoding="utf-8")
+    res = _call("multi_edit", {
+        "path": str(f),
+        "edits": '[{"old_string": "alpha", "new_string": "ALPHA"},'
+                 ' {"old_string": "beta", "new_string": "BETA"}]',
+    })
+    assert res.data["ok"] is True
+    assert f.read_text(encoding="utf-8") == "ALPHA BETA\n"
+
+
+def test_multi_edit_rejects_unparseable_edits_string_with_a_useful_message(tmp_path):
+    f = tmp_path / "a.txt"
+    f.write_text("alpha\n", encoding="utf-8")
+    res = _call("multi_edit", {"path": str(f), "edits": "not json at all"})
+    assert res.data["ok"] is False
+    assert "valid JSON" in res.data["error"]
+
+
+def test_multi_edit_still_accepts_a_real_list(tmp_path):
+    f = tmp_path / "a.txt"
+    f.write_text("alpha\n", encoding="utf-8")
+    res = _call("multi_edit", {
+        "path": str(f), "edits": [{"old_string": "alpha", "new_string": "OMEGA"}],
+    })
+    assert res.data["ok"] is True
+    assert f.read_text(encoding="utf-8") == "OMEGA\n"
+
+
+# --- Unicode-robust path resolution -----------------------------------------
+def test_edit_finds_nfd_file_from_nfc_request(tmp_path):
+    """The same byte-identical-but-different problem matcher.py solves for
+    content, applied to the filename."""
+    import unicodedata
+    f = tmp_path / unicodedata.normalize("NFD", "café.txt")
+    f.write_text("old\n", encoding="utf-8")
+    res = _call("edit", {
+        "path": str(tmp_path / unicodedata.normalize("NFC", "café.txt")),
+        "old_string": "old", "new_string": "new",
+    })
+    assert res.data["ok"] is True
+    assert f.read_text(encoding="utf-8") == "new\n"
+
+
+def test_create_file_uses_the_literal_path_not_a_unicode_variant(tmp_path):
+    """Variant resolution is for paths that must already exist. A file being
+    created must land at exactly the name asked for."""
+    import unicodedata
+    (tmp_path / unicodedata.normalize("NFD", "café.txt")).write_text("x\n", encoding="utf-8")
+    asked = tmp_path / unicodedata.normalize("NFC", "café-new.txt")
+    res = _call("create_file", {"path": str(asked), "content": "fresh\n"})
+    assert res.data["ok"] is True
+    assert unicodedata.normalize("NFC", res.data["path"]) == unicodedata.normalize("NFC", str(asked))

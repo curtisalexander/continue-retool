@@ -13,6 +13,7 @@ asyncio.run(...) so the server's background reader/watchdog tasks (created on th
 running loop inside start()) stay alive for the duration of the test.
 """
 import asyncio
+import os
 import shutil
 import sys
 
@@ -347,3 +348,80 @@ def test_decode_output_utf8_and_fallback():
     # cp1252 smart-quote bytes are invalid utf-8 -> must not raise, must not be empty
     out = decode_output(b"\x93hi\x94")
     assert out and "hi" in out
+
+
+# --- spill file: the dropped middle must stay recoverable --------------------
+def test_ringbuffer_spills_full_stream_when_it_overflows(tmp_path):
+    """The ring buffer drops the middle to stay bounded. Without a spill file
+    those bytes are gone for good, so a truncated result is unrecoverable."""
+    target = str(tmp_path / "logs" / "j1-stdout.log")
+    buf = RingBuffer(cap=1024, spill_target=target)
+    for i in range(500):
+        buf.write(f"line {i}\n".encode())
+    buf.close()
+    assert buf.spill_path == target
+    with open(target, "rb") as f:
+        spilled = f.read()
+    assert spilled.count(b"\n") == 500          # every line, head to tail
+    assert b"line 250\n" in spilled             # including the dropped middle
+    assert "line 250" not in buf.text()         # which is absent from the buffer
+
+
+def test_ringbuffer_under_cap_never_touches_the_disk(tmp_path):
+    target = str(tmp_path / "logs" / "j1-stdout.log")
+    buf = RingBuffer(cap=4096, spill_target=target)
+    buf.write(b"small output\n")
+    buf.close()
+    assert buf.spill_path is None
+    assert not os.path.exists(target)
+
+
+def test_ringbuffer_truncation_marker_names_the_spill_file(tmp_path):
+    target = str(tmp_path / "logs" / "j1-stdout.log")
+    buf = RingBuffer(cap=1024, spill_target=target)
+    for i in range(500):
+        buf.write(f"line {i}\n".encode())
+    buf.close()
+    assert target in buf.text()
+
+
+def test_ringbuffer_degrades_quietly_when_the_spill_path_is_unwritable(tmp_path):
+    """A read-only workspace must cost us the spill file, not the command."""
+    blocker = tmp_path / "logs"
+    blocker.write_text("I am a file, not a directory\n", encoding="utf-8")
+    buf = RingBuffer(cap=1024, spill_target=str(blocker / "j1-stdout.log"))
+    for i in range(500):
+        buf.write(f"line {i}\n".encode())
+    buf.close()
+    assert buf.spill_path is None
+    assert "line 499" in buf.text()  # buffer still works
+
+
+def test_spill_file_lands_inside_the_workspace_so_jailed_tools_can_read_it(tmp_path, monkeypatch):
+    """Pi spills to the system tmpdir; here fs/search are workspace-jailed, so a
+    tmpdir path would be one the model is told to read and then cannot."""
+    monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))
+    root = server._spill_root()
+    assert root.startswith(str(tmp_path))
+
+
+@pytest.mark.skipif(default_shell() is None, reason="no usable shell on this host")
+def test_run_reports_spill_path_for_a_noisy_command(tmp_path, monkeypatch):
+    """End-to-end against the real 256KB default: 60k numbered lines is ~600KB,
+    comfortably past the cap. (RingBuffer binds cap as a default argument at
+    import, so patching server.MAX_BUFFER_BYTES here would do nothing.)"""
+    monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))
+
+    async def scenario():
+        code = "import sys\nfor i in range(60000): sys.stdout.write('line %d\\n' % i)"
+        res = await server.run(cmd=f'{PY} -c "{code}"', shell=default_shell(), timeout=60)
+        return res.structured_content
+
+    snap = asyncio.run(scenario())
+    assert snap["state"] == "exited" and snap["exit_code"] == 0
+    spill = snap["stdout_full_output"]
+    assert spill and os.path.exists(spill)
+    assert spill.startswith(str(tmp_path))     # inside the jail, so fs.read can open it
+    with open(spill) as f:
+        assert sum(1 for _ in f) == 60000      # including everything the buffer dropped
+    assert "line 30000" not in snap["stdout"]  # the middle really was dropped
