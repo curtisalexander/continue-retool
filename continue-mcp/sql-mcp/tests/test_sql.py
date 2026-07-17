@@ -89,3 +89,13 @@ def test_format_sqruff_failure_is_an_error(monkeypatch):
     monkeypatch.setenv("SQL_MCP_CONFIG", "/nonexistent/.sqruff")
     res = _format("select 1")
     assert res["ok"] is False
+
+
+def test_format_empty_input_is_a_noop_not_a_false_error(tmp_path):
+    """Empty / whitespace-only SQL used to trip the no-output path and report a
+    misleading 'unparsable SQL' error. sqruff treats it as a valid no-op; so do we."""
+    for blank in ("", "   ", "\n\t \n"):
+        res = _format(blank)
+        assert res["ok"] is True, f"{blank!r} should be ok"
+        assert res["changed"] is False
+        assert res["sql"] == blank

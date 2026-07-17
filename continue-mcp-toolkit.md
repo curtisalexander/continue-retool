@@ -25,6 +25,31 @@ Dated, newest-first. Where a later entry contradicts earlier prose in this doc,
 **the decision log wins** — superseded sections are kept for the reasoning, not
 as the plan.
 
+**2026-07-17 (later, sql/hello review)**
+
+- **sql-mcp's hard `sqruff` dependency is correct — and NOT inconsistent with
+  ripgrep being bring-your-own.** The reviewing lens flagged the apparent
+  contradiction (sql bundles its binary as a default dep; search refuses to). The
+  distinction is real and load-bearing, so it's recorded here to stop a future
+  "consistency fix" from breaking one of them: the principle was never "no binary
+  deps" — it's *don't force a THIRD-PARTY repackage, and don't ship a dep that
+  breaks on a target platform*. `sqruff` is published to PyPI by its own authors
+  (quarylabs, first-party) with wheels covering win32/win_amd64, both macOS arches,
+  and a wide Linux spread — so it passes both tests and stays a plain dependency.
+  ripgrep failed both: its author publishes no PyPI wheel at all, and the only
+  usable repackage (`ripgrep-bin`) is third-party. Keep sqruff a dep; keep rg BYO.
+- **sql.format: empty input was a false error, now a no-op.** Whitespace-only SQL
+  produced no sqruff stdout and tripped the "no output → unparsable SQL" branch.
+  sqruff itself exits 0 on empty input, so format now short-circuits to
+  `{ok: true, changed: false}`. NOT changed: format still reports success on
+  partially-unparsable SQL — verified that sqruff is a lenient formatter that emits
+  no parse-error code (JSON lint shows only style codes for `SELECT SELECT FROM
+  FROM garbage(((`), so there is no clean signal to key on and a heuristic would
+  misfire. Left as a documented sqruff limitation rather than a fragile guess.
+- **hello-mcp reviewed, no changes.** ping/echo/whoami are intentionally minimal,
+  touch no filesystem, and round-trip Unicode correctly — none of the flood /
+  encoding / jail concerns that drove the other servers' fixes apply.
+
 **2026-07-17 (later, ripgrep dependency)**
 
 - **ripgrep stays a bring-your-own binary, never a default dependency.** The

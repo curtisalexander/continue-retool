@@ -100,6 +100,12 @@ def _base_args(cmd: str, dialect: Optional[str]) -> list[str]:
 async def format(sql: str, dialect: Optional[str] = None) -> ToolResult:
     """Format SQL to house style (lowercase keywords/identifiers, leading commas;
     Snowflake dialect by default). Returns the rewritten SQL and whether it changed."""
+    if not sql.strip():
+        # Empty / whitespace-only input is a no-op, not a failure: sqruff exits 0
+        # with no stdout for it, which would otherwise trip the no-output branch
+        # below and misreport a false "unparsable SQL" error.
+        data = {"ok": True, "sql": sql, "changed": False}
+        return _result("formatted (no change) — empty input", data, block=sql, lang="sql")
     rc, out, err = await _run_sqruff(_base_args("fix", dialect), sql)
     # fix -: fixed SQL on stdout, lint report on stderr. Unparsable input yields
     # no usable rewrite — report the error instead of returning garbage.
