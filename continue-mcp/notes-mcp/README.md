@@ -16,8 +16,8 @@ rule = memory nobody reads.
 | Tool | What it does |
 |---|---|
 | `notes.list()` | Cheap index: `{name, hook, age_days}` per note |
-| `notes.read(name)` | Full content of one note |
-| `notes.search(query)` | Case-insensitive substring search across all notes — for when the hooks aren't enough |
+| `notes.read(name)` | Content of one note (capped at 50KB; an oversized note is truncated with a pointer to `fs.read` for the rest) |
+| `notes.search(query)` | Case-insensitive substring search across all notes — for when the hooks aren't enough (capped at 200 matches, long lines clipped) |
 | `notes.write(name, content, append?)` | Create/update; first line becomes the hook |
 | `notes.delete(name)` | Remove a wrong or stale note |
 
@@ -31,6 +31,12 @@ tokens no matter how much is stored; contents load only on demand.
   graduates to shared truth, move its text into a rule or ARCHITECTURE.md.
 - **Name safety.** Note names are `[A-Za-z0-9._-]` only — no path separators,
   no traversal out of the notes directory.
+- **Bounded output.** A note grows unbounded via repeated `append`, and a broad
+  `search` spans every note, so both are capped the way `search-mcp` and `fs.read`
+  are: `read` at `NOTES_MCP_MAX_READ_BYTES` (50KB, truncated on a line boundary
+  with a pointer to `fs.read` for the tail), `search` at `NOTES_MCP_MAX_MATCHES`
+  (200) with lines clipped to `NOTES_MCP_MAX_LINE_CHARS` (500). Each sets a
+  `truncated` / `line_clipped` flag so the model knows it didn't see everything.
 - **The promotion pipeline.** Durable preferences start as notes; when one
   keeps proving true, the agent proposes a rule (see `../rules/rule-rule.md`)
   and you promote it deliberately.

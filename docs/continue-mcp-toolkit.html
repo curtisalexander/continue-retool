@@ -183,6 +183,80 @@ This is your ouroboros.</td>
 <p>Dated, newest-first. Where a later entry contradicts earlier prose in
 this doc, <strong>the decision log wins</strong> — superseded sections
 are kept for the reasoning, not as the plan.</p>
+<p><strong>2026-07-17 (later, ripgrep dependency)</strong></p>
+<ul>
+<li><strong>ripgrep stays a bring-your-own binary, never a default
+dependency.</strong> The question was how a machine without
+<code>rg</code> gets one. Decision: search-mcp keeps zero runtime deps
+beyond fastmcp, and the <code>rg</code> binary is resolved at runtime —
+<code>RIPGREP_BIN</code>, then <code>rg</code> on PATH. Four ways to
+provide it, ordered by how much trust they ask: a system rg
+(<code>brew/apt/choco install ripgrep</code>); <code>RIPGREP_BIN</code>
+pointed at any existing rg; <code>uv tool install ripgrep-bin</code>
+(global, survives project re-syncs); or the opt-in <code>rg</code> extra
+(<code>uv sync --extra rg</code>, into this server's venv only).
+Rejected: <strong>vendoring a binary</strong> into the repo (bloat, we'd
+own updates, commits binaries to a pure-Python project) and a
+<strong>default dependency</strong> (forces a third-party wheel on
+everyone).
+<ul>
+<li><strong>Package choice: <code>ripgrep-bin</code>, not
+<code>ripgrep</code>.</strong> The obvious-named PyPI
+<code>ripgrep</code> ships only macos-arm64 + linux-x86_64 wheels — no
+Windows, so it fails the day-one-Windows goal (and the old README's
+<code>uv tool install ripgrep</code> was already broken there).
+<code>ripgrep-bin</code> covers win_amd64/arm64, both macOS arches, and
+linux x86_64/aarch64/riscv64. It's a third-party repackage
+(<code>Bing-su/pip-binary-factory</code>) of ripgrep's <em>official</em>
+release binaries — not Rust built from source (consistent with "no Rust
+ever"), but a supply-chain trust the user must opt into knowingly.
+Pinned <code>==15.2.0</code> for auditability.</li>
+<li><strong>Informed + discoverable, per the requirements.</strong> The
+third-party caveat is stated everywhere the install is offered
+(pyproject comment, README, the rg-missing runtime error, the doctor).
+Discovery is covered twice: the runtime error lists every fix, and
+<code>install-workspace.py --check</code> gained a
+<code>search-mcp: ripgrep resolves</code> check that reports how rg was
+found (override / bundled venv / system) or prints the exact commands —
+catching a missing rg at install time instead of on first search.</li>
+</ul></li>
+</ul>
+<p><strong>2026-07-17 (later)</strong></p>
+<ul>
+<li><strong>Search/notes hardening — the same output-flood lens,
+extended.</strong> Applied the Pi cross-check to the two remaining
+read-heavy servers.
+<ul>
+<li><strong>search.grep no longer crashes on a long matching
+line.</strong> <code>rg --json</code> emits the <em>whole</em> matched
+line and <code>--max-columns</code> is ignored in JSON mode (verified: a
+200KB line still returns at 200KB), so a match in minified JS or a
+one-line lockfile overran asyncio's 64KB <code>StreamReader</code>
+buffer and raised an unhandled <code>ValueError</code> — the tool
+crashed outright, not a structured error. Fix: raise the buffer to
+<code>SEARCH_MCP_MAX_RECORD</code> (8MB), clip each line to 500 chars
+(<code>SEARCH_MCP_MAX_LINE_CHARS</code>, Pi's number;
+<code>line_clipped</code> flags it), and catch an over-8MB record as a
+partial <code>truncated</code> result instead of a traceback. This was a
+genuine crash, not just a flood — the worst find so far.</li>
+<li><strong>notes.read / notes.search were unbounded.</strong> A note
+grows without limit via repeated <code>append</code>, and
+<code>search</code> spanned every line of every note (100k-match results
+observed). Capped to match this kit's own promise: <code>read</code> at
+50KB (truncated on a line boundary, pointing at <code>fs.read</code> on
+the note's real path for the tail), <code>search</code> at 200 matches
+with 500-char line clipping, both flagged. notes' name validation was
+already airtight (traversal / separators / NUL all rejected) — left
+as-is.</li>
+<li><strong>Confirmed: keep ripgrep, don't fall back to
+grep/find.</strong> Pi uses <code>rg</code> for content and
+<code>fd</code> for files; we use <code>rg</code> for both.
+<code>grep</code>/<code>find</code> would lose gitignore-awareness, run
+slower, and break on macOS's BSD flag variants. The lesson from Pi was
+never the binary — it was <em>bounding the output</em>, which is what
+both fixes above do.</li>
+</ul></li>
+</ul>
 <p><strong>2026-07-17</strong></p>
 <ul>
 <li><strong>Read/edit/shell hardening, cross-checked against Pi's
@@ -1003,10 +1077,11 @@ then expand:</p>
 <li><strong><code>shell</code> (this doc)</strong> — the flagship;
 unlocks the background-job + injection pattern.</li>
 <li><strong><code>search</code></strong> — a ripgrep-backed grep/glob
-tool. <code>ripgrep</code> ships on <strong>PyPI</strong>, so
-<code>uv tool install ripgrep</code> puts the real <code>rg</code>
-binary on PATH with no raw-binary install needed; the MCP just shells
-out to it. (If you'd rather search in-process, embed BurntSushi's
+tool. It shells out to an <code>rg</code> binary you provide: a system
+rg, or <code>uv tool install ripgrep-bin</code> (a third-party prebuilt
+wheel — the only one covering Windows), or <code>RIPGREP_BIN</code>. rg
+is not a default dependency; see search-mcp/README for the tradeoff. (If
+you'd rather search in-process, embed BurntSushi's
 <code>grep</code>/<code>ignore</code> crates as a PyO3 lib via maturin —
 the same wheel pattern, no subprocess. Either way it's far cheaper in
 tokens than built-in codebase context.)</li>
@@ -1146,8 +1221,9 @@ whole tree dies. The golden suite covers this; CI's
 proven.</li>
 <li><strong><code>search</code> — ready in
 <code>continue-mcp/search-mcp/</code>.</strong> Replaces Continue's
-built-in Grep/Glob search by shelling out to <code>rg</code>
-(<code>uv tool install ripgrep</code> — it's on PyPI). Native speed,
+built-in Grep/Glob search by shelling out to <code>rg</code> (bring your
+own, or the optional <code>ripgrep-bin</code> extra — see
+search-mcp/README; the doctor verifies it's found). Native speed,
 gitignore-aware, compact structured output, hard result cap. Exclude the
 built-in Grep/Glob tools; set <code>search.*</code> to Automatic. (Want
 in-process, no binary? Embed the <code>grep</code>/<code>ignore</code>

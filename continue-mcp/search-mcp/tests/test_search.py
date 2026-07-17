@@ -2,7 +2,8 @@
 Tests for search-mcp. Run:  uv run pytest  (from search-mcp/)
 
 Unit tests (arg builders) run anywhere. Integration tests actually invoke `rg`
-and are skipped if ripgrep isn't installed (uv tool install ripgrep).
+and are skipped if ripgrep isn't installed (see README: a system rg, or
+`uv tool install ripgrep-bin`).
 """
 import asyncio
 import shutil
@@ -127,3 +128,40 @@ def test_jail_opt_out(tmp_path, tmp_path_factory, monkeypatch):
     (outside / "a.txt").write_text("needle\n", encoding="utf-8")
     res = asyncio.run(server.grep("needle", path=str(outside))).structured_content
     assert res["count"] == 1
+
+
+# --- long lines must not crash or flood (regression) ------------------------
+@needs_rg
+def test_grep_survives_a_giant_matching_line(tmp_path):
+    """rg --json emits the WHOLE matching line, and asyncio's StreamReader used to
+    raise ValueError past its 64KB buffer — so a match in minified JS / a one-line
+    lockfile crashed grep outright. It must now return a clipped result instead."""
+    (tmp_path / "app.min.js").write_text("var x=1;needle=" + "A" * 500_000 + ";\n")
+    res = asyncio.run(server.grep("needle", path=str(tmp_path)))
+    d = res.structured_content
+    assert d["count"] == 1                 # no crash, no traceback
+    assert d["error"] is None
+    assert d["line_clipped"] is True
+    assert len(d["matches"][0]["text"]) < 600  # clipped, not 500KB
+
+
+@needs_rg
+def test_grep_clips_only_long_lines_and_flags_it(tmp_path):
+    (tmp_path / "mix.txt").write_text("short match\n" + "match " + "B" * 2000 + "\n")
+    res = asyncio.run(server.grep("match", path=str(tmp_path)))
+    d = res.structured_content
+    assert d["count"] == 2
+    assert d["line_clipped"] is True
+    short = next(m for m in d["matches"] if m["line"] == 1)
+    assert short["text"] == "short match"  # a short line is left exactly as-is
+
+
+@needs_rg
+def test_grep_degrades_when_a_record_exceeds_the_hard_ceiling(tmp_path, monkeypatch):
+    """Past even the raised buffer, grep must report a partial result, not raise."""
+    monkeypatch.setattr(server, "MAX_RECORD_BYTES", 128 * 1024)
+    (tmp_path / "huge.txt").write_text("needle=" + "Z" * 1_000_000 + "\n")
+    res = asyncio.run(server.grep("needle", path=str(tmp_path)))
+    d = res.structured_content
+    assert d["truncated"] is True
+    assert d["error"] and "exceeded" in d["error"]

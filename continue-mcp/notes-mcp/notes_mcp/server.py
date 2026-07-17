@@ -44,6 +44,13 @@ def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolRe
 NOTES_DIRNAME = os.environ.get("NOTES_MCP_DIRNAME", ".continue-notes")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_HOOK = 100
+# Notes are meant to be small working memory, but nothing enforces it: a note
+# grows unbounded via repeated append, and a broad search spans every note. These
+# caps keep a runaway note or query from flooding the context window — the same
+# guarantee search-mcp and fs.read already make (and this server's README claims).
+MAX_READ_BYTES = int(os.environ.get("NOTES_MCP_MAX_READ_BYTES", str(50 * 1024)))
+MAX_MATCHES = int(os.environ.get("NOTES_MCP_MAX_MATCHES", "200"))
+MAX_LINE_CHARS = int(os.environ.get("NOTES_MCP_MAX_LINE_CHARS", "500"))
 
 
 def _workspace() -> str:
@@ -125,7 +132,8 @@ async def list() -> ToolResult:
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def read(name: str) -> ToolResult:
-    """Read one note in full (a name from list())."""
+    """Read one note (a name from list()). Capped at 50KB; an oversized note is
+    truncated with a pointer to read the rest with fs.read on the returned path."""
     try:
         p = note_path(name)
     except ValueError as e:
@@ -134,8 +142,22 @@ async def read(name: str) -> ToolResult:
         data = {"ok": False, "error": f"no note named {name!r}"}
         return _result(f"❌ {data['error']}", data)
     with open(p, "r", encoding="utf-8", errors="replace") as f:
-        data = {"ok": True, "name": name, "content": f.read()}
-    return _result(f"note: {data['name']}", data, block=data["content"], lang="markdown")
+        content = f.read(MAX_READ_BYTES + 1)
+    truncated = len(content) > MAX_READ_BYTES
+    if truncated:
+        # Truncate on a line boundary so we never hand back half a line. A note is
+        # a real file on disk under the workspace, so fs.read can page the rest.
+        content = content[:MAX_READ_BYTES].rsplit("\n", 1)[0]
+    data = {"ok": True, "name": name, "path": p, "content": content,
+            "truncated": truncated}
+    block = content
+    if truncated:
+        block += (
+            f"\n\n[Note exceeds {MAX_READ_BYTES // 1024}KB and was truncated. "
+            f"Read the rest with fs.read on {p}.]"
+        )
+    summary = f"note: {name}" + (" (truncated)" if truncated else "")
+    return _result(summary, data, block=block, lang="markdown")
 
 
 @mcp.tool
@@ -157,11 +179,14 @@ async def write(name: str, content: str, append: bool = False) -> ToolResult:
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def search(query: str) -> ToolResult:
-    """Case-insensitive substring search across all notes. Returns matching
-    lines as {name, line, text} — use it when the list() hooks aren't enough."""
+    """Case-insensitive substring search across all notes. Returns matching lines
+    as {name, line, text}, capped at 200 matches (long lines clipped to 500 chars);
+    truncated flags the cap. Use it when the list() hooks aren't enough."""
     d = notes_dir()
     matches: list[dict] = []
     q = query.lower()
+    truncated = False
+    line_clipped = False
     if q and os.path.isdir(d):
         for fn in sorted(os.listdir(d)):
             if not fn.endswith(".md"):
@@ -171,13 +196,25 @@ async def search(query: str) -> ToolResult:
                           errors="replace") as f:
                     for i, line in enumerate(f, 1):
                         if q in line.lower():
-                            matches.append({"name": fn[:-3], "line": i,
-                                            "text": line.rstrip("\n")})
+                            text = line.rstrip("\n")
+                            if len(text) > MAX_LINE_CHARS:
+                                text = text[:MAX_LINE_CHARS] + f"…[+{len(text) - MAX_LINE_CHARS} chars]"
+                                line_clipped = True
+                            matches.append({"name": fn[:-3], "line": i, "text": text})
+                            if len(matches) >= MAX_MATCHES:
+                                truncated = True
+                                break
             except OSError:
                 continue
-    data = {"query": query, "matches": matches, "count": len(matches)}
+            if truncated:
+                break
+    data = {"query": query, "matches": matches, "count": len(matches),
+            "truncated": truncated, "line_clipped": line_clipped}
+    flags = [lbl for on, lbl in ((truncated, "truncated"),
+                                 (line_clipped, "long lines clipped")) if on]
+    summary = f"{data['count']} match(es) for {query!r}" + (f" [{', '.join(flags)}]" if flags else "")
     block = "\n".join(f"{m['name']}:{m['line']}: {m['text']}" for m in matches)
-    return _result(f"{data['count']} match(es) for {query!r}", data, block)
+    return _result(summary, data, block)
 
 
 @mcp.tool(annotations={"destructiveHint": True, "idempotentHint": True})

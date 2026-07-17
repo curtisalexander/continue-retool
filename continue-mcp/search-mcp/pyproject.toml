@@ -8,11 +8,21 @@ version = "0.1.0"
 description = "ripgrep-backed search MCP for Continue.dev (replaces built-in Grep/Glob search)"
 requires-python = ">=3.11"
 dependencies = ["fastmcp>=3,<4"]
-# Note: ripgrep itself is a separate tool install, not a Python dependency:
-#   uv tool install ripgrep
+# ripgrep (the `rg` binary) is NOT a default dependency — bring your own, or opt
+# into the bundled build below. Resolution order at runtime: RIPGREP_BIN, then
+# `rg` on PATH (see rg_bin() in server.py). Ways to provide it:
+#   * a system rg           (brew/apt/choco install ripgrep, or your package mgr)
+#   * uv tool install ripgrep-bin      # global rg, survives project re-syncs
+#   * uv sync --extra rg               # into THIS server's venv (the extra below)
+# The `rg` extra pulls `ripgrep-bin`: a THIRD-PARTY repackage (Bing-su/
+# pip-binary-factory) of ripgrep's OFFICIAL release binaries — not published by
+# ripgrep's author. It's the only wheel that covers Windows; the similarly named
+# PyPI `ripgrep` package ships no Windows/Intel-Mac/linux-arm64 wheel. Pinned so
+# the exact binary is auditable.
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+rg = ["ripgrep-bin==15.2.0"]
 
 [project.scripts]
 search-mcp = "search_mcp.server:main"

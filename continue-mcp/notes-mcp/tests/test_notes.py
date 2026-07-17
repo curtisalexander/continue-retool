@@ -129,3 +129,53 @@ def test_bad_names_rejected(tmp_path, monkeypatch, bad):
 def test_hook_truncated():
     long = "y" * 300
     assert len(server.hook_line(long)) == server.MAX_HOOK
+
+
+def _search(query):
+    return asyncio.run(server.search(query)).structured_content
+
+
+# --- output caps: a runaway note or query must not flood context ------------
+def test_read_caps_oversized_note_and_points_at_fs_read(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("big", "line of text\n" * 100_000)
+    res = _read("big")
+    assert res["ok"] is True
+    assert res["truncated"] is True
+    assert len(res["content"].encode("utf-8")) <= server.MAX_READ_BYTES
+    assert res["content"].endswith("text")            # truncated on a line boundary
+    md = asyncio.run(server.read("big")).content[0].text
+    assert res["path"] in md and "fs.read" in md      # escape hatch named
+
+
+def test_read_small_note_is_untouched(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("small", "just a little note\n")
+    res = _read("small")
+    assert res["truncated"] is False
+    assert res["content"] == "just a little note\n"
+
+
+def test_search_caps_match_count(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("many", "needle\n" * 1000)
+    res = _search("needle")
+    assert res["count"] == server.MAX_MATCHES
+    assert res["truncated"] is True
+
+
+def test_search_clips_long_lines_and_flags_it(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("wide", "needle " + "Z" * 5000 + "\n")
+    res = _search("needle")
+    assert res["count"] == 1
+    assert res["line_clipped"] is True
+    assert len(res["matches"][0]["text"]) < 600
+
+
+def test_search_clean_result_has_no_flags(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("a", "find me here\n")
+    res = _search("find me")
+    assert res["count"] == 1
+    assert res["truncated"] is False and res["line_clipped"] is False

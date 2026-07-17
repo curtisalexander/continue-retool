@@ -63,8 +63,8 @@ cd hello-mcp && uv run --extra test pytest -q && uv run hello-mcp
 # 1. The flagship terminal MCP. Run the golden suite (incl. the tree-kill test).
 cd ../shell-mcp && uv run --extra test pytest -q && uv run shell-mcp
 
-# 2. ripgrep search MCP. Install the rg binary (PyPI), then run its tests.
-uv tool install ripgrep
+# 2. ripgrep search MCP. Needs an `rg` binary — bring your own (brew/apt/choco
+#    install ripgrep) or `uv tool install ripgrep-bin` (see search-mcp/README).
 cd ../search-mcp && uv run --extra test pytest -q && uv run search-mcp
 
 # 3. Unicode-robust edit MCP (fixes non-ASCII match failures).

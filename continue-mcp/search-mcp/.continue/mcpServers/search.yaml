@@ -1,7 +1,8 @@
 # Drop into your workspace's .continue/mcpServers/ directory.
 #
-# Prereq: the rg binary must be installed (see README):
-#     uv tool install ripgrep
+# Prereq: an `rg` binary the server can find (see search-mcp/README). Bring your
+# own (brew/apt/choco install ripgrep), or `uv tool install ripgrep-bin` (a
+# third-party prebuilt), or set RIPGREP_BIN below. `--check` (doctor) verifies it.
 #
 # Then in Continue's Agent tool settings:
 #   * set the built-in  Grep search  policy to  Excluded

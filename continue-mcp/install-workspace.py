@@ -411,6 +411,32 @@ def _mcp_handshake(cmd: list[str], timeout: float = 30.0) -> tuple[bool, str]:
             pass
 
 
+def _rg_status(names: list[str]) -> tuple[bool, str]:
+    """Resolve ripgrep the way search-mcp's rg_bin() does — RIPGREP_BIN, then the
+    search venv's bundled `rg` (the optional `rg` extra), then a system rg on PATH.
+    Returns (ok, human detail). Only meaningful when search is being installed."""
+    override = os.environ.get("RIPGREP_BIN")
+    if override:
+        return os.path.isfile(override), f"RIPGREP_BIN={override}"
+    scripts = "Scripts" if os.name == "nt" else "bin"
+    exe = "rg.exe" if os.name == "nt" else "rg"
+    bundled = os.path.join(KIT_DIR, "search-mcp", ".venv", scripts, exe)
+    if os.path.isfile(bundled):
+        return True, f"bundled ripgrep-bin ({bundled})"
+    system = shutil.which("rg")
+    if system:
+        return True, f"system rg ({system})"
+    return False, (
+        "not found — search will fail. Fix with ONE of:\n"
+        "         brew install ripgrep   (or apt/choco/your package manager)\n"
+        "         uv tool install ripgrep-bin   (global prebuilt rg)\n"
+        f"         uv sync --project {os.path.join(KIT_DIR, 'search-mcp')} --extra rg\n"
+        "         set RIPGREP_BIN=/abs/path/to/rg\n"
+        "       ripgrep-bin is a third-party repackage of ripgrep's official "
+        "binaries; prefer a system rg or RIPGREP_BIN to avoid it."
+    )
+
+
 def doctor(project: str, names: list[str]) -> int:
     """Verify the install: uv, package dirs + venvs, stamped yamls, detected
     interpreters, and a LIVE MCP handshake per server. Returns failure count."""
@@ -437,6 +463,11 @@ def doctor(project: str, names: list[str]) -> int:
     found = detect_interpreters()
     check(bool(found), "interpreters detected",
           ", ".join(f"{k}={v}" for k, v in found.items()) or "none found")
+
+    if "search" in names:
+        print("doctor: ripgrep for search-mcp")
+        rg_ok, rg_detail = _rg_status(names)
+        check(rg_ok, "ripgrep resolves", rg_detail)
 
     print(f"doctor: project config ({project})")
     mcp_dir = os.path.join(project, ".continue", "mcpServers")

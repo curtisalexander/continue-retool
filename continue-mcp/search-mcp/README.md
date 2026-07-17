@@ -16,20 +16,37 @@ Both tools are **workspace-jailed by default**: the search path must live under
 approves each call. `MCP_JAIL_EXTRA` adds roots; `MCP_JAIL=0` disables. See
 the kit README for the full policy story.
 
-## 1. Install the `rg` binary (the thing we call out to)
+## 1. Provide the `rg` binary (the thing we call out to)
 
-This MCP does **not** bundle ripgrep — it calls the `rg` binary on your PATH.
-ripgrep is published on PyPI, so install it as a `uv` tool (no raw-binary install,
-no Rust toolchain needed):
+This MCP does **not** install ripgrep by default — it calls the `rg` binary that
+the server resolves at runtime, in this order: **`RIPGREP_BIN`** (an explicit
+path), then **`rg` on your PATH**. Pick whichever fix suits you:
 
 ```bash
-uv tool install ripgrep      # puts `rg` on your PATH (e.g. ~/.local/bin/rg)
-rg --version                 # confirm it's found
+# A. A system rg — the simplest, nothing third-party:
+brew install ripgrep            # or: apt install ripgrep / choco install ripgrep
+
+# B. A global prebuilt rg via uv (works on Windows too; survives project re-syncs):
+uv tool install ripgrep-bin     # puts `rg` on your PATH (e.g. ~/.local/bin/rg)
+
+# C. Into THIS server's venv only, via the optional extra:
+uv sync --project <toolkit>/search-mcp --extra rg
+
+rg --version                    # confirm whichever you chose is found
 ```
 
-If `rg` lives somewhere non-standard, pin it explicitly in `search.yaml`:
-`RIPGREP_BIN: /path/to/rg`. The server raises a clear "install it with
-`uv tool install ripgrep`" error if it can't find the binary.
+**Heads-up on B and C:** the `rg` extra pulls
+[`ripgrep-bin`](https://pypi.org/project/ripgrep-bin/), a **third-party**
+repackage (`Bing-su/pip-binary-factory`) of ripgrep's *official* release binaries
+— convenient and pinned (`==15.2.0`), but not published by ripgrep's author. If
+you'd rather not trust a repackager, use **A** or point `RIPGREP_BIN` at any rg
+you already have. (The similarly named PyPI `ripgrep` package is **not** an
+option here — it ships no Windows, Intel-Mac, or linux-arm64 wheel.)
+
+If `rg` lives somewhere non-standard, pin it in `search.yaml`:
+`RIPGREP_BIN: /path/to/rg`. When it can't find rg at all, the server raises an
+error that lists every one of these fixes — and `install-workspace.py --check`
+(the doctor) reports the same thing at install time, before your first search.
 
 ## 2. Install and run the MCP
 
@@ -65,6 +82,12 @@ search.files({ "glob": ["*.ts", "!**/dist/**"] })
   searches are capped (`SEARCH_MCP_MAX_RESULTS`, default 1000) and flagged
   `truncated: true` so the model knows to narrow the query rather than assume it
   saw everything.
+- **Long lines can't crash or flood.** `rg --json` emits the *whole* matching
+  line (and `--max-columns` is ignored in JSON mode), so a match in minified JS or
+  a one-line lockfile once overran asyncio's stream buffer and crashed the tool.
+  Now the buffer is raised to `SEARCH_MCP_MAX_RECORD` (default 8MB) and each line
+  is clipped to `SEARCH_MCP_MAX_LINE_CHARS` (default 500, `line_clipped` flags it);
+  a record past even 8MB degrades to a partial result, never a traceback.
 - **`context` and `multiline`** map to `rg -C` and `rg --multiline --multiline-dotall`.
 - **Timeout** (`SEARCH_MCP_TIMEOUT`, default 30s) kills a runaway search and returns
   whatever was collected with `timed_out: true`.
