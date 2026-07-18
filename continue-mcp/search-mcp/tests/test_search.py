@@ -147,7 +147,12 @@ def test_grep_survives_a_giant_matching_line(tmp_path):
 
 @needs_rg
 def test_grep_clips_only_long_lines_and_flags_it(tmp_path):
-    (tmp_path / "mix.txt").write_text("short match\n" + "match " + "B" * 2000 + "\n")
+    # newline="" — write_text's default translates \n to \r\n on Windows,
+    # which rg reports as part of the line text and breaks the exact match
+    # below for a reason unrelated to what this test checks.
+    (tmp_path / "mix.txt").write_text(
+        "short match\n" + "match " + "B" * 2000 + "\n", newline=""
+    )
     res = asyncio.run(server.grep("match", path=str(tmp_path)))
     d = res.structured_content
     assert d["count"] == 2

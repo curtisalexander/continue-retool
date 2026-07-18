@@ -39,8 +39,13 @@ jobs:
           version: "0.11.21"   # pinned: a uv release must not silently change CI
           enable-cache: true
 
-      # ripgrep is preinstalled on all GitHub-hosted runners; the search-mcp
-      # integration tests skip themselves if rg is ever missing.
+      # ripgrep is bring-your-own (search-mcp/pyproject.toml never depends on
+      # it) — install the global prebuilt binary the same way the READMEs
+      # tell a user to, so search-mcp's tests and the installer doctor's
+      # "ripgrep resolves" check both have a real rg on PATH.
+      - name: Install ripgrep
+        run: uv tool install ripgrep-bin==15.2.0
+
       - name: Run all test suites
         shell: bash
         run: |
