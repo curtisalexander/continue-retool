@@ -25,24 +25,18 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Optional
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StdioTransport
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
+from fastmcp.tools import ToolResult
+
+from continue_mcp_common.results import result as _result
 
 from .registry import build_catalog, rank_tools
 
-
-def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
-    """content is what Continue's UI shows (summary + optional fenced block);
-    structured_content is what the model reads via res.data."""
-    md = summary
-    if block.strip():
-        md += f"\n\n```{lang}\n{block}\n```"
-    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 INSTRUCTIONS = (
     "This server exposes many tools behind three meta-tools. To use ANY capability: "
@@ -55,6 +49,7 @@ INSTRUCTIONS = (
 class _State:
     clients: dict = {}   # server name -> connected FastMCP Client
     catalog = None       # registry.Catalog
+    errors: dict[str, str] = {}
 
 
 STATE = _State()
@@ -93,23 +88,30 @@ async def lifespan(_app):
     async with AsyncExitStack() as stack:
         clients: dict = {}
         raw: list[dict] = []
+        errors: dict[str, str] = {}
         for server, spec in config.get("servers", {}).items():
             if "_" in server:
                 raise ValueError(f"server name {server!r} must not contain '_'")
-            client = await stack.enter_async_context(_connect(spec, base_dir))
-            clients[server] = client
-            for t in await client.list_tools():
-                raw.append({
-                    "server": server,
-                    "tool": t.name,
-                    "description": getattr(t, "description", "") or "",
-                    "input_schema": getattr(t, "inputSchema", None) or {},
-                })
+            try:
+                client = await stack.enter_async_context(_connect(spec, base_dir))
+                clients[server] = client
+                for t in await client.list_tools():
+                    raw.append({
+                        "server": server,
+                        "tool": t.name,
+                        "description": getattr(t, "description", "") or "",
+                        "input_schema": getattr(t, "inputSchema", None) or {},
+                    })
+            except Exception as exc:
+                errors[server] = str(exc)
+                print(f"gateway: downstream {server!r} unavailable: {exc}", file=sys.stderr)
         STATE.clients = clients
         STATE.catalog = build_catalog(raw)
+        STATE.errors = errors
         yield
         STATE.clients = {}
         STATE.catalog = None
+        STATE.errors = {}
 
 
 mcp = FastMCP("gateway", instructions=INSTRUCTIONS, lifespan=lifespan)
@@ -147,6 +149,7 @@ async def search(query: str = "", limit: int = 15) -> ToolResult:
         "query": query,
         "count": len(hits),
         "tools": [{"name": e.name, "summary": e.summary} for e in hits],
+        "unavailable_servers": dict(STATE.errors),
         "next": "call describe(name) to get a tool's argument schema",
     }
     block = "\n".join(f"{t['name']} — {t['summary']}" for t in data["tools"])

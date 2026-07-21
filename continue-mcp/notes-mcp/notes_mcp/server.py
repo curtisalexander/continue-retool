@@ -22,39 +22,49 @@ Run:  uv run notes-mcp
 """
 from __future__ import annotations
 
+import json
+import ntpath
 import os
 import re
+import stat
+import tempfile
 import time
+from typing import List
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
+from fastmcp.tools import ToolResult
+
+from continue_mcp_common.config import env_int as _env_int
+from continue_mcp_common.results import result as _result
 
 mcp = FastMCP("notes")
 
 
-def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
-    """content is what Continue's UI shows (summary + optional fenced block);
-    structured_content is what the model/tests read via res.data."""
-    md = summary
-    if block.strip():
-        md += f"\n\n```{lang}\n{block}\n```"
-    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
-
-NOTES_DIRNAME = os.environ.get("NOTES_MCP_DIRNAME", ".continue-notes")
+NOTES_DIRNAME = ".continue-notes"
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_HOOK = 100
-# Notes are meant to be small working memory, but nothing enforces it: a note
-# grows unbounded via repeated append, and a broad search spans every note. These
-# caps keep a runaway note or query from flooding the context window — the same
-# guarantee search-mcp and fs.read already make (and this server's README claims).
-MAX_READ_BYTES = int(os.environ.get("NOTES_MCP_MAX_READ_BYTES", str(50 * 1024)))
-MAX_MATCHES = int(os.environ.get("NOTES_MCP_MAX_MATCHES", "200"))
-MAX_LINE_CHARS = int(os.environ.get("NOTES_MCP_MAX_LINE_CHARS", "500"))
+
+
+# Bound output and the work needed to produce it. MAX_NOTE_BYTES also bounds an
+# atomic append, while MAX_SEARCH_BYTES prevents a small result from requiring a
+# scan of an arbitrarily large collection.
+MAX_READ_BYTES = _env_int("NOTES_MCP_MAX_READ_BYTES", 50 * 1024, 1024, 1024 * 1024)
+MAX_NOTE_BYTES = _env_int("NOTES_MCP_MAX_NOTE_BYTES", 4 * 1024 * 1024, 1024, 16 * 1024 * 1024)
+MAX_MATCHES = _env_int("NOTES_MCP_MAX_MATCHES", 200, 1, 5000)
+MAX_LINE_CHARS = _env_int("NOTES_MCP_MAX_LINE_CHARS", 500, 40, 10000)
+MAX_INDEX_ENTRIES = _env_int("NOTES_MCP_MAX_INDEX_ENTRIES", 200, 1, 5000)
+MAX_INDEX_BYTES = _env_int("NOTES_MCP_MAX_INDEX_BYTES", 50 * 1024, 1024, 1024 * 1024)
+MAX_INDEX_SCAN_ENTRIES = _env_int(
+    "NOTES_MCP_MAX_INDEX_SCAN_ENTRIES", 2000, MAX_INDEX_ENTRIES, 50000
+)
+MAX_SEARCH_BYTES = _env_int(
+    "NOTES_MCP_MAX_SEARCH_BYTES", 2 * 1024 * 1024, 1024, 32 * 1024 * 1024
+)
+MAX_QUERY_BYTES = 1024
 
 
 def _workspace() -> str:
-    return os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
+    return os.path.realpath(os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd()))
 
 
 def repo_root() -> str:
@@ -72,7 +82,28 @@ def repo_root() -> str:
 
 
 def notes_dir() -> str:
-    return os.path.join(repo_root(), NOTES_DIRNAME)
+    """Return the real notes directory, confined to the real repository root."""
+    configured = os.environ.get("NOTES_MCP_DIRNAME", NOTES_DIRNAME)
+    parts = re.split(r"[\\/]", configured)
+    if (
+        not configured
+        or configured == "."
+        or os.path.isabs(configured)
+        or ntpath.isabs(configured)
+        or ".." in parts
+    ):
+        raise ValueError(
+            "invalid NOTES_MCP_DIRNAME: use a relative directory inside the repository"
+        )
+    root = os.path.realpath(repo_root())
+    candidate = os.path.realpath(os.path.join(root, configured))
+    try:
+        contained = os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError("NOTES_MCP_DIRNAME resolves outside the repository")
+    return candidate
 
 
 def note_path(name: str) -> str:
@@ -82,7 +113,16 @@ def note_path(name: str) -> str:
             f"invalid note name {name!r}: use letters, digits, '.', '_', '-' "
             "(no path separators)"
         )
-    return os.path.join(notes_dir(), name + ".md")
+    directory = notes_dir()
+    lexical = os.path.join(directory, name + ".md")
+    # A note symlink makes later open/replace/delete operations ambiguous and can
+    # redirect them after the directory itself was checked. Reject it explicitly.
+    if os.path.islink(lexical):
+        raise ValueError(f"unsafe note {name!r}: symbolic links are not supported")
+    resolved = os.path.realpath(lexical)
+    if os.path.commonpath((directory, resolved)) != directory:
+        raise ValueError(f"unsafe note {name!r}: path resolves outside notes directory")
+    return resolved
 
 
 def hook_line(text: str) -> str:
@@ -100,12 +140,75 @@ def _bad_name(e: ValueError) -> ToolResult:
     return _result(f"❌ {e}", {"ok": False, "error": str(e)})
 
 
+def _failure(error: Exception | str) -> ToolResult:
+    message = str(error)
+    return _result(f"❌ {message}", {"ok": False, "error": message})
+
+
+def _clip_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text, False
+    return raw[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+def _fsync_dir(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _atomic_write(path: str, data: bytes) -> None:
+    """Durably replace path with encoded data, preserving ordinary mode bits."""
+    parent = os.path.dirname(path)
+    mode = None
+    if os.path.exists(path):
+        mode = stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode)
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=parent)
+    try:
+        if mode is not None:
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as f:
+            fd = -1
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+        temp_path = ""
+        _fsync_dir(parent)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
+def _open_read(path: str):
+    """Open a note without following a symlink introduced after validation."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    return os.fdopen(fd, "rb")
+
+
 # --- tools -----------------------------------------------------------------
 @mcp.tool(annotations={"readOnlyHint": True})
 async def list() -> ToolResult:
     """List all notes as a cheap index: {name, hook, age_days}. Call at the start
     of a task, then read(name) for anything relevant — don't guess from hooks."""
-    d = notes_dir()
+    try:
+        d = notes_dir()
+    except ValueError as e:
+        return _failure(e)
     if not os.path.isdir(d):
         data = {"notes": [], "count": 0, "dir": d}
         summary = f"{data['count']} note(s) in {data['dir']}"
@@ -113,18 +216,46 @@ async def list() -> ToolResult:
         return _result(summary, data, block)
     now = time.time()
     out = []
-    for fn in sorted(os.listdir(d)):
-        if not fn.endswith(".md"):
-            continue
-        p = os.path.join(d, fn)
-        try:
-            with open(p, "r", encoding="utf-8", errors="replace") as f:
-                head = f.read(2048)
-            age_days = round((now - os.path.getmtime(p)) / 86400, 1)
-        except OSError:
-            continue
-        out.append({"name": fn[:-3], "hook": hook_line(head), "age_days": age_days})
-    data = {"notes": out, "count": len(out), "dir": d}
+    index_bytes = 0
+    scanned = 0
+    skipped = 0
+    truncated = False
+    try:
+        entries = os.scandir(d)
+    except OSError as e:
+        return _failure(f"cannot list notes directory: {e}")
+    with entries:
+        for entry in entries:
+            scanned += 1
+            if scanned > MAX_INDEX_SCAN_ENTRIES:
+                truncated = True
+                break
+            fn = entry.name
+            if not fn.endswith(".md") or not _NAME.fullmatch(fn[:-3]):
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    skipped += 1
+                    continue
+                with _open_read(entry.path) as f:
+                    head = f.read(2048)
+                item = {
+                    "name": fn[:-3],
+                    "hook": hook_line(head.decode("utf-8", errors="replace")),
+                    "age_days": round((now - entry.stat(follow_symlinks=False).st_mtime) / 86400, 1),
+                }
+            except OSError:
+                skipped += 1
+                continue
+            item_bytes = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
+            if len(out) >= MAX_INDEX_ENTRIES or index_bytes + item_bytes > MAX_INDEX_BYTES:
+                truncated = True
+                break
+            index_bytes += item_bytes
+            out.append(item)
+    out.sort(key=lambda note: note["name"])
+    data = {"notes": out, "count": len(out), "dir": d,
+            "truncated": truncated, "skipped": skipped}
     summary = f"{data['count']} note(s) in {data['dir']}"
     block = "\n".join(f"{n['name']} — {n['hook']} ({n['age_days']}d)" for n in data["notes"])
     return _result(summary, data, block)
@@ -141,13 +272,18 @@ async def read(name: str) -> ToolResult:
     if not os.path.isfile(p):
         data = {"ok": False, "error": f"no note named {name!r}"}
         return _result(f"❌ {data['error']}", data)
-    with open(p, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read(MAX_READ_BYTES + 1)
-    truncated = len(content) > MAX_READ_BYTES
+    try:
+        with _open_read(p) as f:
+            raw = f.read(MAX_READ_BYTES + 1)
+    except OSError as e:
+        return _failure(f"cannot read note {name!r}: {e}")
+    truncated = len(raw) > MAX_READ_BYTES
     if truncated:
-        # Truncate on a line boundary so we never hand back half a line. A note is
-        # a real file on disk under the workspace, so fs.read can page the rest.
-        content = content[:MAX_READ_BYTES].rsplit("\n", 1)[0]
+        # Truncate bytes first, then choose a complete line and UTF-8 sequence.
+        raw = raw[:MAX_READ_BYTES].rsplit(b"\n", 1)[0]
+    content = raw.decode("utf-8", errors="replace")
+    content, encoding_clipped = _clip_utf8(content, MAX_READ_BYTES)
+    truncated = truncated or encoding_clipped
     data = {"ok": True, "name": name, "path": p, "content": content,
             "truncated": truncated}
     block = content
@@ -168,11 +304,24 @@ async def write(name: str, content: str, append: bool = False) -> ToolResult:
         p = note_path(name)
     except ValueError as e:
         return _bad_name(e)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    if append and os.path.isfile(p) and os.path.getsize(p) > 0:
-        content = "\n" + content
-    with open(p, "a" if append else "w", encoding="utf-8") as f:
-        f.write(content if content.endswith("\n") else content + "\n")
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        # Re-resolve after directory creation so a pre-existing or concurrently
+        # introduced escaping directory symlink is caught before mutation.
+        p = note_path(name)
+        new_data = (content if content.endswith("\n") else content + "\n").encode("utf-8")
+        if append and os.path.isfile(p):
+            with _open_read(p) as f:
+                old_data = f.read(MAX_NOTE_BYTES + 1)
+            if old_data:
+                new_data = old_data + b"\n" + new_data
+        if len(new_data) > MAX_NOTE_BYTES:
+            return _failure(
+                f"note exceeds NOTES_MCP_MAX_NOTE_BYTES ({MAX_NOTE_BYTES} bytes)"
+            )
+        _atomic_write(p, new_data)
+    except (OSError, UnicodeError, ValueError) as e:
+        return _failure(f"cannot write note {name!r}: {e}")
     data = {"ok": True, "name": name, "path": p}
     return _result(f"saved note {data['name']} → {data['path']}", data)
 
@@ -182,21 +331,53 @@ async def search(query: str) -> ToolResult:
     """Case-insensitive substring search across all notes. Returns matching lines
     as {name, line, text}, capped at 200 matches (long lines clipped to 500 chars);
     truncated flags the cap. Use it when the list() hooks aren't enough."""
-    d = notes_dir()
-    matches: list[dict] = []
+    if len(query.encode("utf-8")) > MAX_QUERY_BYTES:
+        return _failure(f"query exceeds {MAX_QUERY_BYTES} bytes")
+    try:
+        d = notes_dir()
+    except ValueError as e:
+        return _failure(e)
+    matches: List[dict] = []
     q = query.lower()
     truncated = False
     line_clipped = False
+    scanned_bytes = 0
+    skipped = 0
     if q and os.path.isdir(d):
-        for fn in sorted(os.listdir(d)):
+        try:
+            filenames = []
+            with os.scandir(d) as entries:
+                for entry in entries:
+                    if len(filenames) >= MAX_INDEX_SCAN_ENTRIES:
+                        truncated = True
+                        break
+                    filenames.append(entry.name)
+            filenames.sort()
+        except OSError as e:
+            return _failure(f"cannot list notes directory: {e}")
+        for fn in filenames:
             if not fn.endswith(".md"):
                 continue
+            p = os.path.join(d, fn)
             try:
-                with open(os.path.join(d, fn), "r", encoding="utf-8",
-                          errors="replace") as f:
-                    for i, line in enumerate(f, 1):
+                if os.path.islink(p) or not os.path.isfile(p):
+                    skipped += 1
+                    continue
+                with _open_read(p) as f:
+                    i = 0
+                    while scanned_bytes < MAX_SEARCH_BYTES:
+                        remaining = MAX_SEARCH_BYTES - scanned_bytes
+                        raw_line = f.readline(remaining + 1)
+                        if not raw_line:
+                            break
+                        if len(raw_line) > remaining:
+                            truncated = True
+                            break
+                        scanned_bytes += len(raw_line)
+                        i += 1
+                        line = raw_line.decode("utf-8", errors="replace")
                         if q in line.lower():
-                            text = line.rstrip("\n")
+                            text = line.rstrip("\r\n")
                             if len(text) > MAX_LINE_CHARS:
                                 text = text[:MAX_LINE_CHARS] + f"…[+{len(text) - MAX_LINE_CHARS} chars]"
                                 line_clipped = True
@@ -204,12 +385,18 @@ async def search(query: str) -> ToolResult:
                             if len(matches) >= MAX_MATCHES:
                                 truncated = True
                                 break
+                    if (
+                        scanned_bytes >= MAX_SEARCH_BYTES
+                        and os.fstat(f.fileno()).st_size > f.tell()
+                    ):
+                        truncated = True
             except OSError:
-                continue
+                skipped += 1
             if truncated:
                 break
     data = {"query": query, "matches": matches, "count": len(matches),
-            "truncated": truncated, "line_clipped": line_clipped}
+            "truncated": truncated, "line_clipped": line_clipped,
+            "scanned_bytes": scanned_bytes, "skipped": skipped}
     flags = [lbl for on, lbl in ((truncated, "truncated"),
                                  (line_clipped, "long lines clipped")) if on]
     summary = f"{data['count']} match(es) for {query!r}" + (f" [{', '.join(flags)}]" if flags else "")
@@ -227,7 +414,11 @@ async def delete(name: str) -> ToolResult:
     if not os.path.isfile(p):
         data = {"ok": False, "error": f"no note named {name!r}"}
         return _result(f"❌ {data['error']}", data)
-    os.remove(p)
+    try:
+        os.remove(p)
+        _fsync_dir(os.path.dirname(p))
+    except OSError as e:
+        return _failure(f"cannot delete note {name!r}: {e}")
     data = {"ok": True, "name": name}
     return _result(f"deleted note {data['name']}", data)
 

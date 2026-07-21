@@ -18,44 +18,32 @@ from __future__ import annotations
 
 import codecs
 import os
-import re
-import unicodedata
-from typing import Optional
+from typing import List, Optional
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
+from fastmcp.tools import ToolResult
+
+from continue_mcp_common.config import env_int as _env_int
+from continue_mcp_common.paths import jail_error
+from continue_mcp_common.paths import resolve_existing as _resolve_existing
+from continue_mcp_common.results import result as _result
 
 mcp = FastMCP("fs")
 
 
-def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
-    """content is what Continue's UI shows (summary + optional fenced block);
-    structured_content is what the model/tests read via res.data."""
-    md = summary
-    if block.strip():
-        md += f"\n\n```{lang}\n{block}\n```"
-    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
-
-DEFAULT_LIMIT = int(os.environ.get("FS_MCP_DEFAULT_LIMIT", "2000"))     # lines per read
-MAX_LINE_CHARS = int(os.environ.get("FS_MCP_MAX_LINE_CHARS", "2000"))   # per-line cap
+DEFAULT_LIMIT = _env_int("FS_MCP_DEFAULT_LIMIT", 2000, 1, 10_000)
+MAX_LINE_CHARS = _env_int("FS_MCP_MAX_LINE_CHARS", 2000, 40, 100_000)
 # Total payload cap. The line and per-line caps MULTIPLY (2000 lines x 2000 chars
 # is ~4MB), so on their own they don't bound the result at all — a wide file still
 # floods the context window. This is the cap that actually binds, and it's why
 # read reports truncated_by: whichever limit hits first wins.
-MAX_BYTES = int(os.environ.get("FS_MCP_MAX_BYTES", str(50 * 1024)))
-MAX_ENTRIES = int(os.environ.get("FS_MCP_MAX_ENTRIES", "500"))          # per listing
+MAX_BYTES = _env_int("FS_MCP_MAX_BYTES", 50 * 1024, 1024, 4 * 1024 * 1024)
+MAX_ENTRIES = _env_int("FS_MCP_MAX_ENTRIES", 500, 1, 5000)
+MAX_DEPTH = 20                                                            # recursion ceiling
+MAX_LIST_ERRORS = 20                                                      # bounded diagnostics
+MAX_SCANNED_ENTRIES = 5000                                                # internal work ceiling
 ALWAYS_SKIP = {".git"}
 SNIFF_BYTES = 8192  # binary-detection window
-
-
-def _resolve(path: str) -> str:
-    """Relative paths resolve against MCP_WORKSPACE (falls back to server cwd),
-    so they mean the same thing no matter where Continue launched this process."""
-    if os.path.isabs(path):
-        return path
-    base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
-    return os.path.join(base, path)
 
 
 # --- Unicode-robust path resolution ----------------------------------------
@@ -67,50 +55,6 @@ def _resolve(path: str) -> str:
 #   ' vs U+2019 — screenshot names use the curly apostrophe ("Capture d'écran")
 #   NBSP + AM/PM — macOS screenshots put U+202F, not a space, before AM/PM
 # Ported from pi's packages/coding-agent/src/core/tools/path-utils.ts.
-_NARROW_NBSP = " "
-_AMPM = re.compile(r" (AM|PM)\.", re.IGNORECASE)
-
-
-def _path_variants(path: str) -> list[str]:
-    """Byte-different spellings of `path` to try when the literal one misses.
-    Deduped, literal path excluded.
-
-    The three transforms are independent, so this takes their cross product
-    rather than a fixed ladder. Pi hand-picks four rungs (nfd, curly, nfd+curly,
-    am/pm) and so can't match a name that needs three at once — which is exactly
-    the French macOS screenshot its own comment cites: curly apostrophe AND
-    narrow NBSP AND NFD. The extra combinations cost only stat calls, and only
-    on the miss path, where we were about to fail anyway."""
-    quoted = [path, path.replace("'", "’")]
-    spaced = []
-    for p in quoted:
-        spaced.append(p)
-        alt = _AMPM.sub(_NARROW_NBSP + r"\1.", p)
-        if alt != p:
-            spaced.append(alt)
-    seen = {path}
-    out = []
-    for p in spaced:
-        for form in (p, unicodedata.normalize("NFD", p), unicodedata.normalize("NFC", p)):
-            if form not in seen:
-                seen.add(form)
-                out.append(form)
-    return out
-
-
-def _resolve_existing(path: str) -> str:
-    """_resolve, then fall back to Unicode variants if nothing is there. Returns
-    the variant that exists, else the literal resolution (so the caller still
-    reports "not found" against the path the model actually asked for)."""
-    resolved = _resolve(path)
-    if os.path.exists(resolved):
-        return resolved
-    for variant in _path_variants(resolved):
-        if os.path.exists(variant):
-            return variant
-    return resolved
-
-
 # Bytes that appear in real text: printable ASCII, tab/LF/CR/FF/BS/ESC, and
 # everything >= 0x80 (which may be UTF-8 or a legacy code page — either way it's
 # text, so a cp1252 file must not be mistaken for a binary).
@@ -158,35 +102,6 @@ def _is_binary(path: str) -> bool:
 # from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
 # sanctioned escape hatch for a legitimate out-of-workspace file is the shell
 # tool, which is approval-gated by policy.
-def _jail_roots() -> list[str]:
-    if os.environ.get("MCP_JAIL", "1").strip().lower() in ("0", "false", "off", "no"):
-        return []
-    roots = [os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())]
-    for extra in (os.environ.get("MCP_JAIL_EXTRA") or "").split(os.pathsep):
-        if extra.strip():
-            roots.append(os.path.abspath(extra.strip()))
-    return [os.path.normcase(os.path.realpath(r)) for r in roots]
-
-
-def jail_error(path: str) -> str | None:
-    """None if `path` is allowed; else a model-facing refusal that names the
-    escalation paths (ask the user / approval-gated shell)."""
-    roots = _jail_roots()
-    if not roots:
-        return None
-    real = os.path.normcase(os.path.realpath(path))
-    for root in roots:
-        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
-            return None
-    return (
-        f"path is outside the workspace jail: {path} (workspace: "
-        f"{os.environ.get('MCP_WORKSPACE') or os.getcwd()}). This tool only "
-        "touches the workspace (MCP_JAIL_EXTRA adds roots; MCP_JAIL=0 "
-        "disables). For a legitimate outside file, ask the user or use a "
-        "shell command, which requires approval."
-    )
-
-
 # --- tools -----------------------------------------------------------------
 @mcp.tool(annotations={"readOnlyHint": True})
 async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> ToolResult:
@@ -213,46 +128,54 @@ async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> T
     stop = start + limit  # exclusive
 
     # Stream line by line — a multi-GB log must never be slurped into memory
-    # to serve a 50-line window. Lines outside the window are only counted, so
-    # total_lines stays exact even when we stop collecting early.
-    numbered: list[str] = []
-    total = 0
+    # to serve a 50-line window. Stop after one look-ahead line proves that a
+    # next page exists. An exact total is reported only when this read reaches
+    # EOF; counting the rest of a huge file would defeat bounded paging.
+    numbered: List[str] = []
+    observed_lines = 0
     budget = MAX_BYTES
     truncated_by: Optional[str] = None
+    reached_eof = False
     with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-        for total, ln in enumerate(f, start=1):
-            if start <= total < stop and truncated_by is None:
+        for observed_lines, ln in enumerate(f, start=1):
+            if observed_lines >= stop:
+                truncated_by = "lines"
+                break
+            if start <= observed_lines and truncated_by is None:
                 ln = ln.rstrip("\n")
                 if len(ln) > MAX_LINE_CHARS:
                     ln = ln[:MAX_LINE_CHARS] + f"…[+{len(ln) - MAX_LINE_CHARS} chars]"
-                row = f"{total}\t{ln}"
+                row = f"{observed_lines}\t{ln}"
                 cost = len(row.encode("utf-8")) + 1  # +1 for the joining newline
                 # Stop on whole lines only — never hand back half a line. The
                 # first line alone can exceed the budget; emit it regardless so
                 # a read always makes progress instead of returning nothing.
                 if cost > budget and numbered:
                     truncated_by = "bytes"
-                    continue
+                    break
                 budget -= cost
                 numbered.append(row)
+        else:
+            reached_eof = True
     end = start - 1 + len(numbered)
-    if truncated_by is None and end < total:
-        truncated_by = "lines"
+    total_lines = observed_lines if reached_eof else None
     data = {
         "ok": True,
         "path": path,
         "content": "\n".join(numbered),
         "start_line": start if numbered else 0,
         "end_line": end,
-        "total_lines": total,
-        "truncated": end < total,
-        "truncated_by": truncated_by if end < total else None,
-        "next_start_line": end + 1 if end < total else None,
+        "total_lines": total_lines,
+        "total_lines_exact": reached_eof,
+        "total_lines_at_least": observed_lines,
+        "lines_scanned": observed_lines,
+        "truncated": not reached_eof,
+        "truncated_by": truncated_by if not reached_eof else None,
+        "next_start_line": end + 1 if not reached_eof else None,
     }
-    summary = (
-        f"{data['path']} · lines {data['start_line']}–{data['end_line']} "
-        f"of {data['total_lines']}"
-    )
+    total_label = str(total_lines) if reached_eof else f"at least {observed_lines}"
+    summary = (f"{data['path']} · lines {data['start_line']}–{data['end_line']} "
+               f"of {total_label}")
     block = data["content"]
     if data["truncated"]:
         why = f"{MAX_BYTES // 1024}KB limit" if truncated_by == "bytes" else f"{limit}-line limit"
@@ -260,7 +183,7 @@ async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> T
         # The hint goes in the fenced block too, not just the summary: it has to
         # survive in the payload the model reads back, next to where it ran out.
         block += (
-            f"\n\n[Showing lines {data['start_line']}-{end} of {total} ({why}). "
+            f"\n\n[Showing lines {data['start_line']}-{end} of {total_label} ({why}). "
             f"Use start_line={data['next_start_line']} to continue.]"
         )
     return _result(summary, data, block)
@@ -277,22 +200,50 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
     if not os.path.isdir(path):
         data = {"ok": False, "path": path, "error": f"not a directory: {path}"}
         return _result(f"❌ {data['error']}", data)
-    depth = max(1, depth)
-    entries: list[dict] = []
-    truncated = False
+    requested_depth = max(1, depth)
+    depth = min(requested_depth, MAX_DEPTH)
+    entries: List[dict] = []
+    errors: List[dict] = []
+    truncated = requested_depth > depth
+    skipped = 0
+    error_count = 0
+    scanned = 0
+
+    def record_error(entry_path: str, error: OSError, entry_skipped: bool = True) -> None:
+        nonlocal error_count, skipped
+        error_count += 1
+        if entry_skipped:
+            skipped += 1
+        if len(errors) < MAX_LIST_ERRORS:
+            errors.append({"path": os.path.relpath(entry_path, path), "error": str(error)})
 
     def walk(dir_path: str, level: int) -> None:
-        nonlocal truncated
-        if truncated:
+        nonlocal scanned, truncated
+        if len(entries) >= MAX_ENTRIES:
+            truncated = True
             return
         try:
-            children = sorted(
-                os.scandir(dir_path),
-                key=lambda e: (not e.is_dir(follow_symlinks=False), e.name.lower()),
-            )
-        except PermissionError:
+            with os.scandir(dir_path) as iterator:
+                children = []
+                for child in iterator:
+                    if scanned >= MAX_SCANNED_ENTRIES:
+                        truncated = True
+                        break
+                    scanned += 1
+                    children.append(child)
+        except OSError as e:
+            record_error(dir_path, e)
             return
+        typed_children = []
         for child in children:
+            try:
+                is_dir = child.is_dir(follow_symlinks=False)
+            except OSError as e:
+                record_error(child.path, e)
+                continue
+            typed_children.append((not is_dir, child.name.lower(), child, is_dir))
+        typed_children.sort(key=lambda item: (item[0], item[1]))
+        for _, _, child, is_dir in typed_children:
             name = child.name
             if name in ALWAYS_SKIP or (name.startswith(".") and not include_hidden):
                 continue
@@ -300,24 +251,30 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
                 truncated = True
                 return
             rel = os.path.relpath(child.path, path)
-            is_dir = child.is_dir(follow_symlinks=False)
             entry: dict = {"path": rel + (os.sep if is_dir else ""),
                            "type": "dir" if is_dir else "file"}
             if not is_dir:
                 try:
                     entry["size"] = child.stat(follow_symlinks=False).st_size
-                except OSError:
+                except OSError as e:
                     entry["size"] = None
+                    record_error(child.path, e, entry_skipped=False)
             entries.append(entry)
             if is_dir and level < depth:
                 walk(child.path, level + 1)
 
     walk(path, 1)
+    partial = error_count > 0
     data = {"ok": True, "path": path, "entries": entries,
-            "count": len(entries), "truncated": truncated}
+            "count": len(entries), "truncated": truncated, "partial": partial,
+            "requested_depth": requested_depth, "depth": depth,
+            "depth_capped": requested_depth > depth, "skipped": skipped,
+            "scanned": scanned, "errors": errors,
+            "errors_truncated": error_count > len(errors)}
     summary = (
         f"{data['count']} entr(ies) in {data['path']}"
         + (" (truncated)" if data['truncated'] else "")
+        + (f" (partial: {error_count} inaccessible)" if partial else "")
     )
     block = "\n".join(
         f"{'d' if e['type'] == 'dir' else 'f'}  {e['path']}"

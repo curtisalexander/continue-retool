@@ -1,9 +1,11 @@
 """MCP-protocol tests: drive edit-mcp through fastmcp's Client, the same way an
 MCP client (Continue) would. Deterministic: no LLM, no network, in-process."""
 import asyncio
+import os
 
 from fastmcp import Client
 
+from edit_mcp import server
 from edit_mcp.server import mcp
 
 
@@ -13,6 +15,15 @@ def _call(tool: str, args: dict):
             return await c.call_tool(tool, args)
 
     return asyncio.run(scenario())
+
+
+def test_numeric_conflict_hash_limit_is_defaulted_and_clamped(monkeypatch):
+    monkeypatch.setenv("EDIT_TEST_LIMIT", "bad")
+    assert server._env_int("EDIT_TEST_LIMIT", 20, 0, 100) == 20
+    monkeypatch.setenv("EDIT_TEST_LIMIT", "-1")
+    assert server._env_int("EDIT_TEST_LIMIT", 20, 0, 100) == 0
+    monkeypatch.setenv("EDIT_TEST_LIMIT", "999")
+    assert server._env_int("EDIT_TEST_LIMIT", 20, 0, 100) == 100
 
 
 def test_tools_advertised():
@@ -77,6 +88,105 @@ def test_edit_cp1252_file_round_trips(tmp_path):
     raw = f.read_bytes()
     assert "edited line" in raw.decode("cp1252")
     assert raw.decode("cp1252").startswith("café — “legacy”")
+
+
+def test_unencodable_legacy_edit_preserves_original_bytes(tmp_path):
+    f = tmp_path / "legacy.txt"
+    original = "café — legacy\n".encode("cp1252")
+    f.write_bytes(original)
+    res = _call("edit", {
+        "path": str(f), "old_string": "legacy", "new_string": "emoji 😀",
+    })
+    assert res.data["ok"] is False
+    assert "could not safely write" in res.data["error"]
+    assert f.read_bytes() == original
+
+
+def test_atomic_replace_failure_preserves_original(tmp_path, monkeypatch):
+    from edit_mcp import server
+
+    f = tmp_path / "important.txt"
+    f.write_text("before\n", encoding="utf-8")
+
+    def fail_replace(_src, _dest):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(server.os, "replace", fail_replace)
+    res = _call("edit", {
+        "path": str(f), "old_string": "before", "new_string": "after",
+    })
+    assert res.data["ok"] is False
+    assert f.read_text(encoding="utf-8") == "before\n"
+    assert not list(tmp_path.glob(".important.txt.*.tmp"))
+
+
+def test_atomic_edit_preserves_permission_bits(tmp_path):
+    if os.name == "nt":
+        return
+    f = tmp_path / "script.sh"
+    f.write_text("echo before\n", encoding="utf-8")
+    f.chmod(0o751)
+    res = _call("edit", {
+        "path": str(f), "old_string": "before", "new_string": "after",
+    })
+    assert res.data["ok"] is True
+    assert f.stat().st_mode & 0o777 == 0o751
+
+
+def test_atomic_edit_follows_safe_symlink_without_replacing_it(tmp_path):
+    if os.name == "nt":
+        return
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(target)
+    res = _call("edit", {
+        "path": str(link), "old_string": "before", "new_string": "after",
+    })
+    assert res.data["ok"] is True
+    assert link.is_symlink()
+    assert target.read_text(encoding="utf-8") == "after\n"
+
+
+def test_concurrent_content_change_aborts_without_overwriting(tmp_path, monkeypatch):
+    from edit_mcp import server
+
+    f = tmp_path / "shared.txt"
+    f.write_text("before\n", encoding="utf-8")
+    original_match = server.find_and_replace
+
+    def concurrent_change(*args, **kwargs):
+        result = original_match(*args, **kwargs)
+        f.write_text("external edit\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(server, "find_and_replace", concurrent_change)
+    res = _call("edit", {
+        "path": str(f), "old_string": "before", "new_string": "after",
+    })
+    assert res.data["ok"] is False
+    assert "changed after it was read" in res.data["error"]
+    assert f.read_text(encoding="utf-8") == "external edit\n"
+
+
+def test_metadata_only_change_with_same_content_is_allowed(tmp_path, monkeypatch):
+    from edit_mcp import server
+
+    f = tmp_path / "shared.txt"
+    f.write_text("before\n", encoding="utf-8")
+    original_match = server.find_and_replace
+
+    def metadata_change(*args, **kwargs):
+        result = original_match(*args, **kwargs)
+        f.write_text("before\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(server, "find_and_replace", metadata_change)
+    res = _call("edit", {
+        "path": str(f), "old_string": "before", "new_string": "after",
+    })
+    assert res.data["ok"] is True
+    assert f.read_text(encoding="utf-8") == "after\n"
 
 
 def test_edit_dry_run_leaves_file_untouched(tmp_path):
@@ -264,6 +374,20 @@ def test_edit_finds_nfd_file_from_nfc_request(tmp_path):
     res = _call("edit", {
         "path": str(tmp_path / unicodedata.normalize("NFC", "café.txt")),
         "old_string": "old", "new_string": "new",
+    })
+    assert res.data["ok"] is True
+    assert f.read_text(encoding="utf-8") == "new\n"
+
+
+def test_edit_finds_macos_screenshot_with_narrow_nbsp(tmp_path):
+    import unicodedata
+
+    real = unicodedata.normalize("NFD", "Capture d’écran à 3.42.11 PM.txt")
+    f = tmp_path / real
+    f.write_text("old\n", encoding="utf-8")
+    asked = unicodedata.normalize("NFC", "Capture d'écran à 3.42.11 PM.txt")
+    res = _call("edit", {
+        "path": str(tmp_path / asked), "old_string": "old", "new_string": "new",
     })
     assert res.data["ok"] is True
     assert f.read_text(encoding="utf-8") == "new\n"

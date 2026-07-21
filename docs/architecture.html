@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>continue-mcp — Architecture — continue-retool</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#141b24; --panel2:#1b2430; --ink:#e6edf3; --muted:#9fb0c0;
+    --line:#243140; --accent:#5db0ff; --accent2:#7ee787; --warn:#ffb454; --purple:#d2a8ff;
+    --chip:#1f2a37; --max:900px;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0; background:linear-gradient(180deg,#0b0f14,#0d1117 320px); color:var(--ink);
+    font-family:var(--sans); line-height:1.65; font-size:16.5px; -webkit-font-smoothing:antialiased}
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  header{padding:56px 22px 22px; max-width:var(--max); margin:0 auto}
+  .kicker{font-family:var(--mono); font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); margin-bottom:14px}
+  .kicker a{color:var(--accent)}
+  header h1{font-family:var(--serif); font-size:clamp(30px,5vw,50px); margin:0 0 6px; font-weight:600; letter-spacing:-.02em; line-height:1.1}
+
+  main{max-width:var(--max); margin:0 auto; padding:8px 22px 80px}
+  main h1{font-family:var(--serif); font-size:30px; margin:2.4em 0 .4em; font-weight:600; letter-spacing:-.01em}
+  h2{font-family:var(--serif); font-size:25px; margin:2em 0 .5em; font-weight:600; padding-bottom:.3rem; border-bottom:1px solid var(--line)}
+  h3{font-size:19px; margin:1.6em 0 .3em; color:var(--accent2); font-weight:600}
+  h4{font-size:16px; margin:1.4em 0 .2em; color:var(--purple); font-weight:600}
+  p{max-width:80ch}
+  ul,ol{max-width:80ch}
+  li{margin:.25em 0}
+  strong{color:#fff}
+  hr{border:0; border-top:1px solid var(--line); margin:2.2em 0}
+
+  code{font-family:var(--mono); font-size:.88em; background:var(--chip); border:1px solid var(--line);
+    border-radius:5px; padding:1px 5px; color:var(--accent2)}
+  pre{background:#0a0e13; border:1px solid var(--line); border-radius:11px; padding:16px 18px;
+    overflow:auto; font-size:13.5px; line-height:1.5; max-width:100%}
+  pre code{background:none; border:0; padding:0; color:var(--ink); font-size:13.5px}
+
+  blockquote{margin:1.4em 0; padding:.5em 1.1em; border-left:4px solid var(--warn);
+    background:var(--panel); border-radius:0 9px 9px 0; color:var(--muted)}
+  blockquote p{margin:.4em 0}
+
+  table{border-collapse:collapse; margin:1.4em 0; font-size:14.5px; width:100%; display:block; overflow-x:auto}
+  th,td{border:1px solid var(--line); padding:8px 12px; text-align:left; vertical-align:top}
+  th{background:var(--panel2); color:#fff; font-family:var(--sans)}
+  tr:nth-child(even) td{background:var(--panel)}
+
+  nav#TOC{background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:14px 20px; margin:1.6em 0 2em; font-size:14.5px}
+  nav#TOC::before{content:"On this page"; display:block; font-family:var(--mono); font-size:11px;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin-bottom:8px}
+  nav#TOC ul{list-style:none; margin:0; padding-left:0}
+  nav#TOC ul ul{padding-left:16px}
+  nav#TOC li{margin:.15em 0}
+
+  footer{max-width:var(--max); margin:0 auto; padding:24px 22px 70px; color:var(--muted); font-size:13.5px;
+    border-top:1px solid var(--line)}
+  footer a{color:var(--muted); text-decoration:underline}
+</style>
+</head>
+<body>
+<header>
+  <div class="kicker"><a href="./index.html">&larr; continue-retool</a></div>
+  <h1>continue-mcp — Architecture</h1>
+</header>
+<main>
+<ul>
+<li><a href="#continue-mcp-architecture"
+id="toc-continue-mcp-architecture">continue-mcp architecture</a>
+<ul>
+<li><a href="#system-at-a-glance" id="toc-system-at-a-glance">System at
+a glance</a></li>
+<li><a href="#components-and-authority"
+id="toc-components-and-authority">Components and authority</a></li>
+<li><a href="#trust-boundaries" id="toc-trust-boundaries">Trust
+boundaries</a></li>
+<li><a href="#data-safety-and-workload-bounds"
+id="toc-data-safety-and-workload-bounds">Data safety and workload
+bounds</a></li>
+<li><a href="#installation-and-runtime-flow"
+id="toc-installation-and-runtime-flow">Installation and runtime
+flow</a></li>
+<li><a href="#packaging-and-extension-points"
+id="toc-packaging-and-extension-points">Packaging and extension
+points</a></li>
+<li><a href="#decision-and-history-map"
+id="toc-decision-and-history-map">Decision and history map</a></li>
+</ul></li>
+</ul>
+<h1 id="continue-mcp-architecture">continue-mcp architecture</h1>
+<p>This is the maintained description of the system as it exists today.
+Setup and operator commands live in <a
+href="https://github.com/curtisalexander/continue-retool/blob/main/continue-mcp/README.md"><code>continue-mcp/README.md</code></a>;
+why the major choices were made lives in <a
+href="adr/"><code>docs/adr/</code></a>; superseded design exploration is
+preserved in <a
+href="continue-mcp-toolkit.html"><code>docs/history/continue-mcp-toolkit-design.md</code></a>.</p>
+<h2 id="system-at-a-glance">System at a glance</h2>
+<p><code>continue-mcp</code> is one Python distribution that exposes
+eight console commands. Each command starts a separate stdio MCP
+process; sharing a package and virtual environment does not create a
+shared daemon or shared authority.</p>
+<pre class="text"><code>Continue
+  ├─ direct registration ──&gt; hello | shell | search | edit | fs | sql | notes
+  │                           (one process for each selected server)
+  └─ gateway registration ─&gt; gateway ──stdio──&gt; selected downstream servers
+
+installer ──writes──&gt; &lt;workspace&gt;/.continue/{mcpServers,rules,...}
+          └─syncs───&gt; continue-mcp/.venv (once for the unified distribution)</code></pre>
+<p>There are two supported registration topologies:</p>
+<ul>
+<li><strong>Direct:</strong> Continue starts every server selected by
+<code>--only</code>. This is the shortest path for frequently used
+tools.</li>
+<li><strong>Gateway:</strong> Continue starts only
+<code>gateway-mcp</code>; the gateway owns the selected downstream
+processes and exposes them through <code>search</code>,
+<code>describe</code>, and <code>call</code>. A downstream must not also
+be registered directly.</li>
+</ul>
+<p>In both topologies, <code>--only</code> selects active registrations.
+All server code is installed in the shared environment, but unregistered
+entry points never start and receive no tool authority.</p>
+<h2 id="components-and-authority">Components and authority</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Responsibility</th>
+<th>External authority</th>
+</tr>
+</thead>
+<tbody>
+</tbody>
+</table>
+<!-- BEGIN GENERATED COMPONENT INVENTORY -->
+
+<p>| <code>hello-mcp</code> | Connectivity and workspace diagnostics |
+Environment and current-directory metadata only | |
+<code>shell-mcp</code> | Foreground and background commands, polling,
+input, cancellation | Arbitrary subprocesses; intended to remain
+human-approved | | <code>search-mcp</code> | Content and file search
+through ripgrep | Read access within configured jail roots; spawns rg |
+| <code>edit-mcp</code> | Atomic create/edit/move/delete with
+Unicode-tolerant matching | File mutation within configured jail roots |
+| <code>fs-mcp</code> | Bounded line reads and directory listings | Read
+access within configured jail roots | | <code>sql-mcp</code> | SQL
+formatting and linting through sqruff | SQL strings and a subprocess; no
+file-path tool input | | <code>notes-mcp</code> | Bounded
+repository-local Markdown memory | The configured note directory under
+the repository root | | <code>gateway-mcp</code> | Discovery and routing
+for downstream MCP tools | The union of the configured downstream
+servers' authority |</p>
+<!-- END GENERATED COMPONENT INVENTORY -->
+
+<p>| <code>install-workspace.py</code> | Install, verify, and safely
+uninstall workspace configuration | Toolkit environment plus the target
+workspace's <code>.continue/</code> tree |</p>
+<p>The shared <code>continue_mcp_common</code> package is deliberately
+policy-neutral:</p>
+<ul>
+<li><code>config.py</code> parses and clamps numeric environment
+settings.</li>
+<li><code>paths.py</code> resolves workspace-relative paths, Unicode
+path variants, and realpath-based containment.</li>
+<li><code>results.py</code> creates consistent human-readable and
+structured MCP results.</li>
+</ul>
+<p>Server modules retain policy: which roots are allowed, which limits
+apply, and whether an operation is read-only or destructive.</p>
+<h2 id="trust-boundaries">Trust boundaries</h2>
+<p>The primary boundary is the workspace named by
+<code>MCP_WORKSPACE</code>. <code>fs-mcp</code>,
+<code>search-mcp</code>, and <code>edit-mcp</code> resolve symlinks and
+reject a real target outside that root. <code>MCP_JAIL_EXTRA</code> adds
+explicit roots; <code>MCP_JAIL=0</code> disables the boundary. Notes use
+a separate repository-local containment rule and reject absolute names,
+traversal, and escaping storage configurations.</p>
+<p><code>shell-mcp</code> is intentionally not path-jailed: an arbitrary
+command cannot be made safe by checking one path argument. Its tools
+should be human-approved, and it is the explicit escape hatch for
+legitimate work outside the workspace. The gateway does not reduce
+downstream authority, so <code>gateway.call</code> should be treated as
+broadly as the most powerful server behind it.</p>
+<p>Expected filesystem, configuration, and subprocess failures cross the
+MCP boundary as <code>{ok: false, error: ...}</code> results. Exceptions
+are reserved for unexpected defects. Tool annotations describe read-only
+and destructive intent so clients can apply policy mechanically.</p>
+<h2 id="data-safety-and-workload-bounds">Data safety and workload
+bounds</h2>
+<p>File mutations encode the complete replacement before touching the
+destination, write and <code>fsync</code> a uniquely named sibling,
+preserve ordinary mode bits, and use <code>os.replace</code>. Optimistic
+conflict checks prevent a changed source from being silently
+overwritten. Pre-replacement failures leave the original bytes
+intact.</p>
+<p>Model-facing and internal work is bounded by server-specific limits:
+bytes, lines, entries, recursion depth, matches, subprocess time,
+concurrent jobs, retained job state, and spill logs. Limits supplied
+through the environment are validated and clamped. Partial results
+identify truncation and, where useful, a continuation cursor.</p>
+<p>Subprocess servers drain stdout and stderr concurrently. Shell
+commands run in their own process group (or Windows process tree), are
+killed on timeout and server shutdown, and retain incremental decoder
+state across polls. Search and SQL translate spawn, timeout, decode, and
+non-success exit conditions into structured results.</p>
+<h2 id="installation-and-runtime-flow">Installation and runtime
+flow</h2>
+<p><code>install-workspace.py</code> resolves absolute <code>uv</code>,
+toolkit, and workspace paths; runs one root <code>uv sync</code>; and
+installs only the chosen Continue registrations. Generated commands use
+<code>uv run --no-sync --project &lt;toolkit&gt;</code> so GUI startup
+is PATH-independent and never performs a network sync. Gateway mode also
+writes a workspace-owned downstream configuration.</p>
+<p>The installer records owned-file hashes and backups in
+<code>.continue/.continue-mcp-install.json</code> and
+<code>.continue/.continue-mcp-backups/</code>. Reinstall refuses to
+overwrite a local change. Uninstall removes only unchanged
+installer-created files and restores unchanged files that existed before
+installation.</p>
+<p>Doctor mode (<code>--check</code>) parses the installed YAML and
+launches its exact command, arguments, environment, working directory,
+and timeout. It performs the real MCP initialize/tools-list handshake;
+gateway checks also prove that every selected downstream appears in the
+live catalog.</p>
+<h2 id="packaging-and-extension-points">Packaging and extension
+points</h2>
+<p><a
+href="https://github.com/curtisalexander/continue-retool/blob/main/continue-mcp/servers.json"><code>continue-mcp/servers.json</code></a>
+is the server registry. Packaging entry points, installer choices and
+policies, audit and wheel-smoke coverage, CI suites, documentation
+inventories, token examples, and the sample gateway configuration are
+loaded or generated from it.
+<code>scripts/sync_metadata.py --check</code> is the drift gate used by
+CI.</p>
+<p>The <a
+href="https://github.com/curtisalexander/continue-retool/blob/main/continue-mcp/skills/new-mcp-tool/SKILL.md"><code>new-mcp-tool</code>
+skill</a> creates the files, then
+<code>scripts/register_server.py</code> adds one metadata record and
+regenerates every derived surface. Tests have two layers:
+implementation-focused golden tests and MCP-surface tests using
+FastMCP's in-process client. CI runs those suites on Linux, macOS, and
+Windows, then performs installer, doctor, clean-wheel, lint, type,
+audit, and generated-document checks.</p>
+<h2 id="decision-and-history-map">Decision and history map</h2>
+<ul>
+<li><a
+href="adr/0001-unified-distribution.md"><code>ADR-0001</code></a>: one
+distribution with selective activation.</li>
+<li><a
+href="adr/0002-tool-authority-and-workspace-boundaries.md"><code>ADR-0002</code></a>:
+workspace confinement and approval policy.</li>
+<li><a
+href="adr/0003-direct-and-gateway-registration.md"><code>ADR-0003</code></a>:
+direct and progressive-disclosure topologies.</li>
+<li><a
+href="adr/0004-safe-mutation-and-bounded-execution.md"><code>ADR-0004</code></a>:
+atomic mutation and bounded process/output behavior.</li>
+<li><a
+href="continue-mcp-toolkit.html"><code>Historical toolkit design</code></a>:
+original alternatives, experiments, open questions, and dated decision
+log.</li>
+<li><a
+href="continue-mcp-token-strategy.html"><code>Token-cost strategy</code></a>:
+the detailed head-versus-tail cost model.</li>
+</ul>
+</main>
+<footer>
+  Part of <a href="https://github.com/curtisalexander/continue-retool">continue-retool</a> —
+  retooling Continue with our own tools. MIT licensed.
+</footer>
+</body>
+</html>

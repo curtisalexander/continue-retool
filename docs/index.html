@@ -72,15 +72,15 @@
 </header>
 
 <section>
-  <h2>Design docs <span class="badge">read first</span></h2>
-  <p class="sub">The thinking behind the kit — what to replace, and how to keep token cost down.</p>
+  <h2>Documentation <span class="badge">read first</span></h2>
+  <p class="sub">The system as it exists, its token strategy, and the design history behind it.</p>
   <div class="series">
     <div class="doc">
       <div class="num">01</div>
       <div class="body">
-        <p class="t"><a href="./continue-mcp-toolkit.html">MCP Toolkit — Design</a></p>
-        <p class="d">The full design: the background-job shell MCP, the maturin packaging seam, Continue
-        wiring, tool policies, and the "ouroboros" tool-factory skill. Start here.</p>
+        <p class="t"><a href="./architecture.html">Current Architecture</a></p>
+        <p class="d">The maintained system map: processes, trust boundaries, safe writes,
+        installation, packaging, tests, and extension points. Start here.</p>
       </div>
     </div>
     <div class="doc alt">
@@ -91,6 +91,14 @@
         gateway tradeoff for keeping tool schemas cheap at rest.</p>
       </div>
     </div>
+    <div class="doc">
+      <div class="num">03</div>
+      <div class="body">
+        <p class="t"><a href="./continue-mcp-toolkit.html">MCP Toolkit — Design History</a></p>
+        <p class="d">The original alternatives, experiments, dated decision log, and
+        superseded Rust and packaging exploration, retained for context.</p>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -99,26 +107,40 @@
   <p class="sub">Starter MCP servers, in build order. Full source in
   <a href="https://github.com/curtisalexander/continue-retool/tree/main/continue-mcp">continue-mcp/</a>.</p>
   <div class="tools">
+    <!-- BEGIN GENERATED SERVER CARDS -->
     <div class="tool">
       <p class="n">hello-mcp <span class="start">start here</span></p>
-      <p class="d">Proves MCP is enabled in your build: <code>ping</code> &rarr; pong, echo, whoami.</p>
+      <p class="d">Proves MCP is enabled: ping returns pong, plus echo and workspace diagnostics.</p>
     </div>
     <div class="tool">
       <p class="n">shell-mcp</p>
-      <p class="d">The flagship terminal runner — async, background jobs, tree-kill, timeouts.</p>
+      <p class="d">Terminal runner with background jobs, tree-kill, bounded output, and timeouts.</p>
     </div>
     <div class="tool">
       <p class="n">search-mcp</p>
-      <p class="d">ripgrep-backed search; replaces the built-in Grep / Glob search.</p>
+      <p class="d">ripgrep-backed content and file search; replaces built-in Grep and Glob.</p>
     </div>
     <div class="tool">
       <p class="n">edit-mcp</p>
-      <p class="d">Unicode-robust edit; replaces built-in Edit / Create file.</p>
+      <p class="d">Atomic, Unicode-tolerant editing; replaces built-in Edit and Create file.</p>
+    </div>
+    <div class="tool">
+      <p class="n">fs-mcp</p>
+      <p class="d">Bounded line reads and directory listings; replaces built-in Read and List dir.</p>
+    </div>
+    <div class="tool">
+      <p class="n">sql-mcp</p>
+      <p class="d">SQL formatting and linting through sqruff, with Snowflake-oriented defaults.</p>
+    </div>
+    <div class="tool">
+      <p class="n">notes-mcp</p>
+      <p class="d">Repository-local Markdown memory with bounded list, read, search, and writes.</p>
     </div>
     <div class="tool">
       <p class="n">gateway-mcp</p>
-      <p class="d">Progressive disclosure — many tools collapsed behind 3 meta-tools.</p>
+      <p class="d">Progressive disclosure: any number of downstream tools behind three meta-tools.</p>
     </div>
+    <!-- END GENERATED SERVER CARDS -->
     <div class="tool">
       <p class="n">skills/new-mcp-tool</p>
       <p class="d">The tool factory: a skill that scaffolds the next MCP server.</p>

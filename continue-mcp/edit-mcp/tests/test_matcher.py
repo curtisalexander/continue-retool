@@ -113,6 +113,33 @@ def test_replace_all_fuzzy():
     assert n2 == 2 and out2 == "x - Z\nx - Z"
 
 
+def test_replace_all_fuzzy_never_reedits_inserted_text():
+    out, strategy, count = find_and_replace(
+        '“x” “x”', '"x"', '"x" again', replace_all=True,
+    )
+    assert strategy == "fuzzy" and count == 2
+    assert out == '"x" again "x" again'
+
+
+def test_replace_all_fuzzy_preserves_untouched_lines():
+    content = "keep — curly\nreplace — me twice: replace — me\nkeep “quotes”"
+    out, _, count = find_and_replace(
+        content, "replace - me", "done", replace_all=True,
+    )
+    assert count == 2
+    assert out == "keep — curly\ndone twice: done\nkeep “quotes”"
+
+
+def test_fuzzy_match_ending_at_newline_does_not_normalize_next_line():
+    out, strategy, count = find_and_replace(
+        "change — this\nkeep “this” curly\n",
+        "change - this\n",
+        "changed\n",
+    )
+    assert strategy == "fuzzy" and count == 1
+    assert out == "changed\nkeep “this” curly\n"
+
+
 def test_empty_old_string_raises():
     with pytest.raises(EditError, match="empty"):
         find_and_replace("abc", "", "x")

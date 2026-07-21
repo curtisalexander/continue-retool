@@ -89,3 +89,29 @@ def test_unknown_tool_suggests_alternatives(tmp_path, monkeypatch):
     bad = asyncio.run(scenario())
     assert "error" in bad
     assert "demo.upper" in bad.get("did_you_mean", [])
+
+
+def test_startup_keeps_healthy_servers_when_one_is_unavailable(tmp_path, monkeypatch):
+    config = tmp_path / "gateway.config.json"
+    config.write_text(json.dumps({
+        "servers": {
+            "broken": {"command": os.path.join(str(tmp_path), "missing-command")},
+            "demo": {"command": sys.executable, "args": [DOWNSTREAM]},
+        }
+    }), encoding="utf-8")
+    monkeypatch.setenv("GATEWAY_CONFIG", str(config))
+    from gateway_mcp.server import mcp
+    client = Client(mcp)
+
+    async def scenario():
+        async with client as c:
+            found = await c.call_tool("search", {"query": "uppercase"})
+            result = await c.call_tool("call", {
+                "name": "demo.upper", "arguments": {"text": "still works"},
+            })
+            return found.data, result.content[0].text
+
+    found, result = asyncio.run(scenario())
+    assert "broken" in found["unavailable_servers"]
+    assert any(tool["name"] == "demo.upper" for tool in found["tools"])
+    assert result == "STILL WORKS"

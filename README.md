@@ -13,30 +13,34 @@ can't touch anything outside your project.
 
 **Status:** daily-driver software, pure Python throughout, tested
 deterministically (fastmcp in-process client — no LLM in the test loop) on
-Linux/macOS/Windows via CI. Direction decisions live in the
-[decision log](continue-mcp-toolkit.md#decision-log) inside the design doc.
+Linux/macOS/Windows via CI. Start with the [current architecture](ARCHITECTURE.md);
+direction decisions live in the [ADR index](docs/adr/README.md).
 
 ## What's here
 
 - **[`continue-mcp/`](continue-mcp/)** — the code: a starter kit of MCP servers
   you enable in Continue.
-  - `hello-mcp/` — start here; proves MCP is enabled in your build
-  - `shell-mcp/` — the flagship terminal runner (async, background jobs, tree-kill, timeouts)
-  - `search-mcp/` — ripgrep-backed search, replaces built-in Grep/Glob (needs an
-    `rg` binary you provide — see below)
-  - `edit-mcp/` — Unicode-robust edit, replaces built-in Edit/Create file
-  - `fs-mcp/` — line-ranged read + list dir, replaces built-in Read file/List dir
-  - `sql-mcp/` — SQL format/lint via sqruff (Snowflake, lowercase, leading commas)
-  - `notes-mcp/` — repo-local agent memory (index + one markdown file per note)
-  - `rules/` — Continue rules: notes discovery + the rule-authoring meta-rule
-  - `gateway-mcp/` — progressive disclosure: many tools behind 3 meta-tools
+<!-- BEGIN GENERATED SERVER INVENTORY -->
+  - `hello-mcp/` — Start here; proves MCP is enabled in your build
+  - `shell-mcp/` — Terminal runner with background jobs, tree-kill, and timeouts
+  - `search-mcp/` — ripgrep-backed content and file search
+  - `edit-mcp/` — Atomic Unicode-tolerant file editing
+  - `fs-mcp/` — Bounded line reads and directory listings
+  - `sql-mcp/` — SQL formatting and linting through sqruff
+  - `notes-mcp/` — Bounded repository-local Markdown memory
+  - `gateway-mcp/` — Progressive disclosure for downstream MCP tools
+<!-- END GENERATED SERVER INVENTORY -->
   - `skills/new-mcp-tool/` — the "ouroboros" tool factory
-- **[`continue-mcp-toolkit.md`](continue-mcp-toolkit.md)** — the design doc. Read this first.
+- **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — the concise current-state system
+  guide. Read this first.
+- **[`docs/adr/`](docs/adr/)** — accepted architecture decisions; the original
+  design exploration is retained under [`docs/history/`](docs/history/).
 - **[`continue-mcp-token-strategy.md`](continue-mcp-token-strategy.md)** — which
   built-in tools to replace, and the direct-vs-gateway token-cost tradeoff.
 
-See [`continue-mcp/README.md`](continue-mcp/README.md) for the order of
-operations and per-server setup. To wire the whole kit into a project in one
+The servers share one distribution, lockfile, and environment while retaining
+separate commands and processes. See [`continue-mcp/README.md`](continue-mcp/README.md)
+for setup and selective registration. To wire the whole kit into a project in one
 command: `uv run continue-mcp/install-workspace.py /path/to/your/project`
 (and `--check` afterwards runs a doctor that verifies the install end-to-end,
 live MCP handshake included).
@@ -58,15 +62,17 @@ missing binary surfaces at setup rather than on your first search. See
 ## The site
 
 The [project site](https://curtisalexander.github.io/continue-retool/) is served
-from `docs/` via GitHub Pages. The two design docs are rendered from their
-markdown sources with [pandoc](https://pandoc.org) — after editing a `.md`,
+from `docs/` via GitHub Pages. The architecture, strategy, and historical design
+pages are rendered from their markdown sources with [pandoc](https://pandoc.org)
+— after editing a `.md`,
 regenerate the HTML with:
 
 ```bash
 ./build/build-docs.sh   # requires pandoc; run from anywhere
 ```
 
-`docs/index.html` (the landing page) is hand-maintained and not regenerated.
+The landing-page shell is hand-maintained; its server cards are regenerated
+from `continue-mcp/servers.json` by the same command.
 
 ## License
 

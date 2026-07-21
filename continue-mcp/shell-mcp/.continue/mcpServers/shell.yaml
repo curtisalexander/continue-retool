@@ -9,10 +9,10 @@ schema: v1
 mcpServers:
   - name: shell
     command: /absolute/path/to/uv
-    # --project pins the server's uv environment to its package dir, so `cwd` is
+    # --project pins every server to the toolkit's shared uv environment, so `cwd` is
     # NOT needed for the server itself. Set MCP_WORKSPACE to your workspace root:
     # it's the base for relative paths and the default working dir for commands.
-    args: ["run", "--no-sync", "--project", "/absolute/path/to/continue-mcp/shell-mcp", "shell-mcp"]
+    args: ["run", "--no-sync", "--project", "/absolute/path/to/continue-mcp", "shell-mcp"]
     # Continue aborts the initial connect after a short default; a cold first
     # launch (interpreter start + fastmcp import, slower under corp antivirus)
     # can exceed it and show as "Connection timed out". Give it generous room.

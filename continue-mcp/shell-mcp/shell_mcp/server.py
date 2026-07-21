@@ -1,7 +1,7 @@
 """
 shell-mcp — a background-job terminal runner for Continue.dev (and any MCP client).
 
-Implements the shape described in continue-mcp-toolkit.md §2–3:
+Implements the shape described in the historical toolkit design §2–3:
   - background-job model:  start -> poll/output -> kill   (never blocks the transport)
   - bash OR powershell/pwsh/cmd, selected explicitly per call
   - stdout AND stderr captured concurrently (no pipe-buffer deadlock)
@@ -16,26 +16,58 @@ Run:  uv run shell-mcp
 from __future__ import annotations
 
 import asyncio
+import codecs
 import locale
+import math
 import os
 import shutil
 import signal
 import sys
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from mcp.types import TextContent
 
-mcp = FastMCP("shell")
+from continue_mcp_common.config import env_float as _env_float
+from continue_mcp_common.config import env_int as _env_int
 
 # --- configuration ---------------------------------------------------------
-DEFAULT_TIMEOUT = float(os.environ.get("SHELL_MCP_DEFAULT_TIMEOUT", "120"))
-MAX_BUFFER_BYTES = int(os.environ.get("SHELL_MCP_MAX_BUFFER", str(256 * 1024)))
-MAX_FINISHED_JOBS = int(os.environ.get("SHELL_MCP_MAX_FINISHED", "20"))
+DEFAULT_TIMEOUT = _env_float("SHELL_MCP_DEFAULT_TIMEOUT", 120.0, 1.0, 86_400.0)
+MAX_BUFFER_BYTES = _env_int(
+    "SHELL_MCP_MAX_BUFFER", 256 * 1024, 1024, 16 * 1024 * 1024
+)
+MAX_FINISHED_JOBS = _env_int("SHELL_MCP_MAX_FINISHED", 20, 1, 1000)
+MAX_RUNNING_JOBS = _env_int("SHELL_MCP_MAX_RUNNING", 8, 1, 128)
+MIN_TIMEOUT = 0.1
+MAX_TIMEOUT = 86_400.0
 IS_WINDOWS = sys.platform.startswith("win")
+
+
+def _validate_timeout(timeout: float | None, default: float) -> float:
+    value = default if timeout is None else timeout
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("timeout must be a number of seconds")
+    value = float(value)
+    if not math.isfinite(value) or not MIN_TIMEOUT <= value <= MAX_TIMEOUT:
+        raise ValueError(
+            f"timeout must be finite and between {MIN_TIMEOUT} and {MAX_TIMEOUT} seconds"
+        )
+    return value
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    try:
+        yield
+    finally:
+        await _shutdown_jobs()
+
+
+mcp = FastMCP("shell", lifespan=lifespan)
 
 # Where full output goes when the ring buffer has to drop the middle. Pi spills
 # to the system tmpdir, but that would be unreadable HERE: fs-mcp/search-mcp are
@@ -95,6 +127,8 @@ def _decode_slice(data: bytes | bytearray) -> str:
     orphaned continuation bytes at the start, and retry without a partial
     character at the end, before falling back."""
     b = bytes(data)
+    if _ENCODING_OVERRIDE:
+        return decode_output(b)
     i = 0
     while i < min(len(b), 3) and (b[i] & 0xC0) == 0x80:
         i += 1
@@ -110,6 +144,35 @@ def _decode_slice(data: bytes | bytearray) -> str:
             except UnicodeDecodeError:
                 continue
         return decode_output(b)
+
+
+def _incomplete_utf8_suffix(data: bytes | bytearray) -> int:
+    """Return the byte length of a valid-but-incomplete UTF-8 suffix.
+
+    Invalid data is intentionally *not* retained: decode_output() will handle it
+    with the configured platform fallback. Only an otherwise-valid UTF-8 slice
+    ending partway through a character needs to wait for the next pipe read.
+    """
+    b = bytes(data)
+    try:
+        b.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if exc.reason == "unexpected end of data" and exc.end == len(b):
+            return len(b) - exc.start
+    return 0
+
+
+def _incomplete_output_suffix(data: bytes | bytearray) -> int:
+    """Return bytes held by the configured codec's incremental decoder."""
+    if not _ENCODING_OVERRIDE:
+        return _incomplete_utf8_suffix(data)
+    decoder = codecs.getincrementaldecoder(_ENCODING_OVERRIDE)(errors="strict")
+    try:
+        decoder.decode(bytes(data), final=False)
+    except UnicodeDecodeError:
+        return 0
+    pending, _ = decoder.getstate()
+    return len(pending)
 
 
 # --- shell selection + interpreter resolution (§2b) ------------------------
@@ -237,6 +300,7 @@ class RingBuffer:
         self.spill_path: str | None = None  # set once the file actually exists
         self._spill_file = None
         self._pending: list[bytes] = []      # raw chunks not yet on disk
+        self._closed = False
 
     def _open_spill(self) -> None:
         if self._spill_file is not None or not self.spill_target:
@@ -282,24 +346,70 @@ class RingBuffer:
         if self._spill_file is not None:
             self._spill_file.close()
             self._spill_file = None
+        self._closed = True
+
+    def remove_spill(self) -> None:
+        """Close and best-effort remove this buffer's full-output artifact.
+
+        Spill logs live exactly as long as their retained job. Cleanup must not
+        make starting a later command fail (for example, if an operator has
+        already removed the file or made the log directory read-only).
+        """
+        self.close()
+        path = self.spill_path
+        if path is None:
+            return
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        self.spill_path = None
+
+    def _read_range(self, offset: int, end: int) -> str:
+        """Decode the retained portions of logical byte range ``[offset, end)``."""
+        offset = max(0, min(offset, self.total))
+        end = max(offset, min(end, self.total))
+        if not self._dropped:
+            return _decode_slice(self._head[offset:end])
+
+        head_end = len(self._head)
+        tail_start = self.total - len(self._tail)
+        if offset >= tail_start:
+            return _decode_slice(self._tail[offset - tail_start:end - tail_start])
+
+        parts = []
+        if offset < head_end:
+            parts.append(_decode_slice(self._head[offset:min(end, head_end)]))
+        gap_start = max(offset, head_end)
+        gap_end = min(end, tail_start)
+        if gap_end > gap_start:
+            where = f" — full output: {self.spill_path}" if self.spill_path else ""
+            parts.append(f"\n...[{gap_end - gap_start} bytes truncated{where}]...\n")
+        if end > tail_start:
+            parts.append(_decode_slice(self._tail[:end - tail_start]))
+        return "".join(parts)
+
+    def _incremental_end(self) -> int:
+        """Last safe byte cursor while the producer may append more data."""
+        if self._closed or not self.total:
+            return self.total
+        ending = self._tail if self._dropped else self._head
+        return self.total - _incomplete_output_suffix(ending)
+
+    def read_incremental(self, offset: int) -> tuple[str, int]:
+        """Return decoded new output and the cursor safe to acknowledge.
+
+        A pipe read may stop in the middle of a multibyte UTF-8 character. In
+        that case its prefix remains unacknowledged, so the next poll decodes
+        the complete character instead of losing it between two byte cursors.
+        """
+        end = self._incremental_end()
+        return self._read_range(offset, end), end
 
     def read_from(self, offset: int) -> str:
         """Decoded text of the stream from logical byte `offset` to the end.
         Any part of that range that was dropped is replaced by one marker."""
-        offset = max(0, min(offset, self.total))
-        if not self._dropped:
-            return _decode_slice(self._head[offset:])
-        tail_start = self.total - len(self._tail)
-        if offset >= tail_start:
-            return _decode_slice(self._tail[offset - tail_start:])
-        parts = []
-        if offset < len(self._head):
-            parts.append(_decode_slice(self._head[offset:]))
-        gap = tail_start - max(offset, len(self._head))
-        where = f" — full output: {self.spill_path}" if self.spill_path else ""
-        parts.append(f"\n...[{gap} bytes truncated{where}]...\n")
-        parts.append(_decode_slice(self._tail))
-        return "".join(parts)
+        return self._read_range(offset, self.total)
 
     def text(self) -> str:
         return self.read_from(0)
@@ -321,10 +431,12 @@ class Job:
     exit_code: Optional[int] = None
     _readers: list[asyncio.Task] = field(default_factory=list)
     _timeout_task: Optional[asyncio.Task] = None
+    _reaper_task: Optional[asyncio.Task] = None
 
 
 JOBS: dict[str, Job] = {}
 _counter = 0
+_starting_jobs = 0
 
 
 def _next_id() -> str:
@@ -334,11 +446,21 @@ def _next_id() -> str:
 
 
 def _prune_finished() -> None:
-    """Cap how many finished jobs (and their buffers) we keep, so a long
-    daily-driver session can't grow the registry without bound. Running jobs
-    are never pruned; dict insertion order == start order, so oldest go first."""
-    finished = [j for j in JOBS.values() if j.state != "running"]
+    """Cap retained completed jobs, buffers, and spill files.
+
+    A timeout/kill changes state before the process and pipe readers necessarily
+    finish, so only prune after the reaper has completed. Dict insertion order
+    equals start order, which makes removal oldest-first.
+    """
+    finished = [
+        j for j in JOBS.values()
+        if j.state != "running"
+        and j._reaper_task is not None
+        and j._reaper_task.done()
+    ]
     for j in finished[: max(0, len(finished) - MAX_FINISHED_JOBS)]:
+        j.stdout.remove_spill()
+        j.stderr.remove_spill()
         del JOBS[j.job_id]
 
 
@@ -377,6 +499,28 @@ async def _watch_timeout(job: Job, timeout: float) -> None:
         _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
 
 
+async def _shutdown_jobs() -> None:
+    """Kill and reap every child before the MCP server releases its transport."""
+    running = [job for job in JOBS.values() if job.proc.returncode is None]
+    for job in running:
+        job.state = "killed"
+        _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+
+    reapers = [job._reaper_task for job in running if job._reaper_task is not None]
+    if reapers:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*reapers, return_exceptions=True), timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            for job in running:
+                _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+            for task in reapers:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*reapers, return_exceptions=True)
+
+
 # --- rendering: echo the command + output as a terminal-style block --------
 # Returning a ToolResult gives Continue's UI a readable transcript (content)
 # while still handing the model the structured fields (structured_content /
@@ -404,6 +548,26 @@ def _shell_result(cmd: str, snap: dict) -> ToolResult:
     )
 
 
+def _shell_failure(cmd: str, kind: str, error: str, **extra) -> ToolResult:
+    data = {
+        "ok": False,
+        "state": "failed",
+        "error": error,
+        "error_type": kind,
+        **extra,
+    }
+    text = f"❌ {kind}: {error}\n\n```console\n$ {cmd}\n[failed]\n```"
+    return ToolResult(
+        content=[TextContent(type="text", text=text)], structured_content=data
+    )
+
+
+def _start_failure_kind(exc: Exception) -> str:
+    if isinstance(exc, OSError) or "interpreter" in str(exc).lower():
+        return "spawn"
+    return "validation"
+
+
 # --- tools (§2c) -----------------------------------------------------------
 async def _start(
     cmd: str,
@@ -415,9 +579,17 @@ async def _start(
 ) -> dict:
     """Launch the process and register the job. Internal: run()/start() call this;
     only the @mcp.tool wrappers shape the ToolResult the client sees."""
+    global _starting_jobs
     _prune_finished()
+    effective_timeout = _validate_timeout(timeout, DEFAULT_TIMEOUT)
+    running_jobs = sum(job.proc.returncode is None for job in JOBS.values())
+    if running_jobs + _starting_jobs >= MAX_RUNNING_JOBS:
+        raise ValueError(
+            f"shell concurrency limit reached ({MAX_RUNNING_JOBS} running jobs); "
+            "wait for or kill a job before starting another"
+        )
     shell_name = (shell or _default_shell()).lower()
-    argv = build_argv(cmd, shell_name)  # resolves + validates, even on the cmd path
+    argv = build_argv(cmd, shell_name)  # validates even on the cmd path
     # cwd defaults to the workspace, and relative cwd resolves against it — the
     # server's own cwd (wherever Continue launched it) is never the implicit base.
     workspace = os.environ.get("MCP_WORKSPACE")
@@ -443,14 +615,20 @@ async def _start(
         cwd=cwd,
         **kwargs,
     )
-    if IS_WINDOWS and shell_name == "cmd":
-        # cmd.exe parses its command line with its own rules; the \"-escaping
-        # that list-based spawning applies breaks any quoted command. Hand
-        # cmd.exe the raw string instead (ComSpec /c passthrough — ComSpec is
-        # pointed at the resolved cmd.exe at import time above).
-        proc = await asyncio.create_subprocess_shell(cmd, **common)
-    else:
-        proc = await asyncio.create_subprocess_exec(*argv, **common)
+    # Reserve synchronously before the first await so concurrent start calls
+    # cannot all pass the count while their subprocesses are being created.
+    _starting_jobs += 1
+    try:
+        if IS_WINDOWS and shell_name == "cmd":
+            # cmd.exe parses its command line with its own rules; the \"-escaping
+            # that list-based spawning applies breaks any quoted command. Hand
+            # cmd.exe the raw string instead (ComSpec /c passthrough — ComSpec is
+            # pointed at the resolved cmd.exe at import time above).
+            proc = await asyncio.create_subprocess_shell(cmd, **common)
+        else:
+            proc = await asyncio.create_subprocess_exec(*argv, **common)
+    finally:
+        _starting_jobs -= 1
     jid = _next_id()
     root = _spill_root() if SPILL_ENABLED else None
     job = Job(
@@ -458,15 +636,18 @@ async def _start(
         stdout=RingBuffer(spill_target=os.path.join(root, f"{jid}-stdout.log") if root else None),
         stderr=RingBuffer(spill_target=os.path.join(root, f"{jid}-stderr.log") if root else None),
     )
+    stdout = proc.stdout
+    stderr = proc.stderr
+    assert stdout is not None and stderr is not None
     job._readers = [
-        asyncio.create_task(_drain(proc.stdout, job.stdout)),
-        asyncio.create_task(_drain(proc.stderr, job.stderr)),
+        asyncio.create_task(_drain(stdout, job.stdout)),
+        asyncio.create_task(_drain(stderr, job.stderr)),
     ]
     job._timeout_task = asyncio.create_task(
-        _watch_timeout(job, timeout if timeout is not None else DEFAULT_TIMEOUT)
+        _watch_timeout(job, effective_timeout)
     )
-    asyncio.create_task(_reap(job))
     JOBS[job.job_id] = job
+    job._reaper_task = asyncio.create_task(_reap(job))
     return {"job_id": job.job_id, "state": job.state}
 
 
@@ -490,11 +671,14 @@ async def start(
     shell = bash | pwsh | powershell | cmd (default: bash off Windows; on Windows
     pwsh if installed, else powershell). To run a script file, use the shell's
     own call syntax, e.g. PowerShell `& ./Deploy.ps1 -Env prod`, bash `./deploy.sh`."""
-    return _shell_result(
-        cmd,
-        await _start(cmd, shell=shell, cwd=cwd, timeout=timeout, env=env,
-                     interactive=interactive),
-    )
+    try:
+        data = await _start(
+            cmd, shell=shell, cwd=cwd, timeout=timeout, env=env,
+            interactive=interactive,
+        )
+    except (OSError, ValueError) as exc:
+        return _shell_failure(cmd, _start_failure_kind(exc), str(exc))
+    return _shell_result(cmd, data)
 
 
 async def _reap(job: Job) -> None:
@@ -518,19 +702,25 @@ def _last_lines(text: str, n: int) -> str:
 def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
     """Cursors are logical byte offsets into each stream (stable across the
     RingBuffer's truncation), NOT character offsets into the decoded text."""
+    stdout, stdout_cursor = job.stdout.read_incremental(since_out)
+    stderr, stderr_cursor = job.stderr.read_incremental(since_err)
+    timed_out = job.state == "timeout"
     return {
+        "ok": not timed_out,
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
         "runtime_ms": int((time.monotonic() - job.started) * 1000),
-        "stdout": job.stdout.read_from(since_out),
-        "stderr": job.stderr.read_from(since_err),
-        "stdout_cursor": job.stdout.total,
-        "stderr_cursor": job.stderr.total,
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_cursor": stdout_cursor,
+        "stderr_cursor": stderr_cursor,
         # Only present once the buffer actually overflowed and spilled; a job
         # that fit in the buffer has nothing more to offer than what's above.
         "stdout_full_output": job.stdout.spill_path,
         "stderr_full_output": job.stderr.spill_path,
+        "error": "command timed out" if timed_out else None,
+        "error_type": "timeout" if timed_out else None,
     }
 
 
@@ -544,7 +734,13 @@ async def output(
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"no such job: {job_id}")
-    snap = _snapshot(job, since_stdout, since_stderr)
+    try:
+        snap = _snapshot(job, since_stdout, since_stderr)
+    except (UnicodeError, LookupError) as exc:
+        return _shell_failure(
+            job.cmd, "decode", f"could not decode command output: {exc}",
+            job_id=job.job_id,
+        )
     if tail > 0:
         snap["stdout"] = _last_lines(job.stdout.text(), tail)
         snap["stderr"] = _last_lines(job.stderr.text(), tail)
@@ -557,11 +753,15 @@ async def poll(job_id: str) -> ToolResult:
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"no such job: {job_id}")
+    timed_out = job.state == "timeout"
     data = {
+        "ok": not timed_out,
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
         "runtime_ms": int((time.monotonic() - job.started) * 1000),
+        "error": "command timed out" if timed_out else None,
+        "error_type": "timeout" if timed_out else None,
     }
     tail = f"[{data['state']}]" + (f" exit {data['exit_code']}" if data['exit_code'] is not None else "")
     text = f"{data['job_id']}: {tail} · {data['runtime_ms']}ms · $ {job.cmd}"
@@ -619,7 +819,11 @@ async def run(
     bash off Windows; on Windows pwsh if installed, else powershell). The server
     locates the binary. Run a script with the shell's call syntax, e.g.
     `& ./Deploy.ps1`."""
-    started = await _start(cmd, shell=shell, cwd=cwd, timeout=timeout, env=env)
+    try:
+        timeout = _validate_timeout(timeout, 30.0)
+        started = await _start(cmd, shell=shell, cwd=cwd, timeout=timeout, env=env)
+    except (OSError, ValueError) as exc:
+        return _shell_failure(cmd, _start_failure_kind(exc), str(exc))
     job = JOBS[started["job_id"]]
     # Wait on the process itself, not a poll loop. The watchdog fires at
     # `timeout` and kills the tree; the margin here covers the kill landing.
@@ -633,7 +837,13 @@ async def run(
         if job.state != "running":
             break
         await asyncio.sleep(0.05)
-    return _shell_result(cmd, _snapshot(job))
+    try:
+        return _shell_result(cmd, _snapshot(job))
+    except (UnicodeError, LookupError) as exc:
+        return _shell_failure(
+            cmd, "decode", f"could not decode command output: {exc}",
+            job_id=job.job_id,
+        )
 
 
 @mcp.tool(annotations={"openWorldHint": True})

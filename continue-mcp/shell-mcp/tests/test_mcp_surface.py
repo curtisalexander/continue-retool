@@ -9,6 +9,7 @@ import pytest
 
 from fastmcp import Client
 
+from shell_mcp import server
 from shell_mcp.server import IS_WINDOWS, mcp
 
 PY = sys.executable
@@ -106,6 +107,26 @@ def test_start_poll_output_lifecycle_over_mcp():
     assert st["state"] == "exited" and st["exit_code"] == 0
     assert "lifecycle" in out["stdout"]
     assert any(j["job_id"] == st["job_id"] for j in listing)
+
+
+def test_client_shutdown_kills_running_job():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def scenario():
+        async with Client(mcp) as c:
+            started = await c.call_tool("start", {
+                "cmd": f'"{PY}" -c "import time; time.sleep(30)"',
+                "shell": sh,
+                "timeout": 60,
+            })
+            job_id = started.data["job_id"]
+        return server.JOBS[job_id]
+
+    job = asyncio.run(scenario())
+    assert job.state == "killed"
+    assert job.proc.returncode is not None
 
 
 def test_unknown_job_is_a_tool_error():

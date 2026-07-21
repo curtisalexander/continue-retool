@@ -14,14 +14,21 @@ tools make the direct path the easy path.
 
 Design points:
 
-- **Paging built in.** Every read returns `total_lines`, `truncated`, and — when
-  truncated — `next_start_line` (echoed into the output block too), so the agent
-  knows the exact follow-up call that fetches the rest, no scripting needed.
+- **Paging built in.** Every read returns `truncated` and — when truncated —
+  `next_start_line` (echoed into the output block too), so the agent knows the
+  exact follow-up call that fetches the rest, no scripting needed. Reads stop
+  after one look-ahead line proves another page exists instead of scanning the
+  rest of a large file merely to count it. `total_lines` is therefore exact only
+  when `total_lines_exact` is true; otherwise it is null and
+  `total_lines_at_least` reports the observed lower bound.
 - **Hard caps that actually bind.** The line cap and the per-line cap *multiply*
   (2000 lines × 2000 chars is ~4MB), so on their own they don't bound the result
   — a merely *wide* file still floods the context. The 50KB total-byte cap
   (`FS_MCP_MAX_BYTES`) is the one that binds; `truncated_by` reports which limit
-  hit first. Listings are capped at `FS_MCP_MAX_ENTRIES` entries.
+  hit first. Listings are capped at `FS_MCP_MAX_ENTRIES` output entries, 5,000
+  scanned entries, and 20 levels of recursion. Unreadable entries produce
+  bounded `errors` and an explicit `partial` result instead of aborting the
+  tool call.
 - **Binary files are refused, not mangled.** A NUL byte or a high-byte-dense,
   non-UTF-8 head means the file is returned as a structured error naming its
   size, instead of replacement-character mojibake the model can't identify.

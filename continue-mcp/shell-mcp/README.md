@@ -3,7 +3,8 @@
 Replaces Continue's built-in `run_terminal_command` with a background-job model
 that never blocks the MCP transport: **start → poll/output → kill**, plus a
 synchronous `run` convenience for quick one-liners. Design rationale lives in
-[`../../continue-mcp-toolkit.md`](../../continue-mcp-toolkit.md) §2–3.
+[`../../docs/history/continue-mcp-toolkit-design.md`](../../docs/history/continue-mcp-toolkit-design.md)
+§2–3.
 
 ## Tools
 
@@ -48,7 +49,10 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
   resolves against it. `env` overlays the server's environment per call.
 - **Bounded registry.** Finished jobs beyond `SHELL_MCP_MAX_FINISHED`
   (default 20) are pruned, oldest first — a week-long session can't leak
-  buffers.
+  buffers or spill logs. Spill logs remain available while their jobs are
+  retained and are removed when those jobs are pruned. At most
+  `SHELL_MCP_MAX_RUNNING` commands run concurrently (default 8), and server
+  shutdown kills and reaps every remaining process group.
 
 ## Setup
 

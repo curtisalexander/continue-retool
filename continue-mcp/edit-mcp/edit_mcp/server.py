@@ -18,20 +18,34 @@ Run:  uv run edit-mcp
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
-import re
 import shutil
-import unicodedata
+import stat
+import tempfile
+from dataclasses import dataclass
 from typing import Union
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from mcp.types import TextContent
+
+from continue_mcp_common.config import env_int as _env_int
+from continue_mcp_common.paths import jail_error
+from continue_mcp_common.paths import resolve_existing as _resolve_existing
+from continue_mcp_common.paths import resolve_path as _resolve
 
 from .matcher import EditError, apply_edits, find_and_replace
 
 mcp = FastMCP("edit")
+
+
+# Hashing is the strongest cheap conflict check for ordinary source files. Keep
+# the second read bounded; unusually large files use the stat fingerprint only.
+CONFLICT_HASH_MAX_BYTES = _env_int(
+    "EDIT_MCP_CONFLICT_HASH_MAX_BYTES", 1024 * 1024, 0, 64 * 1024 * 1024
+)
 
 
 def _result(summary: str, data: dict, diff: str = "") -> ToolResult:
@@ -46,15 +60,6 @@ def _result(summary: str, data: dict, diff: str = "") -> ToolResult:
     )
 
 
-def _resolve(path: str) -> str:
-    """Relative paths resolve against MCP_WORKSPACE (falls back to server cwd),
-    so they mean the same thing no matter where Continue launched this process."""
-    if os.path.isabs(path):
-        return path
-    base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
-    return os.path.join(base, path)
-
-
 # --- Unicode-robust path resolution ----------------------------------------
 # matcher.py fixes "the model's old_string looks identical but differs in bytes"
 # for file CONTENT. The same thing happens to the FILENAME, where it surfaces as
@@ -63,52 +68,6 @@ def _resolve(path: str) -> str:
 #   NFC vs NFD  — HFS+/APFS store decomposed ("é" = e + U+0301); models emit NFC
 #   ' vs U+2019 — screenshot names use the curly apostrophe ("Capture d'écran")
 #   NBSP + AM/PM — macOS screenshots put U+202F, not a space, before AM/PM
-# Ported from pi's packages/coding-agent/src/core/tools/path-utils.ts. Kept in
-# sync with fs-mcp's copy by hand — each server stays standalone by design.
-_NARROW_NBSP = " "
-_AMPM = re.compile(r" (AM|PM)\.", re.IGNORECASE)
-
-
-def _path_variants(path: str) -> list[str]:
-    """Byte-different spellings of `path` to try when the literal one misses.
-    Deduped, literal path excluded.
-
-    The three transforms are independent, so this takes their cross product
-    rather than a fixed ladder. Pi hand-picks four rungs (nfd, curly, nfd+curly,
-    am/pm) and so can't match a name that needs three at once — which is exactly
-    the French macOS screenshot its own comment cites: curly apostrophe AND
-    narrow NBSP AND NFD. The extra combinations cost only stat calls, and only
-    on the miss path, where we were about to fail anyway."""
-    quoted = [path, path.replace("'", "’")]
-    spaced = []
-    for p in quoted:
-        spaced.append(p)
-        alt = _AMPM.sub(_NARROW_NBSP + r"\1.", p)
-        if alt != p:
-            spaced.append(alt)
-    seen = {path}
-    out = []
-    for p in spaced:
-        for form in (p, unicodedata.normalize("NFD", p), unicodedata.normalize("NFC", p)):
-            if form not in seen:
-                seen.add(form)
-                out.append(form)
-    return out
-
-
-def _resolve_existing(path: str) -> str:
-    """_resolve, then fall back to Unicode variants if nothing is there. Only for
-    paths that must ALREADY exist (edit/delete/move source) — never for a path
-    being created, where the literal spelling the caller asked for is the answer."""
-    resolved = _resolve(path)
-    if os.path.exists(resolved):
-        return resolved
-    for variant in _path_variants(resolved):
-        if os.path.exists(variant):
-            return variant
-    return resolved
-
-
 # --- workspace jail (default ON) --------------------------------------------
 # The recommended tool policy runs this server on Automatic — no human approval
 # per call — so a prompt-injected "read ~/.ssh/id_rsa" must fail closed, not
@@ -117,43 +76,32 @@ def _resolve_existing(path: str) -> str:
 # from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
 # sanctioned escape hatch for a legitimate out-of-workspace file is the shell
 # tool, which is approval-gated by policy.
-def _jail_roots() -> list[str]:
-    if os.environ.get("MCP_JAIL", "1").strip().lower() in ("0", "false", "off", "no"):
-        return []
-    roots = [os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())]
-    for extra in (os.environ.get("MCP_JAIL_EXTRA") or "").split(os.pathsep):
-        if extra.strip():
-            roots.append(os.path.abspath(extra.strip()))
-    return [os.path.normcase(os.path.realpath(r)) for r in roots]
-
-
-def jail_error(path: str) -> str | None:
-    """None if `path` is allowed; else a model-facing refusal that names the
-    escalation paths (ask the user / approval-gated shell)."""
-    roots = _jail_roots()
-    if not roots:
-        return None
-    real = os.path.normcase(os.path.realpath(path))
-    for root in roots:
-        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
-            return None
-    return (
-        f"path is outside the workspace jail: {path} (workspace: "
-        f"{os.environ.get('MCP_WORKSPACE') or os.getcwd()}). This tool only "
-        "touches the workspace (MCP_JAIL_EXTRA adds roots; MCP_JAIL=0 "
-        "disables). For a legitimate outside file, ask the user or use a "
-        "shell command, which requires approval."
-    )
-
-
 # --- file IO that preserves bytes we don't touch ---------------------------
-def _read(path: str) -> tuple[str, str]:
-    """Returns (content, encoding).
+class FileConflictError(Exception):
+    """The destination changed after this operation read it."""
+
+
+@dataclass(frozen=True)
+class FileVersion:
+    stat_key: tuple[int, int, int, int, int]
+    digest: bytes | None
+
+
+def _stat_key(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _digest(raw: bytes) -> bytes:
+    return hashlib.blake2b(raw, digest_size=16).digest()
+
+
+def _read(path: str) -> tuple[str, str, FileVersion]:
+    """Returns (content, encoding, version).
 
     Concurrency note: the tools below do a synchronous read-modify-write —
-    `before, enc = _read(path)` ... `_write(path, after, enc)` with NO `await`
-    between the read and the write. That's what makes same-file edits safe under
-    asyncio without a mutation queue (Pi needs one because Node fs is async).
+    `_read(path)` ... `_write(path, ...)` with NO `await` between the read and
+    the write. That's what makes same-file edits safe under asyncio without a
+    mutation queue (Pi needs one because Node fs is async).
     Keep it that way: an `await` inserted between _read and _write here reopens
     the lost-update race and would require serializing writes per path.
 
@@ -164,18 +112,108 @@ def _read(path: str) -> tuple[str, str]:
     the read→write round-trip preserves every byte). Line endings and BOM are
     the matcher's job, so no newline translation happens here."""
     with open(path, "rb") as f:
+        before = os.fstat(f.fileno())
         raw = f.read()
+        after = os.fstat(f.fileno())
+    if _stat_key(before) != _stat_key(after):
+        raise FileConflictError(f"file changed while it was being read: {path}")
+    version = FileVersion(
+        stat_key=_stat_key(after),
+        digest=_digest(raw) if len(raw) <= CONFLICT_HASH_MAX_BYTES else None,
+    )
     for enc in ("utf-8", "cp1252", "latin-1"):
         try:
-            return raw.decode(enc), enc
+            return raw.decode(enc), enc, version
         except UnicodeDecodeError:
             continue
     raise AssertionError("unreachable: latin-1 decodes any byte string")
 
 
-def _write(path: str, content: str, encoding: str = "utf-8") -> None:
-    with open(path, "w", encoding=encoding, newline="") as f:
-        f.write(content)
+def _sync_parent(path: str) -> None:
+    """Best-effort directory fsync so a completed rename survives a crash."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _verify_unchanged(path: str, expected: FileVersion) -> None:
+    """Cheap bounded optimistic-concurrency check immediately before replace."""
+    try:
+        if expected.digest is None:
+            current = _stat_key(os.stat(path))
+            unchanged = current == expected.stat_key
+        else:
+            # Ordinary source files take this stronger path. The extra read is
+            # capped by CONFLICT_HASH_MAX_BYTES; metadata-only changes are okay.
+            with open(path, "rb") as f:
+                raw = f.read(CONFLICT_HASH_MAX_BYTES + 1)
+            unchanged = len(raw) <= CONFLICT_HASH_MAX_BYTES and _digest(raw) == expected.digest
+    except FileNotFoundError:
+        unchanged = False
+    if not unchanged:
+        raise FileConflictError(
+            f"file changed after it was read: {path}; reread it and retry the edit"
+        )
+
+
+def _write(
+    path: str,
+    content: str,
+    encoding: str = "utf-8",
+    expected_version: FileVersion | None = None,
+) -> None:
+    """Encode first, then atomically replace `path` from a sibling temp file.
+
+    A sibling stays on the destination filesystem, which is required for atomic
+    os.replace(). Resolve the final symlink so editing a safe in-workspace link
+    updates its target rather than replacing the link itself.
+    """
+    payload = content.encode(encoding)  # fail before touching the destination
+    target = os.path.realpath(path)
+    parent = os.path.dirname(os.path.abspath(target))
+    os.makedirs(parent, exist_ok=True)
+    previous_mode = None
+    try:
+        previous_mode = stat.S_IMODE(os.stat(target).st_mode)
+    except FileNotFoundError:
+        pass
+
+    fd, temp_path = tempfile.mkstemp(
+        dir=parent, prefix=f".{os.path.basename(target)}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            fd = -1
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        if previous_mode is not None:
+            os.chmod(temp_path, previous_mode)
+        if expected_version is not None:
+            _verify_unchanged(target, expected_version)
+        os.replace(temp_path, target)
+        _sync_parent(parent)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def _write_error(path: str, exc: OSError | UnicodeError | FileConflictError) -> ToolResult:
+    error = f"could not safely write {path}: {exc}"
+    return _result(f"❌ {error}", {"ok": False, "path": path, "error": error})
 
 
 def _preview(before: str, after: str, path: str, max_lines: int = 40) -> str:
@@ -208,13 +246,19 @@ async def edit(
     if not os.path.isfile(path):
         return _result(f"❌ file not found: {path}",
                        {"ok": False, "path": path, "error": f"file not found: {path}"})
-    before, encoding = _read(path)
+    try:
+        before, encoding, version = _read(path)
+    except (OSError, FileConflictError) as e:
+        return _write_error(path, e)
     try:
         after, strategy, count = find_and_replace(before, old_string, new_string, replace_all)
     except EditError as e:
         return _result(f"❌ edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
     if not dry_run:
-        _write(path, after, encoding)
+        try:
+            _write(path, after, encoding, expected_version=version)
+        except (OSError, UnicodeError, FileConflictError) as e:
+            return _write_error(path, e)
     diff = _preview(before, after, path)
     data = {
         "ok": True,
@@ -267,13 +311,19 @@ async def multi_edit(
     if not os.path.isfile(path):
         return _result(f"❌ file not found: {path}",
                        {"ok": False, "path": path, "error": f"file not found: {path}"})
-    before, encoding = _read(path)
+    try:
+        before, encoding, version = _read(path)
+    except (OSError, FileConflictError) as e:
+        return _write_error(path, e)
     try:
         after, results = apply_edits(before, _coerce_edits(edits))
     except EditError as e:
         return _result(f"❌ multi_edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
     if not dry_run:
-        _write(path, after, encoding)
+        try:
+            _write(path, after, encoding, expected_version=version)
+        except (OSError, UnicodeError, FileConflictError) as e:
+            return _write_error(path, e)
     diff = _preview(before, after, path)
     data = {"ok": True, "path": path, "edits": results, "encoding": encoding,
             "dry_run": dry_run, "diff": diff}
@@ -293,9 +343,10 @@ async def create_file(path: str, content: str, overwrite: bool = False) -> ToolR
             f"❌ file exists: {path} (pass overwrite=true to replace)",
             {"ok": False, "path": path, "error": "file exists (pass overwrite=true to replace)"},
         )
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
-    _write(path, content)
+    try:
+        _write(path, content)
+    except (OSError, UnicodeError) as e:
+        return _write_error(path, e)
     n = len(content.encode("utf-8"))
     diff = _preview("", content, path)
     return _result(f"Created {path} ({n} bytes)", {"ok": True, "path": path, "bytes": n}, diff)

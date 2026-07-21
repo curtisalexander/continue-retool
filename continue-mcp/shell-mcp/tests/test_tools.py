@@ -1,7 +1,7 @@
 """
 Golden tests for shell-mcp. Run:  uv run pytest  (from shell-mcp/)
 
-Covers the promises made in continue-mcp-toolkit.md §2:
+Covers the shell lifecycle promises recorded in the historical toolkit design §2:
   - stdout / stderr capture and exit codes
   - server-enforced timeout that KILLS and REPORTS (state == "timeout")
   - the #1 bug: kill must terminate the whole PROCESS TREE, not just the top proc
@@ -23,6 +23,29 @@ from shell_mcp import server
 from shell_mcp.server import IS_WINDOWS, RingBuffer, build_argv
 
 PY = sys.executable
+
+
+def test_numeric_environment_limits_are_defaulted_and_clamped(monkeypatch):
+    monkeypatch.setenv("SHELL_TEST_INT", "bad")
+    assert server._env_int("SHELL_TEST_INT", 20, 1, 100) == 20
+    monkeypatch.setenv("SHELL_TEST_INT", "0")
+    assert server._env_int("SHELL_TEST_INT", 20, 1, 100) == 1
+    monkeypatch.setenv("SHELL_TEST_FLOAT", "inf")
+    assert server._env_float("SHELL_TEST_FLOAT", 30.0, 1.0, 300.0) == 30.0
+    monkeypatch.setenv("SHELL_TEST_FLOAT", "999")
+    assert server._env_float("SHELL_TEST_FLOAT", 30.0, 1.0, 300.0) == 300.0
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), True, "5"])
+def test_timeout_validation_rejects_invalid_values(timeout):
+    with pytest.raises(ValueError, match="timeout must"):
+        server._validate_timeout(timeout, 30.0)
+
+
+def test_timeout_validation_accepts_bounds_and_default():
+    assert server._validate_timeout(None, 30.0) == 30.0
+    assert server._validate_timeout(server.MIN_TIMEOUT, 30.0) == server.MIN_TIMEOUT
+    assert server._validate_timeout(server.MAX_TIMEOUT, 30.0) == server.MAX_TIMEOUT
 
 
 def default_shell():
@@ -120,6 +143,35 @@ def test_ring_buffer_cursor_mid_multibyte_char():
     assert out == "é" * 9
 
 
+def test_incremental_cursor_retains_partial_multibyte_character():
+    rb = RingBuffer(cap=10_000)
+    encoded = "😀".encode("utf-8")
+
+    rb.write(encoded[:2])
+    first, cursor = rb.read_incremental(0)
+    assert first == ""
+    assert cursor == 0
+
+    rb.write(encoded[2:])
+    second, cursor = rb.read_incremental(cursor)
+    assert second == "😀"
+    assert cursor == len(encoded)
+
+
+def test_incremental_cursor_releases_incomplete_bytes_when_stream_closes():
+    rb = RingBuffer(cap=10_000)
+    rb.write(b"ok\xe2")
+
+    running, cursor = rb.read_incremental(0)
+    assert running == "ok"
+    assert cursor == 2
+
+    rb.close()
+    final, cursor = rb.read_incremental(cursor)
+    assert final
+    assert cursor == 3
+
+
 def test_finished_jobs_are_pruned(monkeypatch):
     sh = default_shell()
     if sh is None:
@@ -134,6 +186,103 @@ def test_finished_jobs_are_pruned(monkeypatch):
 
     finished = asyncio.run(scenario())
     assert finished <= 3  # prune runs on each start: 2 kept + the newest
+
+
+def test_pruning_removes_spill_logs(tmp_path, monkeypatch):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    monkeypatch.setattr(server, "MAX_FINISHED_JOBS", 1)
+    monkeypatch.setattr(server, "SPILL_DIR", str(tmp_path))
+
+    async def scenario():
+        server.JOBS.clear()
+        noisy = f'"{PY}" -c "print(\'x\' * 300000)"'
+        first = (await server.run(noisy, shell=sh, timeout=15)).structured_content
+        second = (await server.run(noisy, shell=sh, timeout=15)).structured_content
+        first_paths = (first["stdout_full_output"], first["stderr_full_output"])
+        assert first_paths[0] and os.path.exists(first_paths[0])
+        await server.run(f'"{PY}" -c "print(1)"', shell=sh, timeout=15)
+        return first["job_id"], second["job_id"], first_paths
+
+    first_id, second_id, first_paths = asyncio.run(scenario())
+    assert first_id not in server.JOBS
+    assert second_id in server.JOBS
+    assert all(path is None or not os.path.exists(path) for path in first_paths)
+
+
+def test_pruning_waits_for_reaper_after_kill_state(monkeypatch):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    monkeypatch.setattr(server, "MAX_FINISHED_JOBS", 1)
+
+    async def scenario():
+        server.JOBS.clear()
+        started = await server._start(
+            f'"{PY}" -c "import time; time.sleep(30)"', shell=sh, timeout=60
+        )
+        job = server.JOBS[started["job_id"]]
+        job.state = "killed"
+        server._prune_finished()
+        retained_while_reaping = job.job_id in server.JOBS
+        await server._shutdown_jobs()
+        return retained_while_reaping
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_concurrency_limit_reserves_slots_before_spawn(monkeypatch):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    monkeypatch.setattr(server, "MAX_RUNNING_JOBS", 1)
+
+    async def scenario():
+        server.JOBS.clear()
+        results = await asyncio.gather(
+            server._start(
+                f'"{PY}" -c "import time; time.sleep(30)"', shell=sh, timeout=60
+            ),
+            server._start(
+                f'"{PY}" -c "import time; time.sleep(30)"', shell=sh, timeout=60
+            ),
+            return_exceptions=True,
+        )
+        await server._shutdown_jobs()
+        return results
+
+    results = asyncio.run(scenario())
+    started = [result for result in results if isinstance(result, dict)]
+    rejected = [result for result in results if isinstance(result, ValueError)]
+    assert len(started) == 1
+    assert len(rejected) == 1
+    assert "concurrency limit reached" in str(rejected[0])
+    job = server.JOBS[started[0]["job_id"]]
+    assert job.state == "killed" and job.proc.returncode is not None
+
+
+def test_shutdown_kills_and_reaps_every_running_job():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def scenario():
+        server.JOBS.clear()
+        ids = []
+        for _ in range(2):
+            started = await server._start(
+                f'"{PY}" -c "import time; time.sleep(30)"', shell=sh, timeout=60
+            )
+            ids.append(started["job_id"])
+        await server._shutdown_jobs()
+        return [server.JOBS[job_id] for job_id in ids]
+
+    jobs = asyncio.run(scenario())
+    assert all(job.state == "killed" for job in jobs)
+    assert all(job.proc.returncode is not None for job in jobs)
+    assert all(job.stdout._spill_file is None for job in jobs)
+    assert all(job.stderr._spill_file is None for job in jobs)
 
 
 def test_run_honors_cwd(tmp_path):
@@ -261,6 +410,41 @@ def test_timeout_kills_and_reports():
 
     st = asyncio.run(scenario())
     assert st["state"] == "timeout"
+    assert st["ok"] is False and st["error_type"] == "timeout"
+
+
+def test_spawn_failure_is_a_structured_result(monkeypatch):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def fail_spawn(*_args, **_kwargs):
+        raise FileNotFoundError("interpreter disappeared")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_spawn)
+    res = asyncio.run(server.start("echo hi", shell=sh)).structured_content
+    assert res["ok"] is False
+    assert res["state"] == "failed"
+    assert res["error_type"] == "spawn"
+
+
+def test_output_decode_failure_is_a_structured_result(monkeypatch):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def scenario():
+        result = await server.run(
+            f'"{PY}" -c "print(1)"', shell=sh, timeout=15
+        )
+        job_id = result.structured_content["job_id"]
+        monkeypatch.setattr(server, "_ENCODING_OVERRIDE", "not-a-codec")
+        server.JOBS[job_id].stdout.write(b"more")
+        return (await server.output(job_id)).structured_content
+
+    res = asyncio.run(scenario())
+    assert res["ok"] is False
+    assert res["error_type"] == "decode"
 
 
 def test_kill_terminates_process_tree(tmp_path):

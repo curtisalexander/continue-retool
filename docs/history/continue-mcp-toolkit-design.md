@@ -1,5 +1,10 @@
 # Replacing Continue's Tools with Your Own MCP Toolkit
 
+> Historical design record. This document preserves the exploration and dated
+> decision log that led to the current implementation. For the maintained
+> system description, see [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md); for
+> accepted decisions, see [`../adr/`](../adr/).
+
 *Working design doc, 2026-07-01. Covers: how tool use works in a Continue.dev
 (VS Code) coding agent, why a local MCP server is the "native" way to own your
 tools, how to build a terminal-runner MCP (bash **and** PowerShell), whether the
@@ -17,6 +22,7 @@ a framework + skill for spawning new tools rapidly — the "ouroboros."*
 | **First implementation language** | **Python + FastMCP.** Spawn via `asyncio.create_subprocess_exec` with a **new process group / job object** so you can kill the whole child tree. | Fastest path to working. The bottleneck is the child process, not the harness — Python is not the constraint here. |
 | **When to add Rust** | ~~Selectively, via maturin/PyO3~~ **Never (decision log, 2026-07-06).** The toolkit is pure Python; CPU-heavy work shells out to proven native binaries (e.g. `rg`). | Simpler builds, one language, and the profiler never made the case. §3b/§4 kept as historical analysis. |
 | **Token minimization** | A **gateway/dispatcher MCP** (progressive disclosure) + terse schemas, instead of exposing 40 fat tools at once. | Continue loads *every* MCP tool schema up front; that's the token tax you're feeling. Hide tools behind a search/dispatch tool. |
+| **Packaging** | One `continue-mcp` distribution and environment, with separate server entry points and selective registration. | One lock/release/shared-helper surface removes drift; installed-but-unregistered code has no runtime authority. |
 | **Rapid tool creation** | A **cookiecutter template + a `new-mcp-tool` skill** that hands the LLM the pattern, an example, and tests. | Each FastMCP tool is one decorated function → trivial to codegen. This is your ouroboros. |
 
 ### Decision log
@@ -24,6 +30,19 @@ a framework + skill for spawning new tools rapidly — the "ouroboros."*
 Dated, newest-first. Where a later entry contradicts earlier prose in this doc,
 **the decision log wins** — superseded sections are kept for the reasoning, not
 as the plan.
+
+**2026-07-21**
+
+- **Unified packaging; selective activation, not selective files on disk.** The
+  eight MCP servers now ship as one `continue-mcp` project with one `uv.lock`,
+  one virtual environment, and separate console entry points/processes. The
+  installer still accepts `--only`, but it controls which servers Continue
+  registers (or the gateway owns), not which modules are installed. Common
+  limit, path-containment, Unicode-path, and result helpers now have one runtime
+  implementation. This supersedes the July 15 self-contained-project decision:
+  keeping unused code inert is valuable; maintaining separately copyable server
+  directories was not valuable enough to justify duplicated safety logic,
+  lockfiles, syncs, and releases.
 
 **2026-07-17 (later, sql/hello review)**
 
@@ -137,8 +156,8 @@ as the plan.
     for a path being *created*, where the literal spelling is the answer. We take
     the cross product of the three transforms rather than Pi's fixed four-rung
     ladder, which can't match a name needing all three at once (the French
-    screenshot Pi's own comment cites). Kept as per-server copies, consistent
-    with the `_resolve`/`_result` duplication decision below.
+    screenshot Pi's own comment cites). These variants now live in the shared
+    path module used by both fs and edit.
   - **Not adopted: a file-mutation queue.** Pi serializes same-file writes
     because Node fs is async; our edit is a synchronous read-modify-write with no
     `await` between read and write, so asyncio can't interleave it. Verified
@@ -177,11 +196,9 @@ as the plan.
   - **MCP tool annotations adopted toolkit-wide.** Read-only tools carry
     `readOnlyHint`, destructive ones `destructiveHint`, so a client can derive
     the Ask-First/Automatic split mechanically; the surface tests assert it.
-  - **`_result`/`_resolve` duplication is deliberate.** Each server stays a
-    self-contained uv project (no shared internal package to version and sync);
-    the cost is ~20 duplicated lines per server, and conformance is enforced by
-    the shared surface-test assertions instead of shared code. Revisit only if
-    the copies actually diverge.
+  - **Historical: `_result`/`_resolve` duplication was deliberate.** This was
+    superseded on 2026-07-21 by the unified distribution and shared runtime
+    helpers after the safety pass made their contracts concrete.
   - **Cost is measured, not estimated.** `bench/audit.py` prints per-server
     cold-start and per-tool resting token cost (CI prints it every run);
     `install-workspace.py --check` is a doctor that ends with a live MCP
@@ -243,7 +260,7 @@ as the plan.
   story (no API key, no hub access); LLM tool-selection behavior is accepted as
   untested.
 - **Transitioning from sketches to daily-driver software.** fastmcp is pinned
-  (`>=3,<4`), `uv.lock` files are committed, CI runs a 3-OS matrix.
+  (`>=3,<4`), the root `uv.lock` is committed, and CI runs a 3-OS matrix.
 
 **2026-07-01**
 
@@ -667,7 +684,8 @@ and **stop the prompt bloat**. Two things to understand first.
 
 > **For the full "which tools go direct vs. behind the gateway" strategy — the
 > head/tail tradeoff, the token math, the ladder of levers, and a worked example —
-> see the companion doc [`continue-mcp-token-strategy.md`](continue-mcp-token-strategy.md).**
+> see the companion doc
+> [`continue-mcp-token-strategy.md`](../../continue-mcp-token-strategy.md).**
 > The short version: decide each tool by `schema_size × (1 − usage)` — big and rare
 > → gateway; small or constant → direct.
 
@@ -771,12 +789,11 @@ decorated function*, codegen is genuinely easy here.
 
 ### 6a. The template (cookiecutter)
 
-One repo layout, reused for every tool — pure Python, hatchling build, `uv` run
-(search-mcp is the reference implementation):
+One server layout, added to the toolkit's root hatchling project and run with
+`uv` (search-mcp is the reference implementation):
 
 ```text
 <name>-mcp/
-  pyproject.toml            # hatchling backend, console-script entry, fastmcp dep
   <name>_mcp/
     server.py               # FastMCP() + @mcp.tool functions (terse descriptions)
   tests/
@@ -786,6 +803,10 @@ One repo layout, reused for every tool — pure Python, hatchling build, `uv` ru
     mcpServers/<name>.yaml   # ready-to-drop-in Continue wiring
   README.md                 # one paragraph + the tool list
 ```
+
+The root `pyproject.toml`, installer registry, audit, wheel smoke test, CI loop,
+and documentation inventory are updated together; new servers do not receive a
+separate project, lockfile, or virtual environment.
 
 ### 6b. The skill (`new-mcp-tool`) — the ouroboros loop
 

@@ -29,8 +29,8 @@ brew install ripgrep            # or: apt install ripgrep / choco install ripgre
 # B. A global prebuilt rg via uv (works on Windows too; survives project re-syncs):
 uv tool install ripgrep-bin     # puts `rg` on your PATH (e.g. ~/.local/bin/rg)
 
-# C. Into THIS server's venv only, via the optional extra:
-uv sync --project <toolkit>/search-mcp --extra rg
+# C. Into the toolkit's shared venv, via the optional extra:
+uv sync --project <toolkit>/continue-mcp --extra rg
 
 rg --version                    # confirm whichever you chose is found
 ```
@@ -51,9 +51,9 @@ error that lists every one of these fixes — and `install-workspace.py --check`
 ## 2. Install and run the MCP
 
 ```bash
-cd search-mcp
-uv run pytest        # unit tests always run; integration tests need rg installed
-uv run search-mcp    # starts the stdio server (Continue launches this for you)
+cd <toolkit>/continue-mcp
+uv run --extra test pytest -q search-mcp/tests  # integration tests need rg installed
+uv run search-mcp                            # Continue launches this for you
 ```
 
 ## 3. Wire it into Continue and retire the built-ins
@@ -92,5 +92,5 @@ search.files({ "glob": ["*.ts", "!**/dist/**"] })
 - **Timeout** (`SEARCH_MCP_TIMEOUT`, default 30s) kills a runaway search and returns
   whatever was collected with `timed_out: true`.
 - **Shelling out to `rg` is the design**, not a stopgap: the toolkit is pure Python
-  by decision (see the decision log in `../../continue-mcp-toolkit.md`), and
+  by decision (see the records in `../../docs/adr/`), and
   CPU-heavy work belongs in proven native binaries invoked as subprocesses.

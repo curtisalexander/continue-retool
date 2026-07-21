@@ -24,41 +24,33 @@ import shutil
 from typing import Optional
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
+from fastmcp.tools import ToolResult
+
+from continue_mcp_common.config import env_float as _env_float
+from continue_mcp_common.config import env_int as _env_int
+from continue_mcp_common.paths import jail_error
+from continue_mcp_common.paths import resolve_path as _resolve
+from continue_mcp_common.results import result as _result
 
 mcp = FastMCP("search")
 
 
-def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
-    """content is what Continue's UI shows (summary + optional fenced block);
-    structured_content is what the model/tests read via res.data."""
-    md = summary
-    if block.strip():
-        md += f"\n\n```{lang}\n{block}\n```"
-    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
-
-DEFAULT_TIMEOUT = float(os.environ.get("SEARCH_MCP_TIMEOUT", "30"))
-MAX_RESULTS_CAP = int(os.environ.get("SEARCH_MCP_MAX_RESULTS", "1000"))
+DEFAULT_TIMEOUT = _env_float("SEARCH_MCP_TIMEOUT", 30.0, 0.1, 300.0)
+MAX_RESULTS_CAP = _env_int("SEARCH_MCP_MAX_RESULTS", 1000, 1, 10_000)
 # Per-match line cap (chars). rg --json emits the WHOLE matching line, and
 # --max-columns is ignored in --json mode (verified: a 200KB line still comes
 # back at 200KB), so a match in minified JS / a one-line lockfile would otherwise
 # dump the entire line into context. Pi truncates to 500 for the same reason.
-MAX_LINE_CHARS = int(os.environ.get("SEARCH_MCP_MAX_LINE_CHARS", "500"))
+MAX_LINE_CHARS = _env_int("SEARCH_MCP_MAX_LINE_CHARS", 500, 40, 10_000)
 # Ceiling on ONE rg --json record. asyncio's StreamReader splits on newlines with
 # a default 64KB buffer and raises ValueError past it — so a single long matching
 # line used to crash grep outright. Raise it well past any real minified line,
 # and still fail closed (not a traceback) if a record somehow exceeds even this.
-MAX_RECORD_BYTES = int(os.environ.get("SEARCH_MCP_MAX_RECORD", str(8 * 1024 * 1024)))
+MAX_RECORD_BYTES = _env_int(
+    "SEARCH_MCP_MAX_RECORD", 8 * 1024 * 1024, 64 * 1024, 64 * 1024 * 1024
+)
+MAX_ERROR_BYTES = 64 * 1024
 
-
-def _resolve(path: str) -> str:
-    """Relative paths resolve against MCP_WORKSPACE (falls back to server cwd),
-    so they mean the same thing no matter where Continue launched this process."""
-    if os.path.isabs(path):
-        return path
-    base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
-    return os.path.join(base, path)
 
 # --- workspace jail (default ON) --------------------------------------------
 # The recommended tool policy runs this server on Automatic — no human approval
@@ -68,35 +60,6 @@ def _resolve(path: str) -> str:
 # from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
 # sanctioned escape hatch for a legitimate out-of-workspace file is the shell
 # tool, which is approval-gated by policy.
-def _jail_roots() -> list[str]:
-    if os.environ.get("MCP_JAIL", "1").strip().lower() in ("0", "false", "off", "no"):
-        return []
-    roots = [os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())]
-    for extra in (os.environ.get("MCP_JAIL_EXTRA") or "").split(os.pathsep):
-        if extra.strip():
-            roots.append(os.path.abspath(extra.strip()))
-    return [os.path.normcase(os.path.realpath(r)) for r in roots]
-
-
-def jail_error(path: str) -> str | None:
-    """None if `path` is allowed; else a model-facing refusal that names the
-    escalation paths (ask the user / approval-gated shell)."""
-    roots = _jail_roots()
-    if not roots:
-        return None
-    real = os.path.normcase(os.path.realpath(path))
-    for root in roots:
-        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
-            return None
-    return (
-        f"path is outside the workspace jail: {path} (workspace: "
-        f"{os.environ.get('MCP_WORKSPACE') or os.getcwd()}). This tool only "
-        "touches the workspace (MCP_JAIL_EXTRA adds roots; MCP_JAIL=0 "
-        "disables). For a legitimate outside file, ask the user or use a "
-        "shell command, which requires approval."
-    )
-
-
 # --- locate the rg binary --------------------------------------------------
 def rg_bin() -> str:
     """Find the ripgrep binary. Resolution order:
@@ -112,7 +75,7 @@ def rg_bin() -> str:
             "ripgrep (`rg`) was not found — search needs it. Pick ONE fix:\n"
             "  1. Install a system rg:   brew install ripgrep  (or apt/choco/etc.)\n"
             "  2. Global prebuilt rg:    uv tool install ripgrep-bin\n"
-            "  3. Into this server only: uv sync --project <…>/search-mcp --extra rg\n"
+            "  3. Into the toolkit venv: uv sync --project <…>/continue-mcp --extra rg\n"
             "  4. Point at an existing rg: set RIPGREP_BIN=/abs/path/to/rg\n"
             "Options 2 and 3 install `ripgrep-bin`, a THIRD-PARTY repackage "
             "(Bing-su/pip-binary-factory) of ripgrep's OFFICIAL release binaries — "
@@ -184,6 +147,9 @@ async def _collect_json(proc, out: list, max_results: int, flags: dict) -> bool:
     async for raw in proc.stdout:
         try:
             obj = json.loads(raw)
+        except UnicodeDecodeError:
+            flags["decode_error"] = True
+            continue
         except json.JSONDecodeError:
             continue
         t = obj.get("type")
@@ -210,6 +176,38 @@ async def _collect_json(proc, out: list, max_results: int, flags: dict) -> bool:
     return False
 
 
+async def _collect_stderr(stream: asyncio.StreamReader) -> tuple[str, bool]:
+    """Drain stderr concurrently while retaining only a bounded diagnostic."""
+    kept = bytearray()
+    clipped = False
+    while chunk := await stream.read(8192):
+        remaining = MAX_ERROR_BYTES - len(kept)
+        if remaining > 0:
+            kept.extend(chunk[:remaining])
+        if len(chunk) > remaining:
+            clipped = True
+    text = kept.decode("utf-8", "replace").strip()
+    if clipped:
+        text += f"\n[stderr clipped at {MAX_ERROR_BYTES} bytes]"
+    return text, clipped
+
+
+async def _finish_process(proc, stderr_task) -> str:
+    """Stop a capped/timed-out child and collect its concurrently drained stderr."""
+    if proc.returncode is None:
+        proc.kill()
+    try:
+        await asyncio.wait_for(proc.wait(), 5)
+    except asyncio.TimeoutError:
+        pass
+    try:
+        error, _ = await asyncio.wait_for(stderr_task, 5)
+        return error
+    except asyncio.TimeoutError:
+        stderr_task.cancel()
+        return "stderr drain timed out"
+
+
 async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict:
     rg = rg_bin()
     proc = await asyncio.create_subprocess_exec(
@@ -223,6 +221,8 @@ async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict
     truncated = False
     oversize = False
     flags: dict = {}
+    assert proc.stderr is not None
+    stderr_task = asyncio.create_task(_collect_stderr(proc.stderr))
     try:
         truncated = await asyncio.wait_for(
             _collect_json(proc, out, max_results, flags), timeout
@@ -237,15 +237,10 @@ async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict
         oversize = True
         truncated = True
     finally:
-        if proc.returncode is None:
-            proc.kill()
-        err = b""
-        try:
-            _, err = await asyncio.wait_for(proc.communicate(), 5)
-        except (asyncio.TimeoutError, ValueError):
-            pass
+        err = await _finish_process(proc, stderr_task)
     # rg exit codes: 0 = matches, 1 = none, 2 = real error.
     error = None
+    error_type = None
     if oversize:
         cap = (f"{MAX_RECORD_BYTES / (1024 * 1024):.0f}MB"
                if MAX_RECORD_BYTES >= 1024 * 1024 else f"{MAX_RECORD_BYTES // 1024}KB")
@@ -253,16 +248,83 @@ async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict
             f"a matching line exceeded {cap} and was skipped; results are partial. "
             "Refine the pattern or use the shell tool."
         )
-    elif proc.returncode == 2 and err:
-        error = err.decode("utf-8", "replace").strip()
+        error_type = "decode"
+    elif proc.returncode == 2:
+        error = err or "ripgrep exited with code 2"
+        error_type = "process"
+    elif flags.get("decode_error"):
+        error = "ripgrep emitted output that was not valid UTF-8; results are partial"
+        error_type = "decode"
+    elif timed_out:
+        error = f"ripgrep timed out after {timeout}s; results are partial"
+        error_type = "timeout"
     return {
+        "ok": error is None,
         "matches": out,
         "count": sum(1 for r in out if r["kind"] == "match"),
         "truncated": truncated,
         "line_clipped": bool(flags.get("line_clipped")),
         "timed_out": timed_out,
         "error": error,
+        "error_type": error_type,
     }
+
+
+async def _run_files(args: list[str], cap: int, timeout: float) -> dict:
+    proc = await asyncio.create_subprocess_exec(
+        rg_bin(), *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    paths: list[str] = []
+    truncated = False
+    timed_out = False
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout = proc.stdout
+    stderr_task = asyncio.create_task(_collect_stderr(proc.stderr))
+    try:
+        async def _read() -> bool:
+            async for raw in stdout:
+                paths.append(raw.decode("utf-8", "replace").rstrip("\n"))
+                if len(paths) >= cap:
+                    return True
+            return False
+
+        truncated = await asyncio.wait_for(_read(), timeout)
+    except asyncio.TimeoutError:
+        timed_out = True
+    finally:
+        stderr = await _finish_process(proc, stderr_task)
+    error = (stderr or "ripgrep exited with code 2") if proc.returncode == 2 else None
+    error_type = "process" if error else None
+    if timed_out:
+        error = f"ripgrep timed out after {timeout}s; results are partial"
+        error_type = "timeout"
+    return {
+        "ok": error is None,
+        "files": paths,
+        "count": len(paths),
+        "truncated": truncated,
+        "timed_out": timed_out,
+        "error": error,
+        "error_type": error_type,
+    }
+
+
+def _subprocess_failure(kind: str, error: str, *, files: bool) -> dict:
+    data = {
+        "ok": False,
+        "count": 0,
+        "truncated": False,
+        "timed_out": kind == "timeout",
+        "error": error,
+        "error_type": kind,
+    }
+    if files:
+        data["files"] = []
+    else:
+        data.update({"matches": [], "line_clipped": False})
+    return data
 
 
 # --- tools -----------------------------------------------------------------
@@ -291,7 +353,10 @@ async def grep(
     args = build_grep_args(
         pattern, path, ignore_case, glob, multiline, context, hidden, no_ignore
     )
-    data = await _run_capped(args, cap, DEFAULT_TIMEOUT)
+    try:
+        data = await _run_capped(args, cap, DEFAULT_TIMEOUT)
+    except (OSError, RuntimeError) as exc:
+        data = _subprocess_failure("spawn", str(exc), files=False)
     n = data["count"]
     flags = [label for key, label in (
         ("truncated", "truncated"), ("line_clipped", "long lines clipped"),
@@ -319,38 +384,15 @@ async def files(
                        {"files": [], "count": 0, "truncated": False,
                         "timed_out": False, "error": err})
     cap = max(1, min(max_results, MAX_RESULTS_CAP))
-    rg = rg_bin()
     args = build_files_args(glob, path, hidden, no_ignore)
-    proc = await asyncio.create_subprocess_exec(
-        rg, *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    paths: list[str] = []
-    truncated = False
-    timed_out = False
-    assert proc.stdout is not None
     try:
-        async def _read() -> bool:
-            async for raw in proc.stdout:
-                paths.append(raw.decode("utf-8", "replace").rstrip("\n"))
-                if len(paths) >= cap:
-                    return True
-            return False
-
-        truncated = await asyncio.wait_for(_read(), DEFAULT_TIMEOUT)
-    except asyncio.TimeoutError:
-        timed_out = True  # a timeout is not a complete listing — say so
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-        try:
-            await asyncio.wait_for(proc.communicate(), 5)
-        except (asyncio.TimeoutError, ValueError):
-            pass
-    data = {"files": paths, "count": len(paths), "truncated": truncated,
-            "timed_out": timed_out}
-    flags = [f for f, on in (("truncated", truncated), ("timed out", timed_out)) if on]
+        data = await _run_files(args, cap, DEFAULT_TIMEOUT)
+    except (OSError, RuntimeError) as exc:
+        data = _subprocess_failure("spawn", str(exc), files=True)
+    flags = [label for key, label in (
+        ("truncated", "truncated"), ("timed_out", "timed out"),
+        ("error", "error"),
+    ) if data.get(key)]
     summary = f"{data['count']} file(s)" + (f" [{', '.join(flags)}]" if flags else "")
     block = "\n".join(data["files"])
     return _result(summary, data, block)

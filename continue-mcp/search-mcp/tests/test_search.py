@@ -7,6 +7,7 @@ and are skipped if ripgrep isn't installed (see README: a system rg, or
 """
 import asyncio
 import shutil
+import sys
 
 import pytest
 
@@ -15,6 +16,17 @@ from search_mcp.server import build_files_args, build_grep_args
 
 HAVE_RG = shutil.which("rg") is not None
 needs_rg = pytest.mark.skipif(not HAVE_RG, reason="ripgrep (rg) not installed")
+
+
+def test_numeric_environment_limits_are_defaulted_and_clamped(monkeypatch):
+    monkeypatch.setenv("SEARCH_TEST_INT", "bad")
+    assert server._env_int("SEARCH_TEST_INT", 20, 1, 100) == 20
+    monkeypatch.setenv("SEARCH_TEST_INT", "-1")
+    assert server._env_int("SEARCH_TEST_INT", 20, 1, 100) == 1
+    monkeypatch.setenv("SEARCH_TEST_FLOAT", "nan")
+    assert server._env_float("SEARCH_TEST_FLOAT", 30.0, 0.1, 300.0) == 30.0
+    monkeypatch.setenv("SEARCH_TEST_FLOAT", "999")
+    assert server._env_float("SEARCH_TEST_FLOAT", 30.0, 0.1, 300.0) == 300.0
 
 
 # --- pure unit tests (no rg needed) ---------------------------------------
@@ -47,6 +59,61 @@ def test_files_args_globs():
     assert args[0] == "--files"
     assert "-g" in args and "*.ts" in args
     assert args[-1] == "app"
+
+
+def test_file_listing_drains_large_stderr_concurrently(tmp_path, monkeypatch):
+    script = tmp_path / "fake_rg.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stderr.write('e' * 1000000)\n"
+        "sys.stderr.flush()\n"
+        "print('visible.py')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)
+    data = asyncio.run(server._run_files([str(script)], 10, 2.0))
+    assert data["files"] == ["visible.py"]
+    assert data["error"] is None
+    assert data["timed_out"] is False
+
+
+def test_file_listing_reports_ripgrep_exit_two(tmp_path, monkeypatch):
+    script = tmp_path / "fake_rg_error.py"
+    script.write_text(
+        "import sys\nsys.stderr.write('invalid glob')\nsys.exit(2)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)
+    data = asyncio.run(server._run_files([str(script)], 10, 2.0))
+    assert data["files"] == []
+    assert data["error"] == "invalid glob"
+
+
+def test_grep_reports_exit_two_even_with_empty_stderr(tmp_path, monkeypatch):
+    script = tmp_path / "fake_rg_silent_error.py"
+    script.write_text("import sys\nsys.exit(2)\n", encoding="utf-8")
+    monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)
+    data = asyncio.run(server._run_capped([str(script)], 10, 2.0))
+    assert data["error"] == "ripgrep exited with code 2"
+    assert data["ok"] is False and data["error_type"] == "process"
+
+
+def test_spawn_failure_is_a_structured_tool_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "rg_bin", lambda: str(tmp_path / "missing-rg"))
+    data = asyncio.run(server.grep("needle", path=str(tmp_path))).structured_content
+    assert data["ok"] is False
+    assert data["error_type"] == "spawn"
+    assert data["matches"] == []
+
+
+def test_timeout_is_a_structured_error(tmp_path, monkeypatch):
+    script = tmp_path / "slow_rg.py"
+    script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)
+    data = asyncio.run(server._run_files([str(script)], 10, 0.05))
+    assert data["ok"] is False
+    assert data["timed_out"] is True
+    assert data["error_type"] == "timeout"
 
 
 # --- integration tests (need rg) ------------------------------------------

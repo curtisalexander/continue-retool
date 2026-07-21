@@ -3,7 +3,18 @@ if the binary is missing that's a real failure. Run: uv run --extra test pytest 
 """
 import asyncio
 
+import pytest
+
 from sql_mcp import server
+
+
+def test_numeric_timeout_is_defaulted_and_clamped(monkeypatch):
+    monkeypatch.setenv("SQL_TEST_TIMEOUT", "bad")
+    assert server._env_float("SQL_TEST_TIMEOUT", 30.0, 0.1, 300.0) == 30.0
+    monkeypatch.setenv("SQL_TEST_TIMEOUT", "-10")
+    assert server._env_float("SQL_TEST_TIMEOUT", 30.0, 0.1, 300.0) == 0.1
+    monkeypatch.setenv("SQL_TEST_TIMEOUT", "nan")
+    assert server._env_float("SQL_TEST_TIMEOUT", 30.0, 0.1, 300.0) == 30.0
 
 
 def _format(sql: str, **kw) -> dict:
@@ -99,3 +110,24 @@ def test_format_empty_input_is_a_noop_not_a_false_error(tmp_path):
         assert res["ok"] is True, f"{blank!r} should be ok"
         assert res["changed"] is False
         assert res["sql"] == blank
+
+
+@pytest.mark.parametrize("tool", [_format, _lint])
+def test_spawn_failure_is_structured(monkeypatch, tool):
+    monkeypatch.setattr(server, "sqruff_bin", lambda: "/definitely/missing/sqruff")
+    res = tool("select 1")
+    assert res["ok"] is False
+    assert res["error_type"] == "spawn"
+
+
+def test_decode_failure_is_structured(monkeypatch):
+    async def invalid_output(*_args, **_kwargs):
+        raise server.SubprocessFailure("decode", "could not decode sqruff output")
+
+    monkeypatch.setattr(server, "_run_sqruff", invalid_output)
+    res = _lint("select 1")
+    assert res == {
+        "ok": False,
+        "error": "could not decode sqruff output",
+        "error_type": "decode",
+    }

@@ -1,17 +1,18 @@
 # continue-mcp — starter kit
 
-The code that accompanies [`../continue-mcp-toolkit.md`](../continue-mcp-toolkit.md):
-the background-job shell MCP, the Continue wiring, and the tool-factory skill.
-All servers are pure Python (hatchling + `uv`). Read the design doc first.
+The implementation described by [`../ARCHITECTURE.md`](../ARCHITECTURE.md): the
+background-job shell MCP, the Continue wiring, and the tool-factory skill. All
+servers are pure Python (hatchling + `uv`). Read the architecture guide first.
 
 ```
 continue-mcp/
+  pyproject.toml                 # one distribution, lockfile, venv, and 8 entry points
+  continue_mcp_common/           # shared limits, paths, jail, and result helpers
   hello-mcp/                    # START HERE: proves MCP is enabled in your build
     hello_mcp/server.py        # ping -> "pong", echo, whoami
     tests/test_hello.py
     .continue/mcpServers/hello.yaml
   shell-mcp/                    # the flagship: a terminal-runner MCP
-    pyproject.toml             # hatchling + fastmcp; console-script entry
     shell_mcp/server.py        # async, background jobs, tree-kill, timeout,
                                #   stable byte cursors, stdin via send(), env
     tests/test_tools.py        # golden tests incl. cross-platform tree-kill
@@ -56,34 +57,37 @@ continue-mcp/
 
 ## Order of operations
 
+The servers are separate processes and commands, but share one installed Python
+environment. Run their tests from this directory:
+
 ```bash
 # 0. Prove MCP is on (5 minutes). Wire hello.yaml, ask the agent to call `ping`.
-cd hello-mcp && uv run --extra test pytest -q && uv run hello-mcp
+uv run --extra test pytest -q hello-mcp/tests && uv run hello-mcp
 
 # 1. The flagship terminal MCP. Run the golden suite (incl. the tree-kill test).
-cd ../shell-mcp && uv run --extra test pytest -q && uv run shell-mcp
+uv run --extra test pytest -q shell-mcp/tests && uv run shell-mcp
 
 # 2. ripgrep search MCP. Needs an `rg` binary — bring your own (brew/apt/choco
 #    install ripgrep) or `uv tool install ripgrep-bin` (see search-mcp/README).
-cd ../search-mcp && uv run --extra test pytest -q && uv run search-mcp
+uv run --extra test pytest -q search-mcp/tests && uv run search-mcp
 
 # 3. Unicode-robust edit MCP (fixes non-ASCII match failures).
-cd ../edit-mcp && uv run --extra test pytest -q && uv run edit-mcp
+uv run --extra test pytest -q edit-mcp/tests && uv run edit-mcp
 
 # 4. Line-ranged read / list dir (replaces built-in Read file & List dir).
-cd ../fs-mcp && uv run --extra test pytest -q && uv run fs-mcp
+uv run --extra test pytest -q fs-mcp/tests && uv run fs-mcp
 
 # 5. SQL format/lint via sqruff (installs as a dependency — no extra step).
-cd ../sql-mcp && uv run --extra test pytest -q && uv run sql-mcp
+uv run --extra test pytest -q sql-mcp/tests && uv run sql-mcp
 
 # 6. Repo-local agent memory (pair with rules/notes.md — see below).
-cd ../notes-mcp && uv run --extra test pytest -q && uv run notes-mcp
+uv run --extra test pytest -q notes-mcp/tests && uv run notes-mcp
 
 # 7. (Optional) Gateway: collapse many tools to 3 schemas at rest.
-cd ../gateway-mcp && uv run --extra test pytest -q && uv run gateway-mcp
+uv run --extra test pytest -q gateway-mcp/tests && uv run gateway-mcp
 ```
 
-Every package has two test layers, both deterministic (no LLM, no network):
+Every server has two test layers, both deterministic (no LLM, no network):
 golden tests of the implementation, and `tests/test_mcp_surface.py`, which
 drives the server over the real MCP boundary with fastmcp's in-process client —
 the same list-tools/call-tool flow Continue performs. The surface tests also
@@ -99,11 +103,32 @@ resting token cost of each tool schema (the price paid on *every* request):
 
 ```bash
 cd continue-mcp
-uv run --no-sync --project hello-mcp python bench/audit.py   # all servers
+uv run --no-sync python bench/audit.py   # all servers
 ```
 
 CI prints the same table on every run, so a fattened docstring or a slow
 dependency bump shows up as a diff in numbers, not a hunch.
+
+`servers.json` is the authoritative server inventory. After changing it, run
+`python scripts/sync_metadata.py`; CI runs the same command with `--check` and
+rejects stale packaging, site, architecture, token, or gateway output. New
+servers should be finalized with `scripts/register_server.py` as documented by
+the `new-mcp-tool` skill.
+
+## Dependency updates: seven-day minimum age
+
+Do not update to a package uploaded within the last seven days. Run:
+
+```bash
+python scripts/update_dependencies.py                 # update everything eligible
+python scripts/update_dependencies.py fastmcp         # or one direct/transitive package
+python scripts/run_server_tests.py                    # then run server suites
+uv run --extra test pytest -q tests                   # and repository-level tests
+```
+
+The helper computes a UTC cutoff exactly seven days in the past and passes it to
+`uv lock --exclude-newer`, so the resolver cannot select a newer upload. Review
+the `pyproject.toml`/`uv.lock` diff and use the ordinary CI suite before merging.
 
 Then in Continue: add each `.continue/mcpServers/*.yaml` and set tool policies:
 - built-in **`run_terminal_command`** → Excluded; `shell.*` → Ask First
@@ -145,48 +170,53 @@ notes is already confined to the repo root by design; sql takes no paths.
 # macOS/Linux/Windows, where a bare `python3` often isn't on PATH.
 uv run install-workspace.py /path/to/your/project              # any OS
 uv run install-workspace.py /path/to/proj --only shell,fs      # a subset
+uv run install-workspace.py /path/to/proj --gateway --only sql,notes  # long tail
 uv run install-workspace.py /path/to/proj --no-sync            # config only
-uv run install-workspace.py /path/to/proj --jobs 1             # sync one at a time
 uv run install-workspace.py /path/to/proj --check              # doctor: verify it all
 uv run install-workspace.py /path/to/proj --uninstall          # remove the configs
 ```
 
 **`--check` is the doctor.** It verifies the whole chain in one command: uv on
-PATH, each server's package dir and venv, the stamped yamls (no leftover
+PATH, the unified project and shared venv, the stamped yamls (no leftover
 placeholders), the detected interpreters, and — the part that matters — a
 **live MCP handshake** per server (`initialize` + `tools/list` over stdio, the
-same flow Continue performs at connect). When a server shows "connection timed
-out" in Continue, run the doctor first; it turns the whole troubleshooting
-section below into one command. `--uninstall` removes exactly the files the
-installer wrote (yamls, and the rules when all servers are selected), plus
-their `.bak` backups; the toolkit checkout and venvs are untouched.
+same flow Continue performs at connect). The handshake uses the installed
+YAML's exact command, arguments, environment, workspace, optional working
+directory, and timeout, so it catches broken configuration rather than testing
+a separately reconstructed command. When a server shows "connection timed out"
+in Continue, run the doctor first; it turns the whole troubleshooting section
+below into one command.
 
-Copies every server's yaml into the project's `.continue/mcpServers/` with the
+With `--gateway`, `--only` selects downstream servers rather than directly
+registered servers. The installer writes only `gateway.yaml` plus the
+manifest-owned `.continue/gateway.config.json`; both contain absolute `uv` and
+package paths, `--no-sync`, and the workspace environment. Gateway doctor mode
+also calls `gateway.search` and verifies every selected downstream contributed
+to the live catalog. Use the same `--gateway` flag for `--check` and
+`--uninstall`. The installer refuses to put a server both behind the gateway and
+in Continue directly; remove it from one side before changing its role.
+
+The installer records every owned file and its SHA-256 hash in
+`.continue/.continue-mcp-install.json`. If it replaces a pre-existing file, its
+exact bytes and permission mode are retained under
+`.continue/.continue-mcp-backups/`. Reinstall refuses to overwrite a file edited
+after installation. `--uninstall` removes only unchanged installer-created
+files, restores unchanged installer-replaced files, and leaves locally modified
+files in place; the toolkit checkout and shared venv are untouched.
+
+Copies each selected server's yaml into the project's `.continue/mcpServers/` with the
 two absolute paths stamped in (`--project` → this checkout, `MCP_WORKSPACE` →
 the project), copies the two rules into `.continue/rules/`, and then runs
-`uv sync` in each installed server's package dir so its virtualenv exists before
-Continue ever launches it. Finally it prints the tool-policy checklist. Then ask
+one `uv sync` at the toolkit root so the shared virtualenv exists before Continue
+ever launches a server. Finally it prints the tool-policy checklist. Then ask
 the agent to call `hello.ping` (MCP is on) and `hello.whoami` (shows the cwd and
 workspace the servers actually see).
 
-**Syncs run in parallel.** Each server is its own uv project, so the installer
-syncs them concurrently — a thread per server, capped at `--jobs` (default
-`min(servers, CPUs)`; `--jobs 1` forces one-at-a-time). This is safe because uv
-locks its global cache per entry, so parallel `uv sync` processes share a single
-download of any shared package rather than racing. Because parallel output would
-interleave, each server's uv output is captured, not streamed: you get a
-`[done/total]` line with a compact `Installed N packages` summary as each
-finishes, a heartbeat naming whatever's still running on long cold-cache runs,
-and the full captured uv error grouped per server for anything that fails (the
-exit code is non-zero if any server failed). Drop to `--jobs 1` if a locked-down
-network throttles concurrent connections, or `--no-sync` to skip the build.
-
-**Where the venvs land.** Each `*-mcp` is its own uv project, so `uv sync`
-creates one virtualenv *per server* at `<this checkout>/<name>-mcp/.venv` — e.g.
-`continue-mcp/shell-mcp/.venv`. They live inside this toolkit checkout (not your
-workspace) because that's what the yaml's `uv run --project <…>/<name>-mcp`
-points at; all are gitignored. Pass `--no-sync` to skip the build (offline, or
-you'll sync by hand later).
+**One sync, one environment.** All server commands come from the root
+`pyproject.toml` and `uv.lock`. The installer runs one `uv sync`, producing
+`continue-mcp/.venv`; `--only` controls which servers are registered with
+Continue, not which code is present in that environment. Pass `--no-sync` to
+skip the build when working offline or when you will sync it manually later.
 
 **Re-running is safe.** An existing yaml/rule is only rewritten when its content
 actually changed, and the previous version is saved next to it as `<file>.bak`
@@ -208,8 +238,7 @@ export UV_DEFAULT_INDEX=https://pypi.example.corp/simple   # your internal mirro
 - **`UV_DEFAULT_INDEX`** points uv at your internal package mirror instead of
   public PyPI.
 
-You do **not** need to edit any `pyproject.toml` for this, and you do **not**
-want a config file in each of the eight `*-mcp` dirs. Two options, both global:
+You do **not** need to edit `pyproject.toml` for this. Two options are available:
 
 - **Env vars (simplest):** export the two above once in your shell/profile (or
   set them machine-wide). They apply to every `uv` invocation in any directory —
@@ -226,14 +255,13 @@ want a config file in each of the eight `*-mcp` dirs. Two options, both global:
   default = true
   ```
 
-  Per-directory `pyproject.toml [tool.uv]` / `uv.toml` also work but are read
-  **only** for that directory — which is exactly why you'd otherwise need one in
-  every server dir. Keep it in the user/system file instead.
+  A project-local `uv.toml` also works, but user/system configuration is usually
+  preferable for settings shared across repositories.
 
 ## Wiring: paths resolve against YOUR workspace, not the server's cwd
 
 Every yaml uses the same pattern: `<abs path to uv> run --no-sync --project <abs
-path to the package>` pins the server's environment (no `cwd` needed for the
+path to the toolkit>` pins the shared environment (no `cwd` needed for the
 server itself), and `MCP_WORKSPACE` names your workspace root. All relative paths
 the agent passes — and shell-mcp's default working directory — resolve against
 `MCP_WORKSPACE`, falling back to the server's cwd if unset. Without this,
@@ -290,8 +318,8 @@ If a tool still shows *"already connected to a transport / call close()"* after 
 per-tool **Reload**, that's Continue's reconnect path, not the server — reload the
 whole window (or toggle the MCP server off/on) instead of the single tool.
 
-**Using the gateway?** Register ONLY `gateway.yaml` with Continue (not the
-downstream `shell/search/edit` yamls — the gateway connects to those itself). It's
-best for the long tail of tools; keep the 2–3 you use every message registered
-directly. See `gateway-mcp/README.md` for the head/tail tradeoff.
+**Using the gateway?** Install tail tools with `--gateway --only ...`; Continue
+registers only `gateway.yaml` for those servers. Hot tools may remain direct only
+when they are omitted from that downstream selection. See `gateway-mcp/README.md`
+for the head/tail tradeoff.
 </content>

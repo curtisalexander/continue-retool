@@ -1,0 +1,83 @@
+{
+  "estimator": "ceil(serialized_schema_characters / 4)",
+  "schema_version": 1,
+  "servers": {
+    "edit": {
+      "estimated_tokens": 559,
+      "tool_count": 5,
+      "tools": {
+        "create_file": 94,
+        "delete_file": 71,
+        "edit": 162,
+        "move_file": 94,
+        "multi_edit": 138
+      }
+    },
+    "fs": {
+      "estimated_tokens": 255,
+      "tool_count": 2,
+      "tools": {
+        "list": 110,
+        "read": 145
+      }
+    },
+    "gateway": {
+      "estimated_tokens": 311,
+      "tool_count": 3,
+      "tools": {
+        "call": 122,
+        "describe": 80,
+        "search": 109
+      }
+    },
+    "hello": {
+      "estimated_tokens": 187,
+      "tool_count": 3,
+      "tools": {
+        "echo": 67,
+        "ping": 55,
+        "whoami": 65
+      }
+    },
+    "notes": {
+      "estimated_tokens": 389,
+      "tool_count": 5,
+      "tools": {
+        "delete": 51,
+        "list": 66,
+        "read": 76,
+        "search": 96,
+        "write": 100
+      }
+    },
+    "search": {
+      "estimated_tokens": 357,
+      "tool_count": 2,
+      "tools": {
+        "files": 140,
+        "grep": 217
+      }
+    },
+    "shell": {
+      "estimated_tokens": 937,
+      "tool_count": 7,
+      "tools": {
+        "kill": 51,
+        "list_jobs": 38,
+        "output": 130,
+        "poll": 57,
+        "run": 249,
+        "send": 92,
+        "start": 320
+      }
+    },
+    "sql": {
+      "estimated_tokens": 185,
+      "tool_count": 2,
+      "tools": {
+        "format": 95,
+        "lint": 90
+      }
+    }
+  }
+}

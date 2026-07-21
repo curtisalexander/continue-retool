@@ -1,6 +1,6 @@
 # Keeping Token Costs Down: Which Tools to Replace, and Where to Put Them
 
-*Working design doc, 2026-07-01. Companion to `continue-mcp-toolkit.md`. Answers:
+*Strategy record, begun 2026-07-01. Companion to `ARCHITECTURE.md`. Answers:
 how do I replace Continue's tools to minimize token cost — and for each tool, do I
 register it **directly** (paid every request) or hide it behind the **gateway**
 (paid per use)? The long-tail-vs-starting-cost tradeoff, made concrete.*
@@ -125,38 +125,32 @@ size, because latency and the near-zero savings both argue for keeping it direct
 
 ### Don't forget the gateway's own fixed cost
 
-The gateway isn't free: its three meta-tools cost ~1,200 tokens at rest, *always*.
-So there's a break-even — the tail you hide must be bigger than that overhead. Two
-rarely-used 200-token tools behind a gateway is a **loss** (you added ~1,200 to
-save ~400). Ten of them is a clear **win** (added ~1,200 to save ~1,800/turn of
-resting schema). **Rule of thumb: gateway pays off past ~8–10 tail tools.**
+<!-- BEGIN GENERATED GATEWAY COST -->
+The audit currently estimates the gateway's three meta-tool schemas at **~311 tokens at rest**. The default tail (sql, notes) would cost ~574 tokens if registered directly, so the gateway saves ~263 resting tokens (46%) before any per-use describe result. These values are generated from `continue-mcp/bench/schema-metrics.json` using the repository's deterministic `ceil(serialized characters / 4)` estimator.
+<!-- END GENERATED GATEWAY COST -->
 
 ---
 
 ## 4. Worked example — the current toolkit
 
-Say you end up with these, with rough schema sizes and honest usage:
+<!-- BEGIN GENERATED TOOLKIT EXAMPLE -->
+The current measured inventory is:
 
-| Tool | Schema ~tokens | Usage | Verdict |
-|---|---|---|---|
-| `edit.edit` | 250 | every message | **Direct** — hot; gateway would save ~0 and add latency |
-| `shell.run` / `shell.start` | 300 | most messages | **Direct** — hot |
-| `search.grep` | 200 | frequent | **Direct** — hot, and small |
-| `shell.kill` / `poll` / `list_jobs` | 150 ea | occasional | Direct (small) or fold behind gateway if the tail grows |
-| `sql.format` | 400 | rarely | **Gateway ★** — big + rare |
-| `repo.symbols` | 500 | rarely | **Gateway ★** — big + rare |
-| `http.call` (allow-listed APIs) | 350 | rarely | **Gateway** |
-| …20 more niche tools | 300 avg | rarely | **Gateway** |
+| Server | Tools | Schema ~tokens | Default registration |
+|---|---:|---:|---|
+| `hello-mcp` | 3 | 187 | direct |
+| `shell-mcp` | 7 | 937 | direct |
+| `search-mcp` | 2 | 357 | direct |
+| `edit-mcp` | 5 | 559 | direct |
+| `fs-mcp` | 2 | 255 | direct |
+| `sql-mcp` | 2 | 185 | gateway |
+| `notes-mcp` | 5 | 389 | gateway |
+| `gateway-mcp` | 3 | 311 | gateway-host |
 
-**Result:** the 3–4 hot tools stay directly registered (~750–1,000 resting tokens,
-which cache well). Everything rare lives behind the gateway (~1,200 resting,
-flat forever, no matter how many you add). You've replaced *all* the fat built-ins,
-kept the everyday path fast, and stopped the tail from ever bloating your window.
+With the metadata defaults, direct servers cost ~2295 tokens and the gateway costs ~311, for **~2606 resting tokens**. Registering the same tail directly would cost ~2869; the generated hybrid saves ~263 tokens per request.
 
-Concretely for Continue: register `edit.yaml`, `search.yaml`, `shell.yaml`, **and**
-`gateway.yaml` — but put only the *tail* servers in `gateway.config.json`, and do
-**not** also register those tail servers with Continue directly (that would double-
-load them, §gateway README).
+Concretely for Continue, register `hello.yaml`, `shell.yaml`, `search.yaml`, `edit.yaml`, `fs.yaml`, and `gateway.yaml`; keep only `sql`, `notes` in the gateway downstream configuration. Do not register a downstream both directly and through the gateway.
+<!-- END GENERATED TOOLKIT EXAMPLE -->
 
 ---
 
@@ -202,5 +196,7 @@ resting tokens, a fast hot path, and unlimited expansion — the three goals at 
 - [MCP context-bloat fix 2026: Tool Search / Code Mode / progressive disclosure](https://mcp.directory/blog/mcp-context-bloat-fix-2026-tool-search-code-mode-progressive-disclosure)
 - [MCP token optimization compared (StackOne)](https://www.stackone.com/blog/mcp-token-optimization/) · [Your MCP server is eating your context window (Apideck)](https://www.apideck.com/blog/mcp-server-eating-context-window-cli-alternative)
 - [Anthropic — Tool Search Tool & code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) · [How Agent Mode Works — Continue Docs](https://docs.continue.dev/ide-extensions/agent/how-it-works)
-- Companion docs in this repo: `continue-mcp-toolkit.md` (§5 token tax, §5b gateway), `continue-mcp/gateway-mcp/README.md` (head/tail design)
+- Companion docs in this repo: `ARCHITECTURE.md` (current topology),
+  `docs/history/continue-mcp-toolkit-design.md` (§5 token tax, §5b gateway), and
+  `continue-mcp/gateway-mcp/README.md` (head/tail operation)
 </content>

@@ -10,7 +10,7 @@ this script prints OUR numbers, so a dependency bump or a fattened docstring
 shows up as a measured regression instead of a vibe.
 
 Each server is spawned exactly the way the stamped yaml does it
-(`uv run --no-sync --project <pkg> <name>-mcp`, a real subprocess over stdio),
+(`uv run --no-sync --project <toolkit> <name>-mcp`, a real subprocess over stdio),
 so cold-start here includes interpreter start + fastmcp import — the real
 thing, not an in-process shortcut.
 
@@ -18,13 +18,17 @@ Token counts are estimated as ceil(chars / 4) over the serialized
 {name, description, inputSchema}: deterministic and offline (a real tokenizer
 would need a network fetch). Treat them as comparable-over-time, not exact.
 
-Run from the continue-mcp dir (any server's venv provides fastmcp):
-  uv run --no-sync --project hello-mcp python bench/audit.py           # all
-  uv run --no-sync --project hello-mcp python bench/audit.py shell fs  # subset
+Run from the continue-mcp dir (all servers share one environment):
+  uv run --no-sync python bench/audit.py           # all
+  uv run --no-sync python bench/audit.py shell fs  # subset
+  uv run --no-sync python bench/audit.py --json
+  uv run --no-sync python bench/audit.py \
+    --write-schema-metrics bench/schema-metrics.json
 """
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import math
 import os
@@ -35,8 +39,10 @@ import time
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
+from continue_mcp_common.metadata import server_names
+
 KIT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SERVERS = ["hello", "shell", "search", "edit", "fs", "sql", "notes"]
+SERVERS = server_names()
 
 
 def est_tokens(text: str) -> int:
@@ -44,9 +50,8 @@ def est_tokens(text: str) -> int:
 
 
 async def audit_one(uv: str, name: str) -> dict:
-    pkg = os.path.join(KIT_DIR, f"{name}-mcp")
     transport = StdioTransport(
-        command=uv, args=["run", "--no-sync", "--project", pkg, f"{name}-mcp"],
+        command=uv, args=["run", "--no-sync", "--project", KIT_DIR, f"{name}-mcp"],
     )
     t0 = time.monotonic()
     async with Client(transport) as client:
@@ -65,16 +70,49 @@ async def audit_one(uv: str, name: str) -> dict:
             "est_tokens": sum(r["est_tokens"] for r in rows)}
 
 
-async def main(names: list[str]) -> int:
+async def collect(names: list[str]) -> list[dict]:
     uv = shutil.which("uv")
     if not uv:
-        print("uv not found on PATH", file=sys.stderr)
+        raise RuntimeError("uv not found on PATH")
+    return [await audit_one(uv, name) for name in names]
+
+
+def schema_metrics(results: list[dict]) -> dict:
+    return {
+        "schema_version": 1,
+        "estimator": "ceil(serialized_schema_characters / 4)",
+        "servers": {
+            result["server"]: {
+                "tool_count": len(result["tools"]),
+                "estimated_tokens": result["est_tokens"],
+                "tools": {
+                    row["tool"]: row["est_tokens"] for row in result["tools"]
+                },
+            }
+            for result in results
+        },
+    }
+
+
+async def main(names: list[str], *, json_output: bool = False,
+               write_metrics: str | None = None) -> int:
+    try:
+        results = await collect(names)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
+    metrics = schema_metrics(results)
+    if write_metrics:
+        with open(write_metrics, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(metrics, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+    if json_output:
+        print(json.dumps({"results": results, "schema_metrics": metrics}, indent=2))
+        return 0
     print(f"{'server':<10} {'cold-start':>10}   {'tools':>5}   {'est tokens at rest':>18}")
     grand = 0
     slowest = 0.0
-    for name in names:
-        r = await audit_one(uv, name)
+    for r in results:
         grand += r["est_tokens"]
         slowest = max(slowest, r["cold_ms"])
         print(f"{r['server']:<10} {r['cold_ms']:>8.0f}ms   {len(r['tools']):>5}   "
@@ -90,9 +128,17 @@ async def main(names: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    picked = sys.argv[1:] or SERVERS
+    parser = argparse.ArgumentParser()
+    parser.add_argument("servers", nargs="*")
+    parser.add_argument("--json", action="store_true", dest="json_output")
+    parser.add_argument("--write-schema-metrics")
+    args = parser.parse_args()
+    picked = args.servers or SERVERS
     unknown = sorted(set(picked) - set(SERVERS))
     if unknown:
         print(f"unknown server(s) {unknown}; choose from {SERVERS}", file=sys.stderr)
         raise SystemExit(2)
-    raise SystemExit(asyncio.run(main(picked)))
+    raise SystemExit(asyncio.run(main(
+        picked, json_output=args.json_output,
+        write_metrics=args.write_schema_metrics,
+    )))

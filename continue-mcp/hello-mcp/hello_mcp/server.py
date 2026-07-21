@@ -16,19 +16,11 @@ import os
 import platform
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
+from fastmcp.tools import ToolResult
+
+from continue_mcp_common.results import result as _result
 
 mcp = FastMCP("hello")
-
-
-def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
-    """content is what Continue's UI shows (summary + optional fenced block);
-    structured_content is what the model/tests read via res.data."""
-    md = summary
-    if block.strip():
-        md += f"\n\n```{lang}\n{block}\n```"
-    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})

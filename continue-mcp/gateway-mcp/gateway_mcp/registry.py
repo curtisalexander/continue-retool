@@ -2,7 +2,7 @@
 registry.py — the pure, dependency-free core of the gateway.
 
 The gateway's job is progressive disclosure: instead of loading N full tool
-schemas into the model's context up front (each ~550–1,400 tokens), it exposes
+schemas into the model's context up front, it exposes
 three meta-tools — search / describe / call — and discloses a real tool's schema
 only when the model asks for it.
 

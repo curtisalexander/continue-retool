@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "servers": [
+    {
+      "name": "hello",
+      "module": "hello_mcp",
+      "registration": "direct",
+      "summary": "Start here; proves MCP is enabled in your build",
+      "site_description": "Proves MCP is enabled: ping returns pong, plus echo and workspace diagnostics.",
+      "responsibility": "Connectivity and workspace diagnostics",
+      "authority": "Environment and current-directory metadata only",
+      "policy": "  * hello.*                                -> Automatic"
+    },
+    {
+      "name": "shell",
+      "module": "shell_mcp",
+      "registration": "direct",
+      "summary": "Terminal runner with background jobs, tree-kill, and timeouts",
+      "site_description": "Terminal runner with background jobs, tree-kill, bounded output, and timeouts.",
+      "responsibility": "Foreground and background commands, polling, input, cancellation",
+      "authority": "Arbitrary subprocesses; intended to remain human-approved",
+      "policy": "  * built-in run_terminal_command      -> Excluded;  shell.*  -> Ask First"
+    },
+    {
+      "name": "search",
+      "module": "search_mcp",
+      "registration": "direct",
+      "summary": "ripgrep-backed content and file search",
+      "site_description": "ripgrep-backed content and file search; replaces built-in Grep and Glob.",
+      "responsibility": "Content and file search through ripgrep",
+      "authority": "Read access within configured jail roots; spawns rg",
+      "policy": "  * built-in Grep search / Glob search -> Excluded;  search.* -> Automatic"
+    },
+    {
+      "name": "edit",
+      "module": "edit_mcp",
+      "registration": "direct",
+      "summary": "Atomic Unicode-tolerant file editing",
+      "site_description": "Atomic, Unicode-tolerant editing; replaces built-in Edit and Create file.",
+      "responsibility": "Atomic create/edit/move/delete with Unicode-tolerant matching",
+      "authority": "File mutation within configured jail roots",
+      "policy": "  * built-in Edit file / Create file   -> Excluded;  edit.*   -> Ask First"
+    },
+    {
+      "name": "fs",
+      "module": "fs_mcp",
+      "registration": "direct",
+      "summary": "Bounded line reads and directory listings",
+      "site_description": "Bounded line reads and directory listings; replaces built-in Read and List dir.",
+      "responsibility": "Bounded line reads and directory listings",
+      "authority": "Read access within configured jail roots",
+      "policy": "  * built-in Read file / List dir      -> Excluded;  fs.*     -> Automatic"
+    },
+    {
+      "name": "sql",
+      "module": "sql_mcp",
+      "registration": "gateway",
+      "summary": "SQL formatting and linting through sqruff",
+      "site_description": "SQL formatting and linting through sqruff, with Snowflake-oriented defaults.",
+      "responsibility": "SQL formatting and linting through sqruff",
+      "authority": "SQL strings and a subprocess; no file-path tool input",
+      "policy": "  * sql.*                                  -> Automatic (replaces no built-in)"
+    },
+    {
+      "name": "notes",
+      "module": "notes_mcp",
+      "registration": "gateway",
+      "summary": "Bounded repository-local Markdown memory",
+      "site_description": "Repository-local Markdown memory with bounded list, read, search, and writes.",
+      "responsibility": "Bounded repository-local Markdown memory",
+      "authority": "The configured note directory under the repository root",
+      "policy": "  * notes.*                                -> Automatic (repo-local storage)"
+    },
+    {
+      "name": "gateway",
+      "module": "gateway_mcp",
+      "registration": "gateway-host",
+      "summary": "Progressive disclosure for downstream MCP tools",
+      "site_description": "Progressive disclosure: any number of downstream tools behind three meta-tools.",
+      "responsibility": "Discovery and routing for downstream MCP tools",
+      "authority": "The union of the configured downstream servers' authority",
+      "policy": "  * gateway.search / gateway.describe -> Automatic; gateway.call -> Ask First"
+    }
+  ]
+}

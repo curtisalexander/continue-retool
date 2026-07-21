@@ -1,6 +1,7 @@
 """Golden tests for notes-mcp. Run: uv run --extra test pytest -q"""
 import asyncio
 import os
+import stat
 
 import pytest
 
@@ -57,6 +58,39 @@ def test_never_home_directory(tmp_path, monkeypatch):
         res["path"].startswith(str(tmp_path))
 
 
+@pytest.mark.parametrize("configured", ["../outside", "/tmp/outside", r"C:\outside"])
+def test_notes_dir_rejects_absolute_and_traversal_config(tmp_path, monkeypatch, configured):
+    _in_repo(tmp_path, monkeypatch)
+    monkeypatch.setenv("NOTES_MCP_DIRNAME", configured)
+    res = _write("n", "must stay contained")
+    assert res["ok"] is False
+    assert "NOTES_MCP_DIRNAME" in res["error"]
+
+
+def test_notes_dir_rejects_escaping_symlink(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (tmp_path / ".continue-notes").symlink_to(outside, target_is_directory=True)
+    res = _write("n", "must stay contained")
+    assert res["ok"] is False
+    assert "outside the repository" in res["error"]
+    assert not (outside / "n.md").exists()
+
+
+def test_note_symlink_is_rejected_for_all_mutations(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    notes = tmp_path / ".continue-notes"
+    notes.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-note.md"
+    outside.write_text("keep me\n")
+    (notes / "linked.md").symlink_to(outside)
+    assert _read("linked")["ok"] is False
+    assert _write("linked", "replacement")["ok"] is False
+    assert _delete("linked")["ok"] is False
+    assert outside.read_text() == "keep me\n"
+
+
 # --- write / read / list / delete -------------------------------------------
 def test_round_trip(tmp_path, monkeypatch):
     _in_repo(tmp_path, monkeypatch)
@@ -78,6 +112,16 @@ def test_list_index_shape(tmp_path, monkeypatch):
     assert all(n["age_days"] >= 0 for n in res["notes"])
 
 
+def test_list_index_is_bounded_and_reports_partial_result(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "MAX_INDEX_ENTRIES", 2)
+    for name in ("a", "b", "c"):
+        _write(name, f"hook for {name}")
+    res = _list()
+    assert res["count"] == 2
+    assert res["truncated"] is True
+
+
 def test_list_empty_when_no_dir(tmp_path, monkeypatch):
     _in_repo(tmp_path, monkeypatch)
     res = _list()
@@ -97,6 +141,48 @@ def test_overwrite_replaces(tmp_path, monkeypatch):
     _write("n", "old\n")
     _write("n", "new\n")
     assert _read("n")["content"] == "new\n"
+
+
+def test_write_is_atomic_and_preserves_original_on_replace_failure(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("n", "original")
+    path = tmp_path / ".continue-notes" / "n.md"
+
+    def fail_replace(src, dst):
+        raise OSError("injected replacement failure")
+
+    monkeypatch.setattr(server.os, "replace", fail_replace)
+    res = _write("n", "replacement")
+    assert res["ok"] is False
+    assert path.read_bytes() == b"original\n"
+    assert sorted(p.name for p in path.parent.iterdir()) == ["n.md"]
+
+
+def test_atomic_write_preserves_permissions(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("n", "original")
+    path = tmp_path / ".continue-notes" / "n.md"
+    path.chmod(0o640)
+    assert _write("n", "replacement")["ok"] is True
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_encoding_failure_preserves_original(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("n", "original")
+    path = tmp_path / ".continue-notes" / "n.md"
+    res = _write("n", "bad surrogate: \ud800")
+    assert res["ok"] is False
+    assert path.read_bytes() == b"original\n"
+
+
+def test_write_and_append_are_bounded(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "MAX_NOTE_BYTES", 16)
+    assert _write("n", "small")["ok"] is True
+    assert _write("n", "x" * 16)["ok"] is False
+    assert _write("n", "y" * 12, append=True)["ok"] is False
+    assert _read("n")["content"] == "small\n"
 
 
 def test_delete(tmp_path, monkeypatch):
@@ -156,6 +242,15 @@ def test_read_small_note_is_untouched(tmp_path, monkeypatch):
     assert res["content"] == "just a little note\n"
 
 
+def test_read_limit_counts_utf8_bytes_not_characters(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "MAX_READ_BYTES", 16)
+    _write("unicode", "界界界\n界界界\n")
+    res = _read("unicode")
+    assert res["truncated"] is True
+    assert len(res["content"].encode("utf-8")) <= 16
+
+
 def test_search_caps_match_count(tmp_path, monkeypatch):
     _in_repo(tmp_path, monkeypatch)
     _write("many", "needle\n" * 1000)
@@ -179,3 +274,13 @@ def test_search_clean_result_has_no_flags(tmp_path, monkeypatch):
     res = _search("find me")
     assert res["count"] == 1
     assert res["truncated"] is False and res["line_clipped"] is False
+
+
+def test_search_scan_work_is_byte_bounded(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "MAX_SEARCH_BYTES", 32)
+    _write("many", "ordinary line\n" * 20 + "needle\n")
+    res = _search("needle")
+    assert res["count"] == 0
+    assert res["truncated"] is True
+    assert res["scanned_bytes"] <= 32

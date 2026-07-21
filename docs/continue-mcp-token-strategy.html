@@ -102,12 +102,12 @@ paragraph</a></li>
 <h1
 id="keeping-token-costs-down-which-tools-to-replace-and-where-to-put-them">Keeping
 Token Costs Down: Which Tools to Replace, and Where to Put Them</h1>
-<p><em>Working design doc, 2026-07-01. Companion to
-<code>continue-mcp-toolkit.md</code>. Answers: how do I replace
-Continue's tools to minimize token cost — and for each tool, do I
-register it <strong>directly</strong> (paid every request) or hide it
-behind the <strong>gateway</strong> (paid per use)? The
-long-tail-vs-starting-cost tradeoff, made concrete.</em></p>
+<p><em>Strategy record, begun 2026-07-01. Companion to
+<code>ARCHITECTURE.md</code>. Answers: how do I replace Continue's tools
+to minimize token cost — and for each tool, do I register it
+<strong>directly</strong> (paid every request) or hide it behind the
+<strong>gateway</strong> (paid per use)? The long-tail-vs-starting-cost
+tradeoff, made concrete.</em></p>
 <hr />
 <h2 id="0-tldr--the-recommendation">0. TL;DR — the recommendation</h2>
 <table>
@@ -284,91 +284,95 @@ anything you use often</strong>, regardless of size, because latency and
 the near-zero savings both argue for keeping it direct.</p>
 <h3 id="dont-forget-the-gateways-own-fixed-cost">Don't forget the
 gateway's own fixed cost</h3>
-<p>The gateway isn't free: its three meta-tools cost ~1,200 tokens at
-rest, <em>always</em>. So there's a break-even — the tail you hide must
-be bigger than that overhead. Two rarely-used 200-token tools behind a
-gateway is a <strong>loss</strong> (you added ~1,200 to save ~400). Ten
-of them is a clear <strong>win</strong> (added ~1,200 to save
-~1,800/turn of resting schema). <strong>Rule of thumb: gateway pays off
-past ~8–10 tail tools.</strong></p>
+<!-- BEGIN GENERATED GATEWAY COST -->
+
+<p>The audit currently estimates the gateway's three meta-tool schemas
+at <strong>~311 tokens at rest</strong>. The default tail (sql, notes)
+would cost ~574 tokens if registered directly, so the gateway saves ~263
+resting tokens (46%) before any per-use describe result. These values
+are generated from <code>continue-mcp/bench/schema-metrics.json</code>
+using the repository's deterministic
+<code>ceil(serialized characters / 4)</code> estimator.</p>
+<!-- END GENERATED GATEWAY COST -->
+
 <hr />
 <h2 id="4-worked-example--the-current-toolkit">4. Worked example — the
 current toolkit</h2>
-<p>Say you end up with these, with rough schema sizes and honest
-usage:</p>
+<!-- BEGIN GENERATED TOOLKIT EXAMPLE -->
+
+<p>The current measured inventory is:</p>
 <table>
 <thead>
 <tr>
-<th>Tool</th>
-<th>Schema ~tokens</th>
-<th>Usage</th>
-<th>Verdict</th>
+<th>Server</th>
+<th style="text-align: right;">Tools</th>
+<th style="text-align: right;">Schema ~tokens</th>
+<th>Default registration</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>edit.edit</code></td>
-<td>250</td>
-<td>every message</td>
-<td><strong>Direct</strong> — hot; gateway would save ~0 and add
-latency</td>
+<td><code>hello-mcp</code></td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">187</td>
+<td>direct</td>
 </tr>
 <tr>
-<td><code>shell.run</code> / <code>shell.start</code></td>
-<td>300</td>
-<td>most messages</td>
-<td><strong>Direct</strong> — hot</td>
+<td><code>shell-mcp</code></td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">937</td>
+<td>direct</td>
 </tr>
 <tr>
-<td><code>search.grep</code></td>
-<td>200</td>
-<td>frequent</td>
-<td><strong>Direct</strong> — hot, and small</td>
+<td><code>search-mcp</code></td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">357</td>
+<td>direct</td>
 </tr>
 <tr>
-<td><code>shell.kill</code> / <code>poll</code> /
-<code>list_jobs</code></td>
-<td>150 ea</td>
-<td>occasional</td>
-<td>Direct (small) or fold behind gateway if the tail grows</td>
+<td><code>edit-mcp</code></td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">559</td>
+<td>direct</td>
 </tr>
 <tr>
-<td><code>sql.format</code></td>
-<td>400</td>
-<td>rarely</td>
-<td><strong>Gateway ★</strong> — big + rare</td>
+<td><code>fs-mcp</code></td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">255</td>
+<td>direct</td>
 </tr>
 <tr>
-<td><code>repo.symbols</code></td>
-<td>500</td>
-<td>rarely</td>
-<td><strong>Gateway ★</strong> — big + rare</td>
+<td><code>sql-mcp</code></td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">185</td>
+<td>gateway</td>
 </tr>
 <tr>
-<td><code>http.call</code> (allow-listed APIs)</td>
-<td>350</td>
-<td>rarely</td>
-<td><strong>Gateway</strong></td>
+<td><code>notes-mcp</code></td>
+<td style="text-align: right;">5</td>
+<td style="text-align: right;">389</td>
+<td>gateway</td>
 </tr>
 <tr>
-<td>…20 more niche tools</td>
-<td>300 avg</td>
-<td>rarely</td>
-<td><strong>Gateway</strong></td>
+<td><code>gateway-mcp</code></td>
+<td style="text-align: right;">3</td>
+<td style="text-align: right;">311</td>
+<td>gateway-host</td>
 </tr>
 </tbody>
 </table>
-<p><strong>Result:</strong> the 3–4 hot tools stay directly registered
-(~750–1,000 resting tokens, which cache well). Everything rare lives
-behind the gateway (~1,200 resting, flat forever, no matter how many you
-add). You've replaced <em>all</em> the fat built-ins, kept the everyday
-path fast, and stopped the tail from ever bloating your window.</p>
-<p>Concretely for Continue: register <code>edit.yaml</code>,
-<code>search.yaml</code>, <code>shell.yaml</code>, <strong>and</strong>
-<code>gateway.yaml</code> — but put only the <em>tail</em> servers in
-<code>gateway.config.json</code>, and do <strong>not</strong> also
-register those tail servers with Continue directly (that would double-
-load them, §gateway README).</p>
+<p>With the metadata defaults, direct servers cost ~2295 tokens and the
+gateway costs ~311, for **~2606 resting tokens**. Registering the same
+tail directly would cost ~2869; the generated hybrid saves ~263 tokens
+per request.</p>
+<p>Concretely for Continue, register <code>hello.yaml</code>,
+<code>shell.yaml</code>, <code>search.yaml</code>,
+<code>edit.yaml</code>, <code>fs.yaml</code>, and
+<code>gateway.yaml</code>; keep only <code>sql</code>,
+<code>notes</code> in the gateway downstream configuration. Do not
+register a downstream both directly and through the gateway.</p>
+<!-- END GENERATED TOOLKIT EXAMPLE -->
+
 <hr />
 <h2 id="5-caveats-and-second-order-effects">5. Caveats and second-order
 effects</h2>
@@ -427,9 +431,11 @@ href="https://www.anthropic.com/engineering/code-execution-with-mcp">Anthropic
 — Tool Search Tool &amp; code execution with MCP</a> · <a
 href="https://docs.continue.dev/ide-extensions/agent/how-it-works">How
 Agent Mode Works — Continue Docs</a></li>
-<li>Companion docs in this repo: <code>continue-mcp-toolkit.md</code>
-(§5 token tax, §5b gateway),
-<code>continue-mcp/gateway-mcp/README.md</code> (head/tail design)</li>
+<li>Companion docs in this repo: <code>ARCHITECTURE.md</code> (current
+topology), <code>docs/history/continue-mcp-toolkit-design.md</code> (§5
+token tax, §5b gateway), and
+<code>continue-mcp/gateway-mcp/README.md</code> (head/tail
+operation)</li>
 </ul>
 </content>
 </main>

@@ -93,32 +93,75 @@ def _fuzzy_norm_lines(content_lf: str) -> tuple[list[str], list[str], str]:
     return orig_lines, norm_lines, "\n".join(norm_lines)
 
 
-def _fuzzy_count(content_lf: str, old_lf: str) -> int:
-    _, _, norm_content = _fuzzy_norm_lines(content_lf)
-    norm_old = normalize_for_fuzzy(old_lf)
-    if not norm_old:
-        return 0
-    return norm_content.count(norm_old)
+def _match_spans(content: str, needle: str) -> list[tuple[int, int]]:
+    """Non-overlapping [start, end) matches, all from one immutable snapshot."""
+    if not needle:
+        return []
+    spans = []
+    offset = 0
+    while (start := content.find(needle, offset)) != -1:
+        end = start + len(needle)
+        spans.append((start, end))
+        offset = end
+    return spans
 
 
-def _fuzzy_replace_first(content_lf: str, old_lf: str, new_lf: str) -> str | None:
-    """Replace the first fuzzy occurrence, preserving unchanged lines verbatim.
-    Returns None if there's no fuzzy match."""
+def _fuzzy_replace(
+    content_lf: str, old_lf: str, new_lf: str, replace_all: bool
+) -> tuple[str, int] | None:
+    """Replace fuzzy matches found in the original normalized snapshot.
+
+    Replacements are applied back-to-front within each touched line group, so
+    inserted text is never searched again. Lines outside those groups are copied
+    verbatim from the original content.
+    """
     orig_lines, norm_lines, norm_content = _fuzzy_norm_lines(content_lf)
     norm_old = normalize_for_fuzzy(old_lf)
-    idx = norm_content.find(norm_old)
-    if idx == -1:
+    spans = _match_spans(norm_content, norm_old)
+    if not spans:
         return None
-    end = idx + len(norm_old)
+    if not replace_all:
+        spans = spans[:1]
+
     starts = _line_starts(norm_lines)
-    ls, cs = _locate(starts, idx)
-    le, ce = _locate(starts, end)
-    # The touched line-range [ls, le] is rebuilt from normalized text; the edited
-    # region is swapped for new_lf. Everything outside [ls, le] stays original.
-    prefix = norm_lines[ls][:cs]
-    suffix = norm_lines[le][ce:]
-    rebuilt = orig_lines[:ls] + [prefix + new_lf + suffix] + orig_lines[le + 1:]
-    return "\n".join(rebuilt)
+    groups: list[dict] = []
+    for start, end in spans:
+        start_line, _ = _locate(starts, start)
+        # `end` is exclusive. Using it directly would claim the following line
+        # when a match ends exactly at a newline boundary and could normalize
+        # that otherwise-untouched line.
+        end_line, _ = _locate(starts, end - 1)
+        current = groups[-1] if groups else None
+        if current is not None and start_line <= current["end_line"]:
+            current["end_line"] = max(current["end_line"], end_line)
+            current["spans"].append((start, end))
+        else:
+            groups.append({
+                "start_line": start_line,
+                "end_line": end_line,
+                "spans": [(start, end)],
+            })
+
+    rebuilt: list[str] = []
+    next_original_line = 0
+    for group in groups:
+        first = group["start_line"]
+        last = group["end_line"]
+        rebuilt.extend(orig_lines[next_original_line:first])
+        group_start = starts[first]
+        group_end = starts[last] + len(norm_lines[last])
+        segment = norm_content[group_start:group_end]
+        for start, end in reversed(group["spans"]):
+            rel_start, rel_end = start - group_start, end - group_start
+            segment = segment[:rel_start] + new_lf + segment[rel_end:]
+        # rebuilt is joined with one LF between logical line groups. If the
+        # replacement consumed and recreated that boundary, do not emit it twice.
+        if segment.endswith("\n"):
+            segment = segment[:-1]
+        rebuilt.append(segment)
+        next_original_line = last + 1
+    rebuilt.extend(orig_lines[next_original_line:])
+    return "\n".join(rebuilt), len(spans)
 
 
 def _closest_hint(content_lf: str, old_lf: str, max_lines: int = 5000) -> str | None:
@@ -189,7 +232,9 @@ def find_and_replace(
         return _finish(bom, result, eol), "exact", (exact if replace_all else 1)
 
     # 2) FUZZY — normalized match, unchanged lines preserved verbatim.
-    fuzzy = _fuzzy_count(c, o)
+    norm_old = normalize_for_fuzzy(o)
+    _, _, norm_content = _fuzzy_norm_lines(c)
+    fuzzy = len(_match_spans(norm_content, norm_old))
     if fuzzy == 0:
         hint = _closest_hint(c, o)
         raise EditError("old_string not found." + (f"\n{hint}" if hint else ""))
@@ -199,17 +244,9 @@ def find_and_replace(
             f"context to disambiguate, or pass replace_all=true."
         )
 
-    if not replace_all:
-        result = _fuzzy_replace_first(c, o, nw)
-        assert result is not None
-        return _finish(bom, result, eol), "fuzzy", 1
-
-    result, count = c, 0
-    for _ in range(fuzzy):  # bounded by the pre-counted occurrences
-        nxt = _fuzzy_replace_first(result, o, nw)
-        if nxt is None:
-            break
-        result, count = nxt, count + 1
+    replaced = _fuzzy_replace(c, o, nw, replace_all)
+    assert replaced is not None
+    result, count = replaced
     return _finish(bom, result, eol), "fuzzy", count
 
 

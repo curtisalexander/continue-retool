@@ -26,21 +26,21 @@ import sys
 from typing import Optional
 
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
+from fastmcp.tools import ToolResult
+
+from continue_mcp_common.config import env_float as _env_float
+from continue_mcp_common.results import result as _result
 
 mcp = FastMCP("sql")
 
 
-def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
-    """content is what Continue's UI shows (summary + optional fenced block);
-    structured_content is what the model/tests read via res.data."""
-    md = summary
-    if block.strip():
-        md += f"\n\n```{lang}\n{block}\n```"
-    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
+DEFAULT_TIMEOUT = _env_float("SQL_MCP_TIMEOUT", 30.0, 0.1, 300.0)
 
-DEFAULT_TIMEOUT = float(os.environ.get("SQL_MCP_TIMEOUT", "30"))
+
+class SubprocessFailure(RuntimeError):
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def sqruff_bin() -> str:
@@ -70,12 +70,16 @@ def config_path() -> str:
 
 
 async def _run_sqruff(subcmd: list[str], sql: str) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        sqruff_bin(), *subcmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        executable = sqruff_bin()
+        proc = await asyncio.create_subprocess_exec(
+            executable, *subcmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (OSError, RuntimeError) as exc:
+        raise SubprocessFailure("spawn", str(exc)) from exc
     try:
         out, err = await asyncio.wait_for(
             proc.communicate(sql.encode("utf-8")), DEFAULT_TIMEOUT
@@ -83,8 +87,18 @@ async def _run_sqruff(subcmd: list[str], sql: str) -> tuple[int, str, str]:
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
-        raise RuntimeError(f"sqruff timed out after {DEFAULT_TIMEOUT}s")
-    return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+        raise SubprocessFailure(
+            "timeout", f"sqruff timed out after {DEFAULT_TIMEOUT}s"
+        ) from None
+    try:
+        return proc.returncode or 0, out.decode("utf-8"), err.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SubprocessFailure("decode", f"could not decode sqruff output: {exc}") from exc
+
+
+def _failure(exc: SubprocessFailure) -> ToolResult:
+    data = {"ok": False, "error": str(exc), "error_type": exc.kind}
+    return _result(f"❌ {data['error']}", data)
 
 
 def _base_args(cmd: str, dialect: Optional[str]) -> list[str]:
@@ -106,14 +120,18 @@ async def format(sql: str, dialect: Optional[str] = None) -> ToolResult:
         # below and misreport a false "unparsable SQL" error.
         data = {"ok": True, "sql": sql, "changed": False}
         return _result("formatted (no change) — empty input", data, block=sql, lang="sql")
-    rc, out, err = await _run_sqruff(_base_args("fix", dialect), sql)
+    try:
+        rc, out, err = await _run_sqruff(_base_args("fix", dialect), sql)
+    except SubprocessFailure as exc:
+        return _failure(exc)
     # fix -: fixed SQL on stdout, lint report on stderr. Unparsable input yields
     # no usable rewrite — report the error instead of returning garbage.
     if not out.strip():
         detail = err.strip().splitlines()
+        shown_detail = detail[-5:] if detail else []
         data = {"ok": False, "error": "sqruff produced no output (unparsable SQL?)",
-                "detail": detail[-5:] if detail else []}
-        return _result(f"❌ {data['error']}", data, block="\n".join(data.get('detail') or []))
+                "detail": shown_detail}
+        return _result(f"❌ {data['error']}", data, block="\n".join(shown_detail))
     out = out.rstrip("\n") + "\n"  # sqruff pads stdout with an extra newline
     data = {"ok": True, "sql": out, "changed": out.rstrip("\n") != sql.rstrip("\n")}
     summary = "formatted (changed)" if data["changed"] else "formatted (no change)"
@@ -124,9 +142,12 @@ async def format(sql: str, dialect: Optional[str] = None) -> ToolResult:
 async def lint(sql: str, dialect: Optional[str] = None) -> ToolResult:
     """Lint SQL against house style (Snowflake dialect by default). Returns
     violations as {code, line, column, message}; empty list means clean."""
-    rc, out, err = await _run_sqruff(
-        _base_args("lint", dialect) + ["-f", "json"], sql
-    )
+    try:
+        rc, out, err = await _run_sqruff(
+            _base_args("lint", dialect) + ["-f", "json"], sql
+        )
+    except SubprocessFailure as exc:
+        return _failure(exc)
     if rc != 0 and not out.strip():
         # sqruff died without producing a report (bad config, crashed binary).
         # This must NOT read as "clean" — a false clean is the worst failure
@@ -138,9 +159,11 @@ async def lint(sql: str, dialect: Optional[str] = None) -> ToolResult:
     try:
         parsed = json.loads(out) if out.strip() else {}
     except json.JSONDecodeError:
+        detail = (err or out).strip().splitlines()[-5:]
         data = {"ok": False, "error": "could not parse sqruff output",
-                "detail": (err or out).strip().splitlines()[-5:]}
-        return _result(f"❌ {data['error']}", data, block="\n".join(data.get('detail') or []))
+                "error_type": "decode",
+                "detail": detail}
+        return _result(f"❌ {data['error']}", data, block="\n".join(detail))
     violations = []
     for _fname, diags in parsed.items():
         for d in diags:

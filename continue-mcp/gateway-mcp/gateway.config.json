@@ -1,20 +1,27 @@
 {
-  "_comment": "Downstream MCP servers the gateway aggregates. Continue connects ONLY to the gateway; the gateway connects to these. Server names must not contain '_'. Relative cwd entries resolve against this file's directory.",
+  "_comment": "Generated from servers.json. Continue connects only to the gateway; relative cwd entries resolve against this file's directory.",
   "servers": {
-    "shell": {
+    "sql": {
       "command": "uv",
-      "args": ["run", "shell-mcp"],
-      "cwd": "../shell-mcp"
+      "args": [
+        "run",
+        "--no-sync",
+        "--project",
+        ".",
+        "sql-mcp"
+      ],
+      "cwd": ".."
     },
-    "search": {
+    "notes": {
       "command": "uv",
-      "args": ["run", "search-mcp"],
-      "cwd": "../search-mcp"
-    },
-    "edit": {
-      "command": "uv",
-      "args": ["run", "edit-mcp"],
-      "cwd": "../edit-mcp"
+      "args": [
+        "run",
+        "--no-sync",
+        "--project",
+        ".",
+        "notes-mcp"
+      ],
+      "cwd": ".."
     }
   }
 }

@@ -15,6 +15,15 @@ def _list(path, **kw):
     return asyncio.run(server.list(str(path), **kw)).structured_content
 
 
+def test_numeric_environment_limits_are_defaulted_and_clamped(monkeypatch):
+    monkeypatch.setenv("FS_TEST_LIMIT", "invalid")
+    assert server._env_int("FS_TEST_LIMIT", 20, 1, 100) == 20
+    monkeypatch.setenv("FS_TEST_LIMIT", "-5")
+    assert server._env_int("FS_TEST_LIMIT", 20, 1, 100) == 1
+    monkeypatch.setenv("FS_TEST_LIMIT", "999999")
+    assert server._env_int("FS_TEST_LIMIT", 20, 1, 100) == 100
+
+
 # --- read -------------------------------------------------------------------
 def test_read_numbers_lines(tmp_path):
     f = tmp_path / "a.txt"
@@ -34,7 +43,10 @@ def test_read_line_range_pages(tmp_path):
     assert res["content"].startswith("41\tline41")
     assert res["content"].endswith("50\tline50")
     assert res["truncated"] is True
-    assert res["total_lines"] == 100
+    assert res["total_lines"] is None
+    assert res["total_lines_exact"] is False
+    assert res["total_lines_at_least"] == 51
+    assert res["lines_scanned"] == 51
 
 
 def test_read_default_limit_caps(tmp_path):
@@ -43,6 +55,7 @@ def test_read_default_limit_caps(tmp_path):
     res = _read(f)
     assert res["end_line"] == 2000
     assert res["truncated"] is True
+    assert res["lines_scanned"] == 2001
 
 
 def test_read_long_lines_are_clipped(tmp_path):
@@ -73,6 +86,8 @@ def test_read_start_past_eof(tmp_path):
     assert res["ok"] is True
     assert res["content"] == ""
     assert res["truncated"] is False
+    assert res["total_lines"] == 1
+    assert res["total_lines_exact"] is True
 
 
 # --- list -------------------------------------------------------------------
@@ -120,6 +135,66 @@ def test_list_caps_entries(tmp_path, monkeypatch):
     res = _list(tmp_path)
     assert res["count"] == 5
     assert res["truncated"] is True
+
+
+def test_list_caps_internal_directory_scan_work(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MAX_SCANNED_ENTRIES", 4)
+    for i in range(10):
+        (tmp_path / f"f{i}.txt").write_text("", encoding="utf-8")
+    res = _list(tmp_path)
+    assert res["scanned"] == 4
+    assert res["count"] == 4
+    assert res["truncated"] is True
+
+
+def test_list_caps_requested_recursion_depth(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MAX_DEPTH", 2)
+    (tmp_path / "one" / "two" / "three").mkdir(parents=True)
+    res = _list(tmp_path, depth=10_000)
+    paths = [e["path"] for e in res["entries"]]
+    assert res["requested_depth"] == 10_000
+    assert res["depth"] == 2 and res["depth_capped"] is True
+    assert res["truncated"] is True
+    assert any("two" in path for path in paths)
+    assert not any("three" in path for path in paths)
+
+
+def test_list_reports_inaccessible_subdirectory_as_partial(tmp_path, monkeypatch):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (tmp_path / "visible.txt").write_text("ok", encoding="utf-8")
+    real_scandir = server.os.scandir
+
+    def guarded_scandir(path):
+        if os.fspath(path) == os.fspath(blocked):
+            raise PermissionError("access denied for test")
+        return real_scandir(path)
+
+    monkeypatch.setattr(server.os, "scandir", guarded_scandir)
+    res = _list(tmp_path, depth=2)
+    assert res["ok"] is True and res["partial"] is True
+    assert res["skipped"] == 1
+    assert res["errors"][0]["path"] == "blocked"
+    assert "access denied for test" in res["errors"][0]["error"]
+    assert any(entry["path"] == "visible.txt" for entry in res["entries"])
+
+
+def test_list_bounds_inaccessible_entry_diagnostics(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MAX_LIST_ERRORS", 2)
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    real_scandir = server.os.scandir
+
+    def guarded_scandir(path):
+        if os.fspath(path) != os.fspath(tmp_path):
+            raise PermissionError(f"blocked {os.path.basename(path)}")
+        return real_scandir(path)
+
+    monkeypatch.setattr(server.os, "scandir", guarded_scandir)
+    res = _list(tmp_path, depth=2)
+    assert res["skipped"] == 3
+    assert len(res["errors"]) == 2
+    assert res["errors_truncated"] is True
 
 
 def test_list_sizes_reported(tmp_path):
@@ -213,7 +288,19 @@ def test_read_byte_cap_binds_on_wide_files(tmp_path):
     assert len(res["content"].encode("utf-8")) <= server.MAX_BYTES + 2000
     assert res["truncated"] is True
     assert res["truncated_by"] == "bytes"
-    assert res["total_lines"] == 3000
+    assert res["total_lines"] is None
+    assert res["total_lines_exact"] is False
+    assert res["lines_scanned"] < 100
+
+
+def test_read_small_page_does_not_count_rest_of_large_file(tmp_path):
+    f = tmp_path / "million.txt"
+    f.write_text("x\n" * 100_000, encoding="utf-8")
+    res = _read(f, limit=10)
+    assert res["content"].endswith("10\tx")
+    assert res["lines_scanned"] == 11
+    assert res["total_lines"] is None
+    assert res["total_lines_at_least"] == 11
 
 
 def test_read_reports_line_limit_when_lines_bind_first(tmp_path):

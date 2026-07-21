@@ -24,6 +24,15 @@ jobs:
       - name: ruff (default rules — real errors only, config in ruff.toml)
         run: uvx ruff check continue-mcp
 
+      - name: ty
+        run: >-
+          uv run --project continue-mcp --with ty ty check
+          continue-mcp/continue_mcp_common
+          continue-mcp/*-mcp/*_mcp
+          continue-mcp/install-workspace.py
+          continue-mcp/bench
+          continue-mcp/scripts
+
   test:
     strategy:
       fail-fast: false
@@ -48,28 +57,33 @@ jobs:
 
       - name: Run all test suites
         shell: bash
-        run: |
-          set -euo pipefail
-          fail=0
-          for d in hello-mcp shell-mcp search-mcp edit-mcp gateway-mcp sql-mcp fs-mcp notes-mcp; do
-            echo "::group::$d"
-            (cd "continue-mcp/$d" && uv run --extra test pytest -q) || fail=1
-            echo "::endgroup::"
-          done
-          exit $fail
+        run: uv run --project continue-mcp python continue-mcp/scripts/run_server_tests.py
 
       - name: Installer smoke test
         shell: bash
         run: |
           set -euo pipefail
           target="$RUNNER_TEMP/blank-project"
+          gateway_target="$RUNNER_TEMP/gateway-project"
           mkdir -p "$target"
+          mkdir -p "$gateway_target"
           uv run continue-mcp/install-workspace.py "$target"
+          uv run continue-mcp/install-workspace.py "$gateway_target" \
+            --gateway --only hello
           test -f "$target/.continue/mcpServers/shell.yaml"
           test -f "$target/.continue/rules/notes.md"
+          test -f "$gateway_target/.continue/mcpServers/gateway.yaml"
+          test -f "$gateway_target/.continue/gateway.config.json"
           if grep -r "/absolute/path/to" "$target/.continue"; then
             echo "unstamped placeholders remain" && exit 1
           fi
+          if grep -r "/absolute/path/to" "$gateway_target/.continue"; then
+            echo "unstamped gateway placeholders remain" && exit 1
+          fi
+
+      - name: Installer recovery and configuration tests
+        shell: bash
+        run: uv run --project continue-mcp --extra test pytest -q continue-mcp/tests
 
       # Doctor drives a REAL initialize + tools/list handshake against every
       # server over stdio — the same flow Continue performs at connect.
@@ -78,6 +92,22 @@ jobs:
         run: |
           set -euo pipefail
           uv run continue-mcp/install-workspace.py "$RUNNER_TEMP/blank-project" --check
+          uv run continue-mcp/install-workspace.py "$RUNNER_TEMP/gateway-project" \
+            --gateway --only hello --check
+
+      - name: Clean-wheel install and console-script smoke test
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheels="$RUNNER_TEMP/continue-mcp-wheels"
+          wheel_venv="$RUNNER_TEMP/continue-mcp-wheel-venv"
+          mkdir -p "$wheels"
+          uv build --wheel --project continue-mcp --out-dir "$wheels"
+          uv venv "$wheel_venv"
+          uv pip install --python "$wheel_venv/bin/python" "$wheels"/*.whl
+          uv run --project continue-mcp \
+            python continue-mcp/tests/wheel_smoke.py "$wheel_venv"
 
       # Informational: resting token cost per tool + cold-start latency.
       # Watch this output drift across PRs; it is the toolkit's price tag.
@@ -86,7 +116,9 @@ jobs:
         shell: bash
         run: |
           cd continue-mcp
-          uv run --no-sync --project hello-mcp python bench/audit.py
+          uv run --no-sync --project . python bench/audit.py \
+            --write-schema-metrics bench/schema-metrics.json
+          git diff --exit-code bench/schema-metrics.json
 
   docs:
     # The Pages site serves COMMITTED HTML; fail if docs/ drifted from the
@@ -101,6 +133,7 @@ jobs:
       - name: Rebuild docs and diff
         run: |
           set -euo pipefail
+          python continue-mcp/scripts/sync_metadata.py --check
           ./build/build-docs.sh
           if ! git diff --exit-code docs/; then
             echo "docs/ is stale — run ./build/build-docs.sh and commit" >&2

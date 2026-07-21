@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MCP Toolkit — Design — continue-retool</title>
+<title>MCP Toolkit — Design History — continue-retool</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#141b24; --panel2:#1b2430; --ink:#e6edf3; --muted:#9fb0c0;
@@ -67,7 +67,7 @@
 <body>
 <header>
   <div class="kicker"><a href="./index.html">&larr; continue-retool</a></div>
-  <h1>MCP Toolkit — Design</h1>
+  <h1>MCP Toolkit — Design History</h1>
 </header>
 <main>
 <ul>
@@ -108,6 +108,13 @@ status as of 2026-07-15</a></li>
 </ul>
 <h1 id="replacing-continues-tools-with-your-own-mcp-toolkit">Replacing
 Continue's Tools with Your Own MCP Toolkit</h1>
+<blockquote>
+<p>Historical design record. This document preserves the exploration and
+dated decision log that led to the current implementation. For the
+maintained system description, see <a
+href="architecture.html"><code>../../ARCHITECTURE.md</code></a>; for
+accepted decisions, see <a href="adr/"><code>../adr/</code></a>.</p>
+</blockquote>
 <p><em>Working design doc, 2026-07-01. Covers: how tool use works in a
 Continue.dev (VS Code) coding agent, why a local MCP server is the
 "native" way to own your tools, how to build a terminal-runner MCP (bash
@@ -170,6 +177,13 @@ terse schemas, instead of exposing 40 fat tools at once.</td>
 token tax you're feeling. Hide tools behind a search/dispatch tool.</td>
 </tr>
 <tr>
+<td><strong>Packaging</strong></td>
+<td>One <code>continue-mcp</code> distribution and environment, with
+separate server entry points and selective registration.</td>
+<td>One lock/release/shared-helper surface removes drift;
+installed-but-unregistered code has no runtime authority.</td>
+</tr>
+<tr>
 <td><strong>Rapid tool creation</strong></td>
 <td>A <strong>cookiecutter template + a <code>new-mcp-tool</code>
 skill</strong> that hands the LLM the pattern, an example, and
@@ -183,6 +197,21 @@ This is your ouroboros.</td>
 <p>Dated, newest-first. Where a later entry contradicts earlier prose in
 this doc, <strong>the decision log wins</strong> — superseded sections
 are kept for the reasoning, not as the plan.</p>
+<p><strong>2026-07-21</strong></p>
+<ul>
+<li><strong>Unified packaging; selective activation, not selective files
+on disk.</strong> The eight MCP servers now ship as one
+<code>continue-mcp</code> project with one <code>uv.lock</code>, one
+virtual environment, and separate console entry points/processes. The
+installer still accepts <code>--only</code>, but it controls which
+servers Continue registers (or the gateway owns), not which modules are
+installed. Common limit, path-containment, Unicode-path, and result
+helpers now have one runtime implementation. This supersedes the July 15
+self-contained-project decision: keeping unused code inert is valuable;
+maintaining separately copyable server directories was not valuable
+enough to justify duplicated safety logic, lockfiles, syncs, and
+releases.</li>
+</ul>
 <p><strong>2026-07-17 (later, sql/hello review)</strong></p>
 <ul>
 <li><strong>sql-mcp's hard <code>sqruff</code> dependency is correct —
@@ -331,9 +360,8 @@ screenshot) spellings for paths that must already exist — but never for
 a path being <em>created</em>, where the literal spelling is the answer.
 We take the cross product of the three transforms rather than Pi's fixed
 four-rung ladder, which can't match a name needing all three at once
-(the French screenshot Pi's own comment cites). Kept as per-server
-copies, consistent with the <code>_resolve</code>/<code>_result</code>
-duplication decision below.</li>
+(the French screenshot Pi's own comment cites). These variants now live
+in the shared path module used by both fs and edit.</li>
 <li><strong>Not adopted: a file-mutation queue.</strong> Pi serializes
 same-file writes because Node fs is async; our edit is a synchronous
 read-modify-write with no <code>await</code> between read and write, so
@@ -380,12 +408,10 @@ Read-only tools carry <code>readOnlyHint</code>, destructive ones
 <code>destructiveHint</code>, so a client can derive the
 Ask-First/Automatic split mechanically; the surface tests assert
 it.</li>
-<li><strong><code>_result</code>/<code>_resolve</code> duplication is
-deliberate.</strong> Each server stays a self-contained uv project (no
-shared internal package to version and sync); the cost is ~20 duplicated
-lines per server, and conformance is enforced by the shared surface-test
-assertions instead of shared code. Revisit only if the copies actually
-diverge.</li>
+<li><strong>Historical: <code>_result</code>/<code>_resolve</code>
+duplication was deliberate.</strong> This was superseded on 2026-07-21
+by the unified distribution and shared runtime helpers after the safety
+pass made their contracts concrete.</li>
 <li><strong>Cost is measured, not estimated.</strong>
 <code>bench/audit.py</code> prints per-server cold-start and per-tool
 resting token cost (CI prints it every run);
@@ -468,8 +494,8 @@ results. The Continue CLI / extension is <em>not</em> part of the test
 story (no API key, no hub access); LLM tool-selection behavior is
 accepted as untested.</li>
 <li><strong>Transitioning from sketches to daily-driver
-software.</strong> fastmcp is pinned (<code>&gt;=3,&lt;4</code>),
-<code>uv.lock</code> files are committed, CI runs a 3-OS matrix.</li>
+software.</strong> fastmcp is pinned (<code>&gt;=3,&lt;4</code>), the
+root <code>uv.lock</code> is committed, and CI runs a 3-OS matrix.</li>
 </ul>
 <p><strong>2026-07-01</strong></p>
 <ul>
@@ -1041,7 +1067,7 @@ bloat</strong>. Two things to understand first.</p>
 <p><strong>For the full "which tools go direct vs. behind the gateway"
 strategy — the head/tail tradeoff, the token math, the ladder of levers,
 and a worked example — see the companion doc <a
-href="continue-mcp-token-strategy.md"><code>continue-mcp-token-strategy.md</code></a>.</strong>
+href="continue-mcp-token-strategy.html"><code>continue-mcp-token-strategy.md</code></a>.</strong>
 The short version: decide each tool by
 <code>schema_size × (1 − usage)</code> — big and rare → gateway; small
 or constant → direct.</p>
@@ -1161,11 +1187,10 @@ let an LLM fill the template correctly). Because every FastMCP tool is
 <em>one decorated function</em>, codegen is genuinely easy here.</p>
 <h3 id="6a-the-template-cookiecutter">6a. The template
 (cookiecutter)</h3>
-<p>One repo layout, reused for every tool — pure Python, hatchling
-build, <code>uv</code> run (search-mcp is the reference
+<p>One server layout, added to the toolkit's root hatchling project and
+run with <code>uv</code> (search-mcp is the reference
 implementation):</p>
 <pre class="text"><code>&lt;name&gt;-mcp/
-  pyproject.toml            # hatchling backend, console-script entry, fastmcp dep
   &lt;name&gt;_mcp/
     server.py               # FastMCP() + @mcp.tool functions (terse descriptions)
   tests/
@@ -1174,6 +1199,10 @@ implementation):</p>
   .continue/
     mcpServers/&lt;name&gt;.yaml   # ready-to-drop-in Continue wiring
   README.md                 # one paragraph + the tool list</code></pre>
+<p>The root <code>pyproject.toml</code>, installer registry, audit,
+wheel smoke test, CI loop, and documentation inventory are updated
+together; new servers do not receive a separate project, lockfile, or
+virtual environment.</p>
 <h3 id="6b-the-skill-new-mcp-tool--the-ouroboros-loop">6b. The skill
 (<code>new-mcp-tool</code>) — the ouroboros loop</h3>
 <p>A Claude Code / agent <strong>skill</strong> that, given a one-line

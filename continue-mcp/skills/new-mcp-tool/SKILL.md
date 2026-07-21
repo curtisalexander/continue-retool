@@ -24,8 +24,8 @@ generation can discover it.
    JSON schema, no prose padding. This is the whole point — do not regress it.
 2. **One flexible tool beats three narrow ones.** Prefer a single tool with a
    couple of optional args over a family of near-duplicates.
-3. **Pure Python only.** Every server is pure Python: hatchling build backend,
-   `fastmcp` dependency, run with `uv`. No compiled extensions, no
+3. **Pure Python only.** Every server is part of the toolkit's root hatchling
+   project, uses `fastmcp`, and runs with `uv`. No compiled extensions, no
    maturin/Rust. If a hot path needs native speed, shell out to a proven
    binary the way search-mcp shells out to `rg`.
 4. **Ships with a test, and you run it.** Every tool gets a golden test; you
@@ -47,7 +47,6 @@ generation can discover it.
    `<name>_mcp` naming convention):
    ```
    <name>-mcp/
-     pyproject.toml               # hatchling; template below
      <name>_mcp/__init__.py
      <name>_mcp/server.py         # FastMCP() + @mcp.tool functions
      tests/conftest.py            # sys.path shim (copy from any sibling)
@@ -59,6 +58,11 @@ generation can discover it.
      .continue/mcpServers/<name>.yaml
      README.md                    # one paragraph + the tool list
    ```
+   Do not hand-edit the packaging, installer, audit, wheel-smoke, CI, site, or
+   architecture inventories. They are derived from `servers.json` by the
+   registration command in step 6. Regenerate the root `uv.lock` through
+   `scripts/update_dependencies.py` after any dependency change. Never create a
+   per-server `pyproject.toml`, lockfile, or venv.
    Keep pure logic (parsers, matchers, rankers) in its own stdlib-only module
    next to `server.py` so it's unit-testable without MCP — like
    `edit_mcp/matcher.py` and `gateway_mcp/registry.py`.
@@ -70,60 +74,37 @@ generation can discover it.
    raised exceptions; annotate read-only tools `readOnlyHint` and destructive
    ones `destructiveHint` so clients can derive policy.
 4. **Test through our own shell MCP** (the ouroboros step):
-   `shell.run("cd <name>-mcp && uv run --extra test pytest -q")`.
+   `shell.run("cd continue-mcp && uv run --extra test pytest -q <name>-mcp/tests")`.
    Iterate until green.
 5. **Emit wiring + policy steps.** Print the `.continue/mcpServers/<name>.yaml`
    and the exact tool-policy instructions ("set `<name>.*` to Ask First /
    Automatic; if it replaces a built-in, set that built-in to Excluded").
-6. **Register for discovery** per rule 5: hot → tell the user to drop the yaml
-   into their workspace's `.continue/mcpServers/`; tail → append to the
-   `servers` object in `gateway-mcp/gateway.config.json`:
-   ```json
-   "<name>": { "command": "uv", "args": ["run", "<name>-mcp"], "cwd": "../<name>-mcp" }
+6. **Register and regenerate every repository surface** with one command:
+   ```bash
+   python scripts/register_server.py <name> \
+     --registration <direct-or-gateway> \
+     --summary "<short inventory summary>" \
+     --site-description "<one site sentence>" \
+     --responsibility "<component responsibility>" \
+     --authority "<external authority or trust boundary>" \
+     --policy "  * <name>.* -> <Automatic or Ask First>"
    ```
-   (Server names must not contain `_`. The gateway picks it up on next start.)
-
-## Template: pyproject.toml
-
-```toml
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[project]
-name = "<name>-mcp"
-version = "0.1.0"
-description = "<one line>"
-requires-python = ">=3.11"
-dependencies = ["fastmcp>=3,<4"]   # the toolkit-wide pin — do not loosen
-
-[project.optional-dependencies]
-test = ["pytest>=8"]
-
-[project.scripts]
-<name>-mcp = "<name>_mcp.server:main"
-
-[tool.hatch.build.targets.wheel]
-packages = ["<name>_mcp"]
-```
+   Run it from `continue-mcp/`. It validates the scaffold, adds the one metadata
+   record, audits schemas, and regenerates packaging, installer/CI consumers,
+   documentation inventories, token examples, and the default gateway config.
+   Then run `python scripts/sync_metadata.py --check`. Hot tools are marked
+   `direct`; tail tools are marked `gateway`. Never edit a derived inventory or
+   register a server in both places by hand.
 
 ## Template: a minimal tool (house style)
 
 ```python
 from fastmcp import FastMCP
-from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent
+from fastmcp.tools import ToolResult
+
+from continue_mcp_common.results import result as _result
 
 mcp = FastMCP("<name>")
-
-
-def _result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolResult:
-    """content is what Continue's UI shows (summary + optional fenced block);
-    structured_content is what the model/tests read via res.data."""
-    md = summary
-    if block.strip():
-        md += f"\n\n```{lang}\n{block}\n```"
-    return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})   # or destructiveHint for writes
