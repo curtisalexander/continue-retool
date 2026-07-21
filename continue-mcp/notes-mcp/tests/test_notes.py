@@ -158,6 +158,7 @@ def test_write_is_atomic_and_preserves_original_on_replace_failure(tmp_path, mon
     assert sorted(p.name for p in path.parent.iterdir()) == ["n.md"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX mode bits")
 def test_atomic_write_preserves_permissions(tmp_path, monkeypatch):
     _in_repo(tmp_path, monkeypatch)
     _write("n", "original")
@@ -172,10 +173,21 @@ def test_atomic_write_preserves_permissions_without_fchmod(tmp_path, monkeypatch
     _write("n", "original")
     path = tmp_path / ".continue-notes" / "n.md"
     path.chmod(0o640)
+    preserved_mode = stat.S_IMODE(path.stat().st_mode)
+    chmod_calls = []
+    real_chmod = os.chmod
+
+    def record_chmod(target, mode):
+        chmod_calls.append((target, mode))
+        real_chmod(target, mode)
+
     monkeypatch.delattr(server.os, "fchmod", raising=False)
+    monkeypatch.setattr(server.os, "chmod", record_chmod)
 
     assert _write("n", "replacement")["ok"] is True
-    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert path.read_text(encoding="utf-8") == "replacement\n"
+    assert len(chmod_calls) == 1
+    assert chmod_calls[0][1] == preserved_mode
 
 
 def test_encoding_failure_preserves_original(tmp_path, monkeypatch):
