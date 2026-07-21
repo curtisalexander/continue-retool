@@ -1,5 +1,10 @@
 # Repository improvement plan
 
+> **Status:** Completed July 21, 2026, in commit `4044fec`.
+> This document is retained as historical implementation and acceptance-test
+> context; the current architecture and decisions are documented in
+> [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md) and [`../adr/`](../adr/).
+
 This plan turns the July 2026 repository review into small, testable changes.
 Safety work comes first: a tool should fail without damaging existing data,
 crossing its configured path boundary, exhausting memory, or leaving runaway
