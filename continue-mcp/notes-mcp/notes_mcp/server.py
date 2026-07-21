@@ -174,7 +174,10 @@ def _atomic_write(path: str, data: bytes) -> None:
     fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=parent)
     try:
         if mode is not None:
-            os.fchmod(fd, mode)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, mode)
+            else:
+                os.chmod(temp_path, mode)
         with os.fdopen(fd, "wb") as f:
             fd = -1
             f.write(data)

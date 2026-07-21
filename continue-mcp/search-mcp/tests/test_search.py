@@ -67,7 +67,7 @@ def test_file_listing_drains_large_stderr_concurrently(tmp_path, monkeypatch):
         "import sys\n"
         "sys.stderr.write('e' * 1000000)\n"
         "sys.stderr.flush()\n"
-        "print('visible.py')\n",
+        "sys.stdout.buffer.write(b'visible.py\\r\\n')\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)

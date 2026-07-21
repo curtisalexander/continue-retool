@@ -167,6 +167,17 @@ def test_atomic_write_preserves_permissions(tmp_path, monkeypatch):
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
+def test_atomic_write_preserves_permissions_without_fchmod(tmp_path, monkeypatch):
+    _in_repo(tmp_path, monkeypatch)
+    _write("n", "original")
+    path = tmp_path / ".continue-notes" / "n.md"
+    path.chmod(0o640)
+    monkeypatch.delattr(server.os, "fchmod", raising=False)
+
+    assert _write("n", "replacement")["ok"] is True
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
 def test_encoding_failure_preserves_original(tmp_path, monkeypatch):
     _in_repo(tmp_path, monkeypatch)
     _write("n", "original")

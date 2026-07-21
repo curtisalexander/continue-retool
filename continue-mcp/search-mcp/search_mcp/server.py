@@ -285,7 +285,7 @@ async def _run_files(args: list[str], cap: int, timeout: float) -> dict:
     try:
         async def _read() -> bool:
             async for raw in stdout:
-                paths.append(raw.decode("utf-8", "replace").rstrip("\n"))
+                paths.append(raw.decode("utf-8", "replace").rstrip("\r\n"))
                 if len(paths) >= cap:
                     return True
             return False

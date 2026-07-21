@@ -422,6 +422,7 @@ def test_spawn_failure_is_a_structured_result(monkeypatch):
         raise FileNotFoundError("interpreter disappeared")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_spawn)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", fail_spawn)
     res = asyncio.run(server.start("echo hi", shell=sh)).structured_content
     assert res["ok"] is False
     assert res["state"] == "failed"
