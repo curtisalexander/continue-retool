@@ -24,7 +24,7 @@ def _snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
 
 
 def test_install_serializes_adversarial_paths_and_writes_manifest(tmp_path: Path):
-    project = tmp_path / 'project # one "quoted"'
+    project = tmp_path / "project # one 'quoted'"
     project.mkdir()
     uv = 'C:/Program Files/uv #1/uv"tool.exe'
 
@@ -57,7 +57,7 @@ def test_selective_install_uninstall_restores_empty_project(tmp_path: Path):
 
 
 def test_gateway_install_stamps_downstreams_and_uninstalls(tmp_path: Path):
-    project = tmp_path / 'gateway project # "quoted"'
+    project = tmp_path / "gateway project # 'quoted'"
     project.mkdir()
     uv = os.path.abspath('/opt/uv tools/uv')
 
