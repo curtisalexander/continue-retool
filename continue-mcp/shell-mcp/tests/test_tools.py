@@ -20,7 +20,7 @@ import sys
 import pytest
 
 from shell_mcp import server
-from shell_mcp.server import IS_WINDOWS, RingBuffer, build_argv
+from shell_mcp.server import IS_WINDOWS, JobState, RingBuffer, build_argv
 
 PY = sys.executable
 
@@ -48,6 +48,22 @@ def test_timeout_validation_accepts_bounds_and_default():
     assert server._validate_timeout(server.MAX_TIMEOUT, 30.0) == server.MAX_TIMEOUT
 
 
+def test_console_result_uses_fence_longer_than_output_backticks():
+    output = "triple ``` and longer `````` runs"
+    rendered = server._console_text(
+        "printf output", {"stdout": output, "state": "done", "exit_code": 0}
+    )
+    fence = "`" * 7
+    assert rendered == f"{fence}console\n$ printf output\n{output}\n[done] exit 0\n{fence}"
+
+
+def test_console_result_keeps_triple_fence_for_normal_output():
+    rendered = server._console_text(
+        "echo hi", {"stdout": "hi\n", "state": "done", "exit_code": 0}
+    )
+    assert rendered == "```console\n$ echo hi\nhi\n[done] exit 0\n```"
+
+
 def default_shell():
     """A shell we can rely on existing on this host, or None to skip."""
     if IS_WINDOWS:
@@ -59,6 +75,13 @@ def default_shell():
 # build_argv now resolves argv[0] to an absolute interpreter path. We pin that
 # resolution with the SHELL_MCP_<SHELL> override so the argv is host-independent
 # (the override is trusted as-is, exactly as the installer stamps it).
+def test_job_state_is_string_compatible_and_constrained():
+    assert JobState.RUNNING == "running"
+    assert str(JobState.TIMEOUT) == "timeout"
+    with pytest.raises(ValueError):
+        JobState("unknown")
+
+
 def test_build_argv_bash(monkeypatch):
     monkeypatch.setenv("SHELL_MCP_BASH", "/opt/bash")
     assert build_argv("echo hi", "bash") == ["/opt/bash", "-lc", "echo hi"]
@@ -223,7 +246,7 @@ def test_pruning_waits_for_reaper_after_kill_state(monkeypatch):
             f'"{PY}" -c "import time; time.sleep(30)"', shell=sh, timeout=60
         )
         job = server.JOBS[started["job_id"]]
-        job.state = "killed"
+        job.state = JobState.KILLED
         server._prune_finished()
         retained_while_reaping = job.job_id in server.JOBS
         await server._shutdown_jobs()
@@ -449,32 +472,55 @@ def test_output_decode_failure_is_a_structured_result(monkeypatch):
 
 
 def test_kill_terminates_process_tree(tmp_path):
-    """The load-bearing test. A parent process spawns a grandchild that, after a
-    delay, writes a sentinel file. Killing the JOB must take down the whole tree,
-    so the sentinel is never written."""
+    """Killing the JOB must take down a confirmed-running grandchild."""
     sh = default_shell()
     if sh is None:
         pytest.skip("no usable shell on this host")
 
     sentinel = tmp_path / "grandchild_ran.txt"
+    ready = tmp_path / "grandchild_ready.txt"
+    trigger = tmp_path / "grandchild_trigger.txt"
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(
+        "import os, sys, time\n"
+        "sentinel, ready, trigger = sys.argv[1:]\n"
+        "open(ready, 'w').close()\n"
+        "while not os.path.exists(trigger):\n"
+        "    time.sleep(0.01)\n"
+        "open(sentinel, 'w').close()\n"
+    )
     parent = tmp_path / "parent.py"
     parent.write_text(
         "import subprocess, sys, time\n"
-        "sentinel = sys.argv[1]\n"
-        "# grandchild: wait, then prove it survived by touching the sentinel\n"
-        "code = \"import time, sys; time.sleep(3); open(sys.argv[1], 'w').close()\"\n"
-        "subprocess.Popen([sys.executable, '-c', code, sentinel])\n"
+        "grandchild, sentinel, ready, trigger = sys.argv[1:]\n"
+        "subprocess.Popen([sys.executable, grandchild, sentinel, ready, trigger])\n"
         "time.sleep(30)  # keep the parent (and the job) alive\n"
     )
 
     async def scenario():
         started = (await server.start(
-            f'"{PY}" "{parent}" "{sentinel}"', shell=sh, timeout=60
+            f'"{PY}" "{parent}" "{grandchild}" "{sentinel}" "{ready}" "{trigger}"',
+            shell=sh, timeout=60,
         )).structured_content
         jid = started["job_id"]
-        await asyncio.sleep(1.0)          # let the grandchild spawn
+        # Do not race kill against process creation: require the grandchild's
+        # own readiness signal, with a bounded diagnostic timeout.
+        async with asyncio.timeout(5):
+            while not ready.exists():
+                await asyncio.sleep(0.01)
         killed = (await server.kill(jid)).structured_content
-        await asyncio.sleep(4.0)          # outlast the grandchild's 3s timer
+        job = server.JOBS[jid]
+        assert job._reaper_task is not None
+        await asyncio.wait_for(asyncio.shield(job._reaper_task), timeout=5)
+        trigger.touch()
+        # A surviving grandchild responds almost immediately; bound the
+        # negative assertion rather than sleeping past an arbitrary child timer.
+        try:
+            async with asyncio.timeout(1):
+                while not sentinel.exists():
+                    await asyncio.sleep(0.01)
+        except TimeoutError:
+            pass
         return killed
 
     killed = asyncio.run(scenario())

@@ -21,23 +21,37 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           version: "0.11.21"
-      - name: ruff (default rules — real errors only, config in ruff.toml)
-        run: uvx ruff check continue-mcp
+          python-version: "3.11"
+      - name: Sync locked development environment
+        run: uv sync --project continue-mcp --frozen --group dev
+      - name: ruff
+        run: uv run --project continue-mcp --no-sync ruff check continue-mcp
 
       - name: ty
+        working-directory: continue-mcp
         run: >-
-          uv run --project continue-mcp --with ty ty check
-          continue-mcp/continue_mcp_common
-          continue-mcp/*-mcp/*_mcp
-          continue-mcp/install-workspace.py
-          continue-mcp/bench
-          continue-mcp/scripts
+          uv run --no-sync ty check
+          continue_mcp_common
+          *-mcp/*_mcp
+          install-workspace.py
+          bench
+          scripts
 
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # Cover every supported runner on the minimum Python, then exercise
+          # the pinned current stable Python once to avoid tripling CI cost.
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: macos-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.14"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +61,10 @@ jobs:
         with:
           version: "0.11.21"   # pinned: a uv release must not silently change CI
           enable-cache: true
+          python-version: ${{ matrix.python }}
+
+      - name: Sync committed lockfile
+        run: uv sync --project continue-mcp --frozen --extra test
 
       # ripgrep is bring-your-own (search-mcp/pyproject.toml never depends on
       # it) — install the global prebuilt binary the same way the READMEs
@@ -57,7 +75,7 @@ jobs:
 
       - name: Run all test suites
         shell: bash
-        run: uv run --project continue-mcp python continue-mcp/scripts/run_server_tests.py
+        run: uv run --project continue-mcp --no-sync python continue-mcp/scripts/run_server_tests.py
 
       - name: Installer smoke test
         shell: bash
@@ -67,9 +85,11 @@ jobs:
           gateway_target="$RUNNER_TEMP/gateway-project"
           mkdir -p "$target"
           mkdir -p "$gateway_target"
-          uv run continue-mcp/install-workspace.py "$target"
-          uv run continue-mcp/install-workspace.py "$gateway_target" \
-            --gateway --only hello
+          uv run --project continue-mcp --no-sync python \
+            continue-mcp/install-workspace.py "$target" --no-sync
+          uv run --project continue-mcp --no-sync python \
+            continue-mcp/install-workspace.py "$gateway_target" \
+            --gateway --only hello --no-sync
           test -f "$target/.continue/mcpServers/shell.yaml"
           test -f "$target/.continue/rules/notes.md"
           test -f "$gateway_target/.continue/mcpServers/gateway.yaml"
@@ -83,7 +103,7 @@ jobs:
 
       - name: Installer recovery and configuration tests
         shell: bash
-        run: uv run --project continue-mcp --extra test pytest -q continue-mcp/tests
+        run: uv run --project continue-mcp --no-sync pytest -q continue-mcp/tests
 
       # Doctor drives a REAL initialize + tools/list handshake against every
       # server over stdio — the same flow Continue performs at connect.
@@ -91,23 +111,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run continue-mcp/install-workspace.py "$RUNNER_TEMP/blank-project" --check
-          uv run continue-mcp/install-workspace.py "$RUNNER_TEMP/gateway-project" \
+          uv run --project continue-mcp --no-sync python \
+            continue-mcp/install-workspace.py "$RUNNER_TEMP/blank-project" --check
+          uv run --project continue-mcp --no-sync python \
+            continue-mcp/install-workspace.py "$RUNNER_TEMP/gateway-project" \
             --gateway --only hello --check
 
-      - name: Clean-wheel install and console-script smoke test
-        if: matrix.os == 'ubuntu-latest'
+      - name: Clean wheel and sdist install and console-script smoke tests
         shell: bash
         run: |
           set -euo pipefail
-          wheels="$RUNNER_TEMP/continue-mcp-wheels"
+          dist="$RUNNER_TEMP/continue-mcp-dist"
           wheel_venv="$RUNNER_TEMP/continue-mcp-wheel-venv"
-          mkdir -p "$wheels"
-          uv build --wheel --project continue-mcp --out-dir "$wheels"
+          sdist_venv="$RUNNER_TEMP/continue-mcp-sdist-venv"
+          mkdir -p "$dist"
+          uv build --project continue-mcp --out-dir "$dist"
           uv venv "$wheel_venv"
-          uv pip install --python "$wheel_venv/bin/python" "$wheels"/*.whl
-          uv run --project continue-mcp \
+          uv pip install --python "$wheel_venv" "$dist"/*.whl
+          uv run --project continue-mcp --no-sync \
             python continue-mcp/tests/wheel_smoke.py "$wheel_venv"
+          uv venv "$sdist_venv"
+          uv pip install --python "$sdist_venv" "$dist"/*.tar.gz
+          uv run --project continue-mcp --no-sync \
+            python continue-mcp/tests/wheel_smoke.py "$sdist_venv"
 
       # Informational: resting token cost per tool + cold-start latency.
       # Watch this output drift across PRs; it is the toolkit's price tag.

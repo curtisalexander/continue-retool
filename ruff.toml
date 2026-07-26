@@ -1,6 +1,9 @@
-# Lint config for the whole toolkit (CI runs `uvx ruff check continue-mcp`).
-# Default rule set (E4/E7/E9 + F) — real errors only, no style churn.
+# Lint config for the whole toolkit. Keep the small rule set explicit so a
+# Ruff default change cannot silently alter CI policy.
 target-version = "py311"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
 
 [lint.per-file-ignores]
 # fs.list / notes.list / sql.format deliberately mirror the tool names the

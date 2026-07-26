@@ -33,7 +33,7 @@ def test_search_describe_call_flow(tmp_path, monkeypatch):
 
     async def scenario():
         async with client as c:
-            # only the three meta-tools are advertised
+            # only the four meta-tools are advertised
             tools = await c.list_tools()
             meta = {t.name for t in tools}
 
@@ -50,9 +50,12 @@ def test_search_describe_call_flow(tmp_path, monkeypatch):
             return meta, found.data, desc.data, result.content[0].text, summed.content[0].text
 
     meta, found, desc, result, summed = asyncio.run(scenario())
-    assert meta == {"search", "describe", "call"}
+    assert meta == {"search", "describe", "call", "call_destructive"}
+    assert found["ok"] is True
     assert any(t["name"] == "demo.upper" for t in found["tools"])
     assert desc["name"] == "demo.upper"
+    assert desc["ok"] is True
+    assert desc["authority"] == "regular"
     assert "text" in desc["input_schema"].get("properties", {})
     assert result == "ABC"
     assert summed in (5, "5")  # downstream returns int; content may arrive as text
@@ -76,6 +79,7 @@ def test_descriptions_and_annotations(tmp_path, monkeypatch):
     for name in ("search", "describe"):
         ann = tools[name].annotations
         assert ann and ann.readOnlyHint is True, f"{name} should be readOnlyHint"
+    assert tools["call_destructive"].annotations.destructiveHint is True
 
 
 def test_unknown_tool_suggests_alternatives(tmp_path, monkeypatch):
@@ -88,6 +92,7 @@ def test_unknown_tool_suggests_alternatives(tmp_path, monkeypatch):
 
     bad = asyncio.run(scenario())
     assert "error" in bad
+    assert bad["ok"] is False
     assert "demo.upper" in bad.get("did_you_mean", [])
 
 
@@ -115,3 +120,61 @@ def test_startup_keeps_healthy_servers_when_one_is_unavailable(tmp_path, monkeyp
     assert "broken" in found["unavailable_servers"]
     assert any(tool["name"] == "demo.upper" for tool in found["tools"])
     assert result == "STILL WORKS"
+
+
+def test_authority_routes_calls_and_preserves_annotations(tmp_path, monkeypatch):
+    client = _gateway_client(tmp_path, monkeypatch)
+
+    async def scenario():
+        async with client as c:
+            desc = await c.call_tool("describe", {"name": "demo.erase"})
+            rejected = await c.call_tool("call", {"name": "demo.erase", "arguments": {"target": "x"}})
+            accepted = await c.call_tool("call_destructive", {"name": "demo.erase", "arguments": {"target": "x"}})
+            wrong = await c.call_tool("call_destructive", {"name": "demo.upper", "arguments": {"text": "x"}})
+            return desc.data, rejected.data, accepted.data, wrong.data
+
+    desc, rejected, accepted, wrong = asyncio.run(scenario())
+    assert desc["annotations"]["destructiveHint"] is True
+    assert desc["authority"] == "destructive"
+    assert desc["invoke_with"] == "call_destructive"
+    assert rejected["ok"] is False and "call_destructive" in rejected["error"]
+    assert accepted == {"erased": "x"}
+    assert wrong["ok"] is False and "use call()" in wrong["error"]
+
+
+def test_open_world_annotation_is_preserved_but_not_classified_as_destructive(
+    tmp_path, monkeypatch
+):
+    client = _gateway_client(tmp_path, monkeypatch)
+
+    async def scenario():
+        async with client as c:
+            desc = await c.call_tool("describe", {"name": "demo.execute"})
+            called = await c.call_tool(
+                "call", {"name": "demo.execute", "arguments": {"command": "status"}}
+            )
+            return desc.data, called.data
+
+    desc, called = asyncio.run(scenario())
+    assert desc["annotations"]["openWorldHint"] is True
+    assert desc["authority"] == "regular"
+    assert desc["invoke_with"] == "call"
+    assert called == {"executed": "status"}
+
+
+def test_downstream_error_result_is_forwarded_faithfully(tmp_path, monkeypatch):
+    client = _gateway_client(tmp_path, monkeypatch)
+
+    async def scenario():
+        async with client as c:
+            return await c.call_tool(
+                "call",
+                {"name": "demo.fail", "arguments": {"reason": "expected"}},
+                raise_on_error=False,
+            )
+
+    result = asyncio.run(scenario())
+    assert result.is_error is True
+    assert result.content[0].text == "downstream failed: expected"
+    assert result.structured_content == {"ok": False, "error": "expected"}
+    assert result.meta == {"origin": "fixture"}

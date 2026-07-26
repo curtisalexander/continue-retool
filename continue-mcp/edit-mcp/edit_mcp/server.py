@@ -18,6 +18,7 @@ Run:  uv run edit-mcp
 from __future__ import annotations
 
 import difflib
+import errno
 import hashlib
 import json
 import os
@@ -29,12 +30,12 @@ from typing import Union
 
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
-from mcp.types import TextContent
 
 from continue_mcp_common.config import env_int as _env_int
 from continue_mcp_common.paths import jail_error
 from continue_mcp_common.paths import resolve_existing as _resolve_existing
 from continue_mcp_common.paths import resolve_path as _resolve
+from continue_mcp_common.results import result as _shared_result
 
 from .matcher import EditError, apply_edits, find_and_replace
 
@@ -51,13 +52,7 @@ CONFLICT_HASH_MAX_BYTES = _env_int(
 def _result(summary: str, data: dict, diff: str = "") -> ToolResult:
     """Return a ToolResult so Continue's UI shows a rendered summary + diff
     (content) while the model still gets the structured fields (res.data)."""
-    md = summary
-    if diff.strip():
-        md += "\n\n```diff\n" + diff + "\n```"
-    return ToolResult(
-        content=[TextContent(type="text", text=md)],
-        structured_content=data,
-    )
+    return _shared_result(summary, data, block=diff, lang="diff")
 
 
 # --- Unicode-robust path resolution ----------------------------------------
@@ -170,6 +165,7 @@ def _write(
     content: str,
     encoding: str = "utf-8",
     expected_version: FileVersion | None = None,
+    no_replace: bool = False,
 ) -> None:
     """Encode first, then atomically replace `path` from a sibling temp file.
 
@@ -179,6 +175,8 @@ def _write(
     """
     payload = content.encode(encoding)  # fail before touching the destination
     target = os.path.realpath(path)
+    if error := jail_error(target):
+        raise PermissionError(error)
     parent = os.path.dirname(os.path.abspath(target))
     os.makedirs(parent, exist_ok=True)
     previous_mode = None
@@ -200,7 +198,14 @@ def _write(
             os.chmod(temp_path, previous_mode)
         if expected_version is not None:
             _verify_unchanged(target, expected_version)
-        os.replace(temp_path, target)
+        if no_replace:
+            # Linking a fully-written sibling into place is an atomic
+            # create-if-absent operation. Unlike an exists() check followed by
+            # replace(), it cannot clobber a destination created concurrently.
+            os.link(temp_path, target)
+            os.remove(temp_path)
+        else:
+            os.replace(temp_path, target)
         _sync_parent(parent)
     finally:
         if fd >= 0:
@@ -216,6 +221,52 @@ def _write_error(path: str, exc: OSError | UnicodeError | FileConflictError) -> 
     return _result(f"❌ {error}", {"ok": False, "path": path, "error": error})
 
 
+def _move_no_replace(src: str, dest: str) -> None:
+    """Move a regular file without replacing a concurrent destination.
+
+    A hard link supplies an atomic create-if-absent commit. Across filesystems,
+    copy and sync a sibling temporary file before linking it into place.
+    """
+    parent = os.path.dirname(os.path.abspath(dest))
+    temp_path: str | None = None
+    try:
+        try:
+            os.link(src, dest)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+            fd, temp_path = tempfile.mkstemp(
+                dir=parent, prefix=f".{os.path.basename(dest)}.", suffix=".tmp"
+            )
+            with os.fdopen(fd, "wb") as target, open(src, "rb") as source:
+                shutil.copyfileobj(source, target)
+                target.flush()
+                os.fsync(target.fileno())
+            os.chmod(temp_path, stat.S_IMODE(os.stat(src).st_mode))
+            os.link(temp_path, dest)
+            os.unlink(temp_path)
+            temp_path = None
+        try:
+            os.unlink(src)
+        except OSError:
+            # Restore the pre-call pathname state if source removal fails.
+            try:
+                os.unlink(dest)
+            except OSError:
+                pass
+            raise
+        _sync_parent(parent)
+        source_parent = os.path.dirname(os.path.abspath(src))
+        if source_parent != parent:
+            _sync_parent(source_parent)
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
 def _preview(before: str, after: str, path: str, max_lines: int = 40) -> str:
     diff = difflib.unified_diff(
         before.splitlines(), after.splitlines(),
@@ -228,7 +279,7 @@ def _preview(before: str, after: str, path: str, max_lines: int = 40) -> str:
 
 
 # --- tools -----------------------------------------------------------------
-@mcp.tool
+@mcp.tool(annotations={"destructiveHint": True})
 async def edit(
     path: str,
     old_string: str,
@@ -298,7 +349,7 @@ def _coerce_edits(edits: Union[list[dict], str]) -> list[dict]:
     return edits
 
 
-@mcp.tool
+@mcp.tool(annotations={"destructiveHint": True})
 async def multi_edit(
     path: str, edits: Union[list[dict], str], dry_run: bool = False
 ) -> ToolResult:
@@ -331,7 +382,7 @@ async def multi_edit(
     return _result(f"{verb} {len(results)} edit(s) to {path}", data, diff)
 
 
-@mcp.tool
+@mcp.tool(annotations={"destructiveHint": True})
 async def create_file(path: str, content: str, overwrite: bool = False) -> ToolResult:
     """Create a new file with the given content. Fails if the file exists unless
     overwrite is set. Creates parent directories as needed."""
@@ -344,7 +395,7 @@ async def create_file(path: str, content: str, overwrite: bool = False) -> ToolR
             {"ok": False, "path": path, "error": "file exists (pass overwrite=true to replace)"},
         )
     try:
-        _write(path, content)
+        _write(path, content, no_replace=not overwrite)
     except (OSError, UnicodeError) as e:
         return _write_error(path, e)
     n = len(content.encode("utf-8"))
@@ -362,7 +413,10 @@ async def delete_file(path: str) -> ToolResult:
     if not os.path.isfile(path):
         return _result(f"❌ file not found: {path}",
                        {"ok": False, "path": path, "error": f"file not found: {path}"})
-    os.remove(path)
+    try:
+        os.remove(path)
+    except OSError as e:
+        return _write_error(path, e)
     return _result(f"Deleted {path}", {"ok": True, "path": path})
 
 
@@ -384,13 +438,19 @@ async def move_file(path: str, new_path: str, overwrite: bool = False) -> ToolRe
             {"ok": False, "path": dest,
              "error": "destination exists (pass overwrite=true to replace)"},
         )
-    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
     try:
-        os.replace(src, dest)      # atomic when src/dest share a filesystem
-    except OSError:                # cross-device (EXDEV): copy + delete
-        if os.path.exists(dest):
-            os.remove(dest)
-        shutil.move(src, dest)
+        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+        if overwrite:
+            os.replace(src, dest)  # atomic when src/dest share a filesystem
+        else:
+            _move_no_replace(src, dest)
+    except OSError as e:
+        if not overwrite or e.errno != errno.EXDEV:
+            return _write_error(dest, e)
+        try:                       # cross-device cannot be an atomic rename
+            shutil.move(src, dest)
+        except OSError as move_error:
+            return _write_error(dest, move_error)
     data = {"ok": True, "from": src, "to": dest}
     return _result(f"Moved {src} → {dest}", data)
 

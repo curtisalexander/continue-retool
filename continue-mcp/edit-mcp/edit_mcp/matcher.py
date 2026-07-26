@@ -25,6 +25,8 @@ import difflib
 import re
 import unicodedata
 from bisect import bisect_right
+from dataclasses import dataclass, field
+from typing import NotRequired, TypedDict
 
 # --- character classes we fold during fuzzy matching (mirrors Pi) ----------
 _SMART_SINGLE = re.compile(r"[‘’‚‛]")           # ‘ ’ ‚ ‛  -> '
@@ -37,6 +39,25 @@ _SPACES = re.compile(
 
 class EditError(Exception):
     """Raised for empty/absent/ambiguous matches, with a model-friendly message."""
+
+
+@dataclass
+class _MatchGroup:
+    start_line: int
+    end_line: int
+    spans: list[tuple[int, int]] = field(default_factory=list)
+
+
+class EditPayload(TypedDict):
+    old_string: str
+    new_string: str
+    replace_all: NotRequired[bool]
+
+
+class EditResult(TypedDict):
+    index: int
+    strategy: str
+    replacements: int
 
 
 # --- primitives ------------------------------------------------------------
@@ -124,7 +145,7 @@ def _fuzzy_replace(
         spans = spans[:1]
 
     starts = _line_starts(norm_lines)
-    groups: list[dict] = []
+    groups: list[_MatchGroup] = []
     for start, end in spans:
         start_line, _ = _locate(starts, start)
         # `end` is exclusive. Using it directly would claim the following line
@@ -132,26 +153,22 @@ def _fuzzy_replace(
         # that otherwise-untouched line.
         end_line, _ = _locate(starts, end - 1)
         current = groups[-1] if groups else None
-        if current is not None and start_line <= current["end_line"]:
-            current["end_line"] = max(current["end_line"], end_line)
-            current["spans"].append((start, end))
+        if current is not None and start_line <= current.end_line:
+            current.end_line = max(current.end_line, end_line)
+            current.spans.append((start, end))
         else:
-            groups.append({
-                "start_line": start_line,
-                "end_line": end_line,
-                "spans": [(start, end)],
-            })
+            groups.append(_MatchGroup(start_line, end_line, [(start, end)]))
 
     rebuilt: list[str] = []
     next_original_line = 0
     for group in groups:
-        first = group["start_line"]
-        last = group["end_line"]
+        first = group.start_line
+        last = group.end_line
         rebuilt.extend(orig_lines[next_original_line:first])
         group_start = starts[first]
         group_end = starts[last] + len(norm_lines[last])
         segment = norm_content[group_start:group_end]
-        for start, end in reversed(group["spans"]):
+        for start, end in reversed(group.spans):
             rel_start, rel_end = start - group_start, end - group_start
             segment = segment[:rel_start] + new_lf + segment[rel_end:]
         # rebuilt is joined with one LF between logical line groups. If the
@@ -250,7 +267,9 @@ def find_and_replace(
     return _finish(bom, result, eol), "fuzzy", count
 
 
-def apply_edits(content: str, edits: list[dict]) -> tuple[str, list[dict]]:
+def apply_edits(
+    content: str, edits: list[EditPayload]
+) -> tuple[str, list[EditResult]]:
     """Apply a list of {old_string, new_string, replace_all?} edits sequentially
     to `content`. Each edit sees the result of the previous one (which naturally
     prevents overlap bugs). Returns (new_content, per-edit results)."""

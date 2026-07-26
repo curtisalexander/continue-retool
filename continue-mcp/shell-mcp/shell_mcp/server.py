@@ -26,6 +26,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -34,6 +35,7 @@ from mcp.types import TextContent
 
 from continue_mcp_common.config import env_float as _env_float
 from continue_mcp_common.config import env_int as _env_int
+from continue_mcp_common.results import fenced_block
 
 # --- configuration ---------------------------------------------------------
 DEFAULT_TIMEOUT = _env_float("SHELL_MCP_DEFAULT_TIMEOUT", 120.0, 1.0, 86_400.0)
@@ -419,6 +421,19 @@ class RingBuffer:
 
 
 # --- the job registry ------------------------------------------------------
+class JobState(StrEnum):
+    """States exposed by the job lifecycle API.
+
+    ``StrEnum`` preserves the existing JSON/string representation while making
+    internal state transitions and type checking reject accidental new values.
+    """
+
+    RUNNING = "running"
+    EXITED = "exited"
+    KILLED = "killed"
+    TIMEOUT = "timeout"
+
+
 @dataclass
 class Job:
     job_id: str
@@ -427,7 +442,7 @@ class Job:
     started: float
     stdout: RingBuffer = field(default_factory=RingBuffer)
     stderr: RingBuffer = field(default_factory=RingBuffer)
-    state: str = "running"          # running | exited | killed | timeout
+    state: JobState = JobState.RUNNING
     exit_code: Optional[int] = None
     _readers: list[asyncio.Task] = field(default_factory=list)
     _timeout_task: Optional[asyncio.Task] = None
@@ -454,7 +469,7 @@ def _prune_finished() -> None:
     """
     finished = [
         j for j in JOBS.values()
-        if j.state != "running"
+        if j.state != JobState.RUNNING
         and j._reaper_task is not None
         and j._reaper_task.done()
     ]
@@ -495,7 +510,7 @@ def _kill_tree(job: Job, sig: int = signal.SIGTERM) -> None:
 async def _watch_timeout(job: Job, timeout: float) -> None:
     await asyncio.sleep(timeout)
     if job.proc.returncode is None:
-        job.state = "timeout"
+        job.state = JobState.TIMEOUT
         _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
 
 
@@ -503,7 +518,7 @@ async def _shutdown_jobs() -> None:
     """Kill and reap every child before the MCP server releases its transport."""
     running = [job for job in JOBS.values() if job.proc.returncode is None]
     for job in running:
-        job.state = "killed"
+        job.state = JobState.KILLED
         _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
 
     reapers = [job._reaper_task for job in running if job._reaper_task is not None]
@@ -538,7 +553,7 @@ def _console_text(cmd: str, snap: dict) -> str:
     if snap.get("job_id") and ec is None and not out and not err:
         tail += f" job={snap['job_id']}"
     parts.append(tail)
-    return "```console\n" + "\n".join(parts) + "\n```"
+    return fenced_block("\n".join(parts), "console")
 
 
 def _shell_result(cmd: str, snap: dict) -> ToolResult:
@@ -556,7 +571,8 @@ def _shell_failure(cmd: str, kind: str, error: str, **extra) -> ToolResult:
         "error_type": kind,
         **extra,
     }
-    text = f"❌ {kind}: {error}\n\n```console\n$ {cmd}\n[failed]\n```"
+    transcript = f"$ {cmd}\n[failed]"
+    text = f"❌ {kind}: {error}\n\n{fenced_block(transcript, 'console')}"
     return ToolResult(
         content=[TextContent(type="text", text=text)], structured_content=data
     )
@@ -690,8 +706,8 @@ async def _reap(job: Job) -> None:
     job.stdout.close()
     job.stderr.close()
     job.exit_code = rc
-    if job.state == "running":
-        job.state = "exited"
+    if job.state == JobState.RUNNING:
+        job.state = JobState.EXITED
 
 
 def _last_lines(text: str, n: int) -> str:
@@ -704,7 +720,7 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
     RingBuffer's truncation), NOT character offsets into the decoded text."""
     stdout, stdout_cursor = job.stdout.read_incremental(since_out)
     stderr, stderr_cursor = job.stderr.read_incremental(since_err)
-    timed_out = job.state == "timeout"
+    timed_out = job.state == JobState.TIMEOUT
     return {
         "ok": not timed_out,
         "job_id": job.job_id,
@@ -753,7 +769,7 @@ async def poll(job_id: str) -> ToolResult:
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"no such job: {job_id}")
-    timed_out = job.state == "timeout"
+    timed_out = job.state == JobState.TIMEOUT
     data = {
         "ok": not timed_out,
         "job_id": job.job_id,
@@ -775,7 +791,7 @@ async def kill(job_id: str) -> ToolResult:
     if not job:
         raise ValueError(f"no such job: {job_id}")
     if job.proc.returncode is None:
-        job.state = "killed"
+        job.state = JobState.KILLED
         _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
     data = {"job_id": job.job_id, "state": job.state}
     text = f"{data['job_id']}: [{data['state']}] · $ {job.cmd}"
@@ -798,7 +814,7 @@ async def list_jobs() -> ToolResult:
     block = "\n".join(
         f"{j['job_id']}  [{j['state']}]  {j['runtime_ms']}ms  $ {j['cmd']}" for j in jobs
     )
-    md = f"{len(jobs)} job(s)" + (f"\n\n```console\n{block}\n```" if block else "")
+    md = f"{len(jobs)} job(s)" + (f"\n\n{fenced_block(block, 'console')}" if block else "")
     return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 
@@ -834,7 +850,7 @@ async def run(
     # Let the reaper/watchdog settle final state (drain readers, set exit_code)
     # so the snapshot can't report "running" for a process that just ended.
     for _ in range(100):
-        if job.state != "running":
+        if job.state != JobState.RUNNING:
             break
         await asyncio.sleep(0.05)
     try:

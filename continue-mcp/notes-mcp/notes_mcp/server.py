@@ -299,7 +299,7 @@ async def read(name: str) -> ToolResult:
     return _result(summary, data, block=block, lang="markdown")
 
 
-@mcp.tool
+@mcp.tool(annotations={"destructiveHint": True})
 async def write(name: str, content: str, append: bool = False) -> ToolResult:
     """Create or update a note (markdown). Make the FIRST line a one-line summary —
     it becomes the hook shown by list(). append adds to the end instead of replacing."""

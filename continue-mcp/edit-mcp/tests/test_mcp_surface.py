@@ -1,6 +1,7 @@
 """MCP-protocol tests: drive edit-mcp through fastmcp's Client, the same way an
 MCP client (Continue) would. Deterministic: no LLM, no network, in-process."""
 import asyncio
+import errno
 import os
 
 from fastmcp import Client
@@ -24,6 +25,12 @@ def test_numeric_conflict_hash_limit_is_defaulted_and_clamped(monkeypatch):
     assert server._env_int("EDIT_TEST_LIMIT", 20, 0, 100) == 0
     monkeypatch.setenv("EDIT_TEST_LIMIT", "999")
     assert server._env_int("EDIT_TEST_LIMIT", 20, 0, 100) == 100
+
+
+def test_diff_result_uses_fence_longer_than_content_backticks():
+    diff = " unchanged ``` here\n+added ````` value"
+    rendered = server._result("edited", {"ok": True}, diff).content[0].text
+    assert rendered == f"edited\n\n{'`' * 6}diff\n{diff}\n{'`' * 6}"
 
 
 def test_tools_advertised():
@@ -54,15 +61,25 @@ def test_descriptions_present_and_within_budget():
         )
 
 
-def test_destructive_tools_are_annotated():
+def test_every_tool_advertises_expected_authority():
     async def scenario():
         async with Client(mcp) as c:
             return await c.list_tools()
 
     tools = {t.name: t for t in asyncio.run(scenario())}
-    for name in ("delete_file", "move_file"):
+    expected = {
+        "edit": {"destructiveHint": True},
+        "multi_edit": {"destructiveHint": True},
+        "create_file": {"destructiveHint": True},
+        "delete_file": {"destructiveHint": True, "idempotentHint": True},
+        "move_file": {"destructiveHint": True},
+    }
+    assert set(tools) == set(expected)
+    for name, hints in expected.items():
         ann = tools[name].annotations
-        assert ann and ann.destructiveHint is True, f"{name} should be destructiveHint"
+        assert ann, f"{name} should advertise authority annotations"
+        for hint, value in hints.items():
+            assert getattr(ann, hint) is value, f"{name} should set {hint}={value}"
 
 
 def test_edit_missing_file_is_structured_error(tmp_path):
@@ -225,6 +242,92 @@ def test_move_file_and_overwrite_guard(tmp_path):
     assert dest.read_text(encoding="utf-8") == "payload\n"
 
 
+def test_move_file_eacces_preserves_existing_destination(tmp_path, monkeypatch):
+    src = tmp_path / "src.txt"
+    dest = tmp_path / "dest.txt"
+    src.write_text("source\n", encoding="utf-8")
+    dest.write_text("keep\n", encoding="utf-8")
+
+    def denied(_src, _dest):
+        raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(server.os, "replace", denied)
+    res = _call("move_file", {
+        "path": str(src), "new_path": str(dest), "overwrite": True,
+    })
+    assert res.data["ok"] is False
+    assert "permission denied" in res.data["error"]
+    assert src.read_text(encoding="utf-8") == "source\n"
+    assert dest.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_move_file_exdev_uses_cross_device_fallback(tmp_path, monkeypatch):
+    src = tmp_path / "src.txt"
+    dest = tmp_path / "dest.txt"
+    src.write_text("payload\n", encoding="utf-8")
+    real_move = server.shutil.move
+    fallback_calls = []
+
+    def cross_device(_src, _dest):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    def tracked_move(move_src, move_dest):
+        fallback_calls.append((move_src, move_dest))
+        return real_move(move_src, move_dest)
+
+    monkeypatch.setattr(server.os, "replace", cross_device)
+    monkeypatch.setattr(server.shutil, "move", tracked_move)
+    res = _call("move_file", {
+        "path": str(src), "new_path": str(dest), "overwrite": True,
+    })
+    assert res.data["ok"] is True
+    assert fallback_calls == [(str(src), str(dest))]
+    assert not src.exists()
+    assert dest.read_text(encoding="utf-8") == "payload\n"
+
+
+def test_move_file_concurrent_destination_creation_does_not_clobber(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src.txt"
+    dest = tmp_path / "dest.txt"
+    src.write_text("source\n", encoding="utf-8")
+    real_link = server.os.link
+
+    def concurrent_create(link_src, link_dest):
+        dest.write_text("concurrent\n", encoding="utf-8")
+        return real_link(link_src, link_dest)
+
+    monkeypatch.setattr(server.os, "link", concurrent_create)
+    res = _call("move_file", {"path": str(src), "new_path": str(dest)})
+    assert res.data["ok"] is False
+    assert src.read_text(encoding="utf-8") == "source\n"
+    assert dest.read_text(encoding="utf-8") == "concurrent\n"
+
+
+def test_move_file_no_replace_cross_device_commits_without_clobber(
+    tmp_path, monkeypatch
+):
+    src = tmp_path / "src.txt"
+    dest = tmp_path / "dest.txt"
+    src.write_text("payload\n", encoding="utf-8")
+    src.chmod(0o640)
+    real_link = server.os.link
+
+    def cross_device_source(link_src, link_dest):
+        if os.fspath(link_src) == os.fspath(src):
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_link(link_src, link_dest)
+
+    monkeypatch.setattr(server.os, "link", cross_device_source)
+    res = _call("move_file", {"path": str(src), "new_path": str(dest)})
+    assert res.data["ok"] is True
+    assert not src.exists()
+    assert dest.read_text(encoding="utf-8") == "payload\n"
+    assert dest.stat().st_mode & 0o777 == 0o640
+    assert not list(tmp_path.glob(".dest.txt.*.tmp"))
+
+
 def test_edit_exact_match(tmp_path):
     f = tmp_path / "a.txt"
     f.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
@@ -268,6 +371,23 @@ def test_create_file_and_overwrite_guard(tmp_path):
     res2 = _call("create_file", {"path": str(f), "content": "clobber\n"})
     assert res2.data["ok"] is False
     assert f.read_text(encoding="utf-8") == "hi\n"
+
+
+def test_create_file_concurrent_destination_creation_does_not_clobber(
+    tmp_path, monkeypatch
+):
+    f = tmp_path / "race.txt"
+    real_link = server.os.link
+
+    def concurrent_create(temp_path, target):
+        f.write_text("concurrent\n", encoding="utf-8")
+        return real_link(temp_path, target)
+
+    monkeypatch.setattr(server.os, "link", concurrent_create)
+    res = _call("create_file", {"path": str(f), "content": "requested\n"})
+    assert res.data["ok"] is False
+    assert f.read_text(encoding="utf-8") == "concurrent\n"
+    assert not list(tmp_path.glob(".race.txt.*.tmp"))
 
 
 def test_relative_path_resolves_against_workspace(tmp_path, monkeypatch):

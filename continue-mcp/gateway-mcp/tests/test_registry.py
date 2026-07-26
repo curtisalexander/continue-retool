@@ -21,7 +21,8 @@ RAW = [
     {"server": "search", "tool": "files",
      "description": "List files visible to ripgrep, optionally filtered by glob like '*.py'.", "input_schema": {}},
     {"server": "edit", "tool": "edit",
-     "description": "Replace old_string with new_string in a file (exact then fuzzy).", "input_schema": {}},
+     "description": "Replace old_string with new_string in a file (exact then fuzzy).", "input_schema": {},
+     "annotations": {"destructiveHint": True}},
 ]
 
 
@@ -40,6 +41,10 @@ def test_catalog_builds_dotted_names(catalog):
 def test_describe_payload_has_schema(catalog):
     e = catalog.get("shell.start")
     assert e.schema["properties"]["cmd"]["type"] == "string"
+
+
+def test_catalog_preserves_annotations(catalog):
+    assert catalog.get("edit.edit").annotations == {"destructiveHint": True}
 
 
 def test_search_result_is_summary_not_schema(catalog):

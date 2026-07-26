@@ -43,9 +43,9 @@ continue-mcp/
   rules/                        # Continue rules that make the toolkit work
     notes.md                   # discovery rule: consult notes at task start/end
     rule-rule.md               # the meta-rule: token discipline for authoring rules
-  gateway-mcp/                  # progressive disclosure: many tools behind 3 meta-tools
+  gateway-mcp/                  # progressive disclosure: tools behind 4 authority-aware meta-tools
     gateway_mcp/registry.py    # pure catalog + ranking (search which tool you need)
-    gateway_mcp/server.py      # search / describe / call; MCP client to downstream servers
+    gateway_mcp/server.py      # discovery + authority-aware calls to downstream servers
     gateway.config.json        # lists the downstream servers to aggregate
     tests/test_registry.py     # ranking/catalog tests (pure stdlib)
     .continue/mcpServers/gateway.yaml
@@ -92,9 +92,11 @@ golden tests of the implementation, and `tests/test_mcp_surface.py`, which
 drives the server over the real MCP boundary with fastmcp's in-process client —
 the same list-tools/call-tool flow Continue performs. The surface tests also
 enforce house style mechanically: every tool has a description under a hard
-budget, and read-only/destructive tools carry the matching MCP annotation
-(`readOnlyHint`/`destructiveHint`), so a client can derive tool policy instead
-of trusting a checklist. CI runs all of it on Linux, macOS, and Windows, plus
+budget, and every tool carries the matching MCP authority annotation: observations
+use `readOnlyHint`; edits, creates (including optional overwrite), moves, and
+deletes use `destructiveHint`; shell execution and input use `openWorldHint`.
+This lets a client derive tool policy instead of trusting a checklist. CI runs
+all of it on Linux, macOS, and Windows, plus
 ruff and a docs-drift check.
 
 **Measured cost, not vibes.** `bench/audit.py` spawns every server exactly the
@@ -129,6 +131,12 @@ uv run --extra test pytest -q tests                   # and repository-level tes
 The helper computes a UTC cutoff exactly seven days in the past and passes it to
 `uv lock --exclude-newer`, so the resolver cannot select a newer upload. Review
 the `pyproject.toml`/`uv.lock` diff and use the ordinary CI suite before merging.
+
+CI installs exclusively from the committed lockfile (`uv sync --frozen`) and
+runs subsequent commands with `--no-sync`. Ruff and ty are pinned in the `dev`
+dependency group; use `uv sync --group dev` before running local lint checks.
+Release smoke tests build both wheel and sdist, install each into a fresh virtual
+environment, and handshake with every packaged console command.
 
 Then in Continue: add each `.continue/mcpServers/*.yaml` and set tool policies:
 - built-in **`run_terminal_command`** → Excluded; `shell.*` → Ask First

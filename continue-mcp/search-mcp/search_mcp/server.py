@@ -21,7 +21,9 @@ import asyncio
 import json
 import os
 import shutil
-from typing import Optional
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Optional, TypeVar
 
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
@@ -50,6 +52,8 @@ MAX_RECORD_BYTES = _env_int(
     "SEARCH_MCP_MAX_RECORD", 8 * 1024 * 1024, 64 * 1024, 64 * 1024 * 1024
 )
 MAX_ERROR_BYTES = 64 * 1024
+
+T = TypeVar("T")
 
 
 # --- workspace jail (default ON) --------------------------------------------
@@ -138,13 +142,14 @@ def _clip(text: str) -> tuple[str, bool]:
     return text[:MAX_LINE_CHARS] + f"…[+{len(text) - MAX_LINE_CHARS} chars]", True
 
 
-async def _collect_json(proc, out: list, max_results: int, flags: dict) -> bool:
+async def _collect_json(
+    stdout: asyncio.StreamReader, out: list, max_results: int, flags: dict
+) -> bool:
     """Stream rg --json, append match/context rows to `out`, stop at the cap.
     Sets flags['line_clipped'] if any line was clipped. Returns True if we hit
     the match cap."""
     matches = 0
-    assert proc.stdout is not None
-    async for raw in proc.stdout:
+    async for raw in stdout:
         try:
             obj = json.loads(raw)
         except UnicodeDecodeError:
@@ -208,36 +213,62 @@ async def _finish_process(proc, stderr_task) -> str:
         return "stderr drain timed out"
 
 
-async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict:
-    rg = rg_bin()
+@dataclass(frozen=True)
+class _ProcessRun:
+    value: object | None
+    returncode: int | None
+    stderr: str
+    timed_out: bool
+    collector_error: Exception | None
+
+
+async def _run_process(
+    args: list[str], timeout: float,
+    collector: Callable[[asyncio.StreamReader], Awaitable[T]],
+    *, limit: int | None = None,
+) -> _ProcessRun:
+    """Run rg with bounded output collection and consistently reap the child."""
+    kwargs = {"limit": limit} if limit is not None else {}
     proc = await asyncio.create_subprocess_exec(
-        rg, *args,
+        rg_bin(), *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        limit=MAX_RECORD_BYTES,  # raise StreamReader's 64KB per-line cap
+        **kwargs,
     )
-    out: list = []
-    timed_out = False
-    truncated = False
-    oversize = False
-    flags: dict = {}
-    assert proc.stderr is not None
+    assert proc.stdout is not None and proc.stderr is not None
     stderr_task = asyncio.create_task(_collect_stderr(proc.stderr))
+    value = None
+    timed_out = False
+    collector_error = None
     try:
-        truncated = await asyncio.wait_for(
-            _collect_json(proc, out, max_results, flags), timeout
-        )
+        value = await asyncio.wait_for(collector(proc.stdout), timeout)
     except asyncio.TimeoutError:
         timed_out = True
-    except ValueError:
-        # A single rg --json record exceeded MAX_RECORD_BYTES — a match on a line
-        # even bigger than 8MB. Recover: report the partial result as truncated,
-        # never a traceback. (StreamReader raises ValueError, wrapping its
-        # LimitOverrunError, when no newline is found within the buffer.)
-        oversize = True
-        truncated = True
+    except ValueError as exc:
+        collector_error = exc
     finally:
-        err = await _finish_process(proc, stderr_task)
+        # EOF normally means rg has exited; let asyncio observe its real status
+        # before the capped/timeout cleanup path decides the child is still live.
+        if value is not None and not value and not timed_out and collector_error is None:
+            try:
+                await asyncio.wait_for(proc.wait(), 5)
+            except asyncio.TimeoutError:
+                pass
+        stderr = await _finish_process(proc, stderr_task)
+    return _ProcessRun(value, proc.returncode, stderr, timed_out, collector_error)
+
+
+async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict:
+    out: list = []
+    flags: dict = {}
+    run = await _run_process(
+        args, timeout,
+        lambda stdout: _collect_json(stdout, out, max_results, flags),
+        limit=MAX_RECORD_BYTES,
+    )
+    timed_out = run.timed_out
+    oversize = isinstance(run.collector_error, ValueError)
+    truncated = bool(run.value) or oversize
     # rg exit codes: 0 = matches, 1 = none, 2 = real error.
     error = None
     error_type = None
@@ -249,8 +280,8 @@ async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict
             "Refine the pattern or use the shell tool."
         )
         error_type = "decode"
-    elif proc.returncode == 2:
-        error = err or "ripgrep exited with code 2"
+    elif run.returncode == 2:
+        error = run.stderr or "ripgrep exited with code 2"
         error_type = "process"
     elif flags.get("decode_error"):
         error = "ripgrep emitted output that was not valid UTF-8; results are partial"
@@ -271,31 +302,22 @@ async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict
 
 
 async def _run_files(args: list[str], cap: int, timeout: float) -> dict:
-    proc = await asyncio.create_subprocess_exec(
-        rg_bin(), *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     paths: list[str] = []
-    truncated = False
-    timed_out = False
-    assert proc.stdout is not None and proc.stderr is not None
-    stdout = proc.stdout
-    stderr_task = asyncio.create_task(_collect_stderr(proc.stderr))
-    try:
-        async def _read() -> bool:
-            async for raw in stdout:
-                paths.append(raw.decode("utf-8", "replace").rstrip("\r\n"))
-                if len(paths) >= cap:
-                    return True
-            return False
+    async def _collect_files(stdout: asyncio.StreamReader) -> bool:
+        async for raw in stdout:
+            paths.append(raw.decode("utf-8", "replace").rstrip("\r\n"))
+            if len(paths) >= cap:
+                return True
+        return False
 
-        truncated = await asyncio.wait_for(_read(), timeout)
-    except asyncio.TimeoutError:
-        timed_out = True
-    finally:
-        stderr = await _finish_process(proc, stderr_task)
-    error = (stderr or "ripgrep exited with code 2") if proc.returncode == 2 else None
+    run = await _run_process(args, timeout, _collect_files)
+    if run.collector_error is not None:
+        raise run.collector_error
+    truncated = bool(run.value)
+    timed_out = run.timed_out
+    error = (
+        run.stderr or "ripgrep exited with code 2"
+    ) if run.returncode == 2 else None
     error_type = "process" if error else None
     if timed_out:
         error = f"ripgrep timed out after {timeout}s; results are partial"

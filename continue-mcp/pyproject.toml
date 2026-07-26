@@ -1,16 +1,46 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "continue-mcp"
 version = "0.1.0"
 description = "A unified collection of focused MCP servers for Continue.dev"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
   "fastmcp>=3,<4",
   "sqruff>=0.39",
 ]
+
+[project.urls]
+Homepage = "https://curtisalexander.github.io/continue-retool/"
+Repository = "https://github.com/curtisalexander/continue-retool"
+Issues = "https://github.com/curtisalexander/continue-retool/issues"
+
+[dependency-groups]
+dev = [
+  "ruff==0.12.5",
+  "ty==0.0.1a16",
+]
+
+[tool.ty.rules]
+# ty alpha cannot yet model platform-conditional stdlib attributes or
+# os.path's same-type overload reliably.
+unresolved-attribute = "ignore"
+invalid-return-type = "ignore"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

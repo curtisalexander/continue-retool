@@ -71,13 +71,18 @@ absolute names, traversal, and escaping storage configurations.
 `shell-mcp` is intentionally not path-jailed: an arbitrary command cannot be
 made safe by checking one path argument. Its tools should be human-approved,
 and it is the explicit escape hatch for legitimate work outside the workspace.
-The gateway does not reduce downstream authority, so `gateway.call` should be
-treated as broadly as the most powerful server behind it.
+The gateway preserves downstream annotations and separates tools carrying
+`destructiveHint` into `gateway.call_destructive`; `gateway.call` handles the
+remaining tools. This routing does not sandbox open-world operations.
 
 Expected filesystem, configuration, and subprocess failures cross the MCP
 boundary as `{ok: false, error: ...}` results. Exceptions are reserved for
-unexpected defects. Tool annotations describe read-only and destructive intent
-so clients can apply policy mechanically.
+unexpected defects. Annotation policy is authority-based: observations carry
+`readOnlyHint`; any tool that can create, replace, edit, move, or delete durable
+state carries `destructiveHint` (including create operations with an overwrite
+option); and shell execution or input carries `openWorldHint` because commands
+can affect resources beyond modeled arguments. Hints may be combined where
+applicable and let clients apply policy mechanically.
 
 ## Data safety and workload bounds
 

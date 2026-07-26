@@ -3,7 +3,7 @@ registry.py — the pure, dependency-free core of the gateway.
 
 The gateway's job is progressive disclosure: instead of loading N full tool
 schemas into the model's context up front, it exposes
-three meta-tools — search / describe / call — and discloses a real tool's schema
+four meta-tools — search / describe / call / call_destructive — and discloses a real tool's schema
 only when the model asks for it.
 
 This module holds the parts that don't touch MCP or the network: building the
@@ -25,6 +25,7 @@ class Tool:
     tool: str            # the raw tool name on that server, e.g. "start"
     description: str     # full description (returned by describe())
     schema: dict         # full JSON input schema (returned by describe())
+    annotations: dict = field(default_factory=dict)  # downstream MCP annotations
     summary: str = ""    # one-line summary (returned by search())
     keywords: list = field(default_factory=list)
 
@@ -44,7 +45,7 @@ def summarize(description: str | None, limit: int = 140) -> str:
 def build_catalog(raw_tools: list[dict]) -> "Catalog":
     """Build a Catalog from downstream tool listings.
 
-    Each raw entry: {server, tool, description, input_schema}."""
+    Each raw entry: {server, tool, description, input_schema, annotations}."""
     entries = []
     for r in raw_tools:
         server, tool = r["server"], r["tool"]
@@ -55,11 +56,17 @@ def build_catalog(raw_tools: list[dict]) -> "Catalog":
                 tool=tool,
                 description=r.get("description") or "",
                 schema=r.get("input_schema") or {},
+                annotations=dict(r.get("annotations") or {}),
                 summary=summarize(r.get("description")),
                 keywords=[server, *re.split(r"[_\-.]", tool)],
             )
         )
     return Catalog(entries)
+
+
+def is_destructive(tool: Tool) -> bool:
+    """Whether downstream explicitly marks this tool as destructive."""
+    return tool.annotations.get("destructiveHint") is True
 
 
 class Catalog:

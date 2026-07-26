@@ -228,9 +228,82 @@ def test_sync_deps_runs_one_root_sync_for_multiple_selected_servers(monkeypatch)
 
     assert installer.sync_deps(["hello", "fs", "sql"]) == 0
     assert calls == [
-        (["/tools/uv", "sync", "--project", installer.KIT_DIR],
+        (["/tools/uv", "sync", "--locked", "--project", installer.KIT_DIR],
          {"capture_output": True, "text": True})
     ]
+
+
+def test_gateway_doctor_contract_lists_all_authority_aware_meta_tools():
+    assert installer.GATEWAY_META_TOOLS == {
+        "search", "describe", "call", "call_destructive",
+    }
+
+
+@pytest.mark.parametrize("failed_name", ["fs.yaml", "rule-rule.md"])
+def test_install_rolls_back_later_write_failures(tmp_path: Path, monkeypatch,
+                                                 failed_name: str):
+    project = tmp_path / "project"
+    project.mkdir()
+    original = project / ".continue/mcpServers/hello.yaml"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"prior bytes\xff")
+    original.chmod(0o640)
+    before = _snapshot(project)
+    real_atomic = installer._atomic_write
+
+    def fail(path, data, mode=None):
+        if os.fspath(path).endswith(failed_name):
+            raise OSError("injected later write failure")
+        return real_atomic(path, data, mode)
+
+    monkeypatch.setattr(installer, "_atomic_write", fail)
+    with pytest.raises(OSError, match="injected"):
+        installer.install(str(project), ["hello", "fs"], "/opt/uv")
+
+    assert _snapshot(project) == before
+
+
+def test_install_rolls_back_manifest_save_failure(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    before = _snapshot(project)
+
+    def fail(project_arg, manifest):
+        raise OSError("injected manifest save failure")
+
+    monkeypatch.setattr(installer, "_save_manifest", fail)
+    with pytest.raises(OSError, match="manifest"):
+        installer.install(str(project), ["hello"], "/opt/uv")
+    assert _snapshot(project) == before
+    assert list(project.iterdir()) == []
+
+
+def test_gateway_config_failure_rolls_back_invocation(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    before = _snapshot(project)
+    real_write = installer.write_out
+
+    def fail(project_arg, dest, content, manifest):
+        if dest.endswith(installer.GATEWAY_CONFIG_REL):
+            raise OSError("injected gateway config failure")
+        return real_write(project_arg, dest, content, manifest)
+
+    monkeypatch.setattr(installer, "write_out", fail)
+    with pytest.raises(OSError, match="gateway"):
+        installer.install(str(project), ["hello"], "/opt/uv", gateway=True)
+    assert _snapshot(project) == before
+    assert list(project.iterdir()) == []
+
+
+def test_main_sync_failure_installs_nothing(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(installer.shutil, "which", lambda name: "/tools/uv")
+    monkeypatch.setattr(installer, "sync_deps", lambda names: 1)
+
+    assert installer.main([str(project), "--only", "hello"]) == 1
+    assert list(project.iterdir()) == []
 
 
 def test_policy_checklist_mentions_only_registered_servers():

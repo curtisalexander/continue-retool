@@ -89,12 +89,22 @@ def test_descriptions_present_and_within_budget():
         )
 
 
-def test_read_only_tools_are_annotated():
+def test_every_tool_advertises_expected_authority():
     async def scenario():
         async with Client(mcp) as c:
             return await c.list_tools()
 
     tools = {t.name: t for t in asyncio.run(scenario())}
-    for name in ('list', 'read', 'search'):
+    expected = {
+        "list": {"readOnlyHint": True},
+        "read": {"readOnlyHint": True},
+        "search": {"readOnlyHint": True},
+        "write": {"destructiveHint": True},
+        "delete": {"destructiveHint": True, "idempotentHint": True},
+    }
+    assert set(tools) == set(expected)
+    for name, hints in expected.items():
         ann = tools[name].annotations
-        assert ann and ann.readOnlyHint is True, f"{name} should be readOnlyHint"
+        assert ann, f"{name} should advertise authority annotations"
+        for hint, value in hints.items():
+            assert getattr(ann, hint) is value, f"{name} should set {hint}={value}"

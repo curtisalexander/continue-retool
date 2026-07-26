@@ -22,10 +22,11 @@
       }
     },
     "gateway": {
-      "estimated_tokens": 311,
-      "tool_count": 3,
+      "estimated_tokens": 412,
+      "tool_count": 4,
       "tools": {
         "call": 122,
+        "call_destructive": 101,
         "describe": 80,
         "search": 109
       }

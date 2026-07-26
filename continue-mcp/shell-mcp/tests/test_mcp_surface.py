@@ -34,7 +34,7 @@ def test_tools_advertised():
 
 # House-style conformance, enforced mechanically (see rules/rule-rule.md):
 # every tool describes itself, descriptions can't grow without bound, and
-# read-only tools say so via annotations.
+# every tool advertises its authority via annotations.
 DESCRIPTION_BUDGET_CHARS = 1000  # ~250 tokens; catches runaway growth
 
 
@@ -51,15 +51,27 @@ def test_descriptions_present_and_within_budget():
         )
 
 
-def test_read_only_tools_are_annotated():
+def test_every_tool_advertises_expected_authority():
     async def scenario():
         async with Client(mcp) as c:
             return await c.list_tools()
 
     tools = {t.name: t for t in asyncio.run(scenario())}
-    for name in ("poll", "output", "list_jobs"):
+    expected = {
+        "start": {"openWorldHint": True},
+        "output": {"readOnlyHint": True},
+        "poll": {"readOnlyHint": True},
+        "kill": {"destructiveHint": True, "idempotentHint": True},
+        "list_jobs": {"readOnlyHint": True},
+        "run": {"openWorldHint": True},
+        "send": {"openWorldHint": True},
+    }
+    assert set(tools) == set(expected)
+    for name, hints in expected.items():
         ann = tools[name].annotations
-        assert ann and ann.readOnlyHint is True, f"{name} should be readOnlyHint"
+        assert ann, f"{name} should advertise authority annotations"
+        for hint, value in hints.items():
+            assert getattr(ann, hint) is value, f"{name} should set {hint}={value}"
 
 
 def test_run_over_mcp():

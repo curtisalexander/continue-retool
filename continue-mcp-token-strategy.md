@@ -66,7 +66,7 @@ sweet spot for your everyday tools — you already built `edit`, `search`, and
 
 **Rung 2 — Gateway the long tail.** For the many tools you use *occasionally*,
 register only the gateway and let it hide their schemas until needed (§3). Resting
-cost for the whole tail collapses to the gateway's fixed ~3-schema footprint.
+cost for the whole tail collapses to the gateway's fixed four-schema footprint.
 
 **Rung 3 — Enforce terseness at creation.** The `new-mcp-tool` factory bakes in a
 token budget per description and registers new tools into the gateway catalog, so
@@ -126,7 +126,7 @@ size, because latency and the near-zero savings both argue for keeping it direct
 ### Don't forget the gateway's own fixed cost
 
 <!-- BEGIN GENERATED GATEWAY COST -->
-The audit currently estimates the gateway's three meta-tool schemas at **~311 tokens at rest**. The default tail (sql, notes) would cost ~574 tokens if registered directly, so the gateway saves ~263 resting tokens (46%) before any per-use describe result. These values are generated from `continue-mcp/bench/schema-metrics.json` using the repository's deterministic `ceil(serialized characters / 4)` estimator.
+The audit currently estimates the gateway's 4 meta-tool schemas at **~412 tokens at rest**. The default tail (sql, notes) would cost ~574 tokens if registered directly, so the gateway saves ~162 resting tokens (28%) before any per-use describe result. These values are generated from `continue-mcp/bench/schema-metrics.json` using the repository's deterministic `ceil(serialized characters / 4)` estimator.
 <!-- END GENERATED GATEWAY COST -->
 
 ---
@@ -145,9 +145,9 @@ The current measured inventory is:
 | `fs-mcp` | 2 | 255 | direct |
 | `sql-mcp` | 2 | 185 | gateway |
 | `notes-mcp` | 5 | 389 | gateway |
-| `gateway-mcp` | 3 | 311 | gateway-host |
+| `gateway-mcp` | 4 | 412 | gateway-host |
 
-With the metadata defaults, direct servers cost ~2295 tokens and the gateway costs ~311, for **~2606 resting tokens**. Registering the same tail directly would cost ~2869; the generated hybrid saves ~263 tokens per request.
+With the metadata defaults, direct servers cost ~2295 tokens and the gateway costs ~412, for **~2707 resting tokens**. Registering the same tail directly would cost ~2869; the generated hybrid saves ~162 tokens per request.
 
 Concretely for Continue, register `hello.yaml`, `shell.yaml`, `search.yaml`, `edit.yaml`, `fs.yaml`, and `gateway.yaml`; keep only `sql`, `notes` in the gateway downstream configuration. Do not register a downstream both directly and through the gateway.
 <!-- END GENERATED TOOLKIT EXAMPLE -->

@@ -76,10 +76,10 @@
       "module": "gateway_mcp",
       "registration": "gateway-host",
       "summary": "Progressive disclosure for downstream MCP tools",
-      "site_description": "Progressive disclosure: any number of downstream tools behind three meta-tools.",
+      "site_description": "Progressive disclosure: downstream tools behind four authority-aware meta-tools.",
       "responsibility": "Discovery and routing for downstream MCP tools",
       "authority": "The union of the configured downstream servers' authority",
-      "policy": "  * gateway.search / gateway.describe -> Automatic; gateway.call -> Ask First"
+      "policy": "  * gateway.search / gateway.describe -> Automatic; gateway.call / gateway.call_destructive -> Ask First"
     }
   ]
 }

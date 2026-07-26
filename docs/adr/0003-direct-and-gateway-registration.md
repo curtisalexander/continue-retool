@@ -14,8 +14,9 @@ authority.
 
 Support both topologies. Register hot tools directly. Put a sufficiently large
 long tail behind `gateway-mcp`, which owns its downstream processes and exposes
-three discovery tools. Never register the same server directly and behind the
-gateway in one workspace; the installer enforces the separation.
+four discovery and authority-aware invocation tools. Never register the same
+server directly and behind the gateway in one workspace; the installer enforces
+the separation.
 
 ## Consequences
 

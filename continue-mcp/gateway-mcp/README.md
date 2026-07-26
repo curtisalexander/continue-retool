@@ -1,7 +1,7 @@
 # gateway-mcp — progressive disclosure for your MCP toolkit
 
-One MCP server that hides **many** tools behind **three** meta-tools, so Continue
-pays for ~3 tool schemas at rest instead of N. This is Anthropic's Tool Search /
+One MCP server that hides **many** tools behind **four** meta-tools, so Continue
+pays for four fixed schemas at rest instead of N. This is Anthropic's Tool Search /
 progressive-disclosure pattern, reproduced locally so it works with any model.
 
 ---
@@ -9,20 +9,21 @@ progressive-disclosure pattern, reproduced locally so it works with any model.
 ## 1. Purpose — why this exists
 
 <!-- BEGIN GENERATED GATEWAY OVERVIEW -->
-The current downstream inventory contains **26 tools totaling ~2869 estimated schema tokens** if every server is registered directly. The gateway's fixed advertisement is **3 tools totaling ~311 tokens**. These generated estimates use `ceil(serialized schema characters / 4)` and are comparative rather than tokenizer-exact.
+The current downstream inventory contains **26 tools totaling ~2869 estimated schema tokens** if every server is registered directly. The gateway's fixed advertisement is **4 tools totaling ~412 tokens**. These generated estimates use `ceil(serialized schema characters / 4)` and are comparative rather than tokenizer-exact.
 <!-- END GENERATED GATEWAY OVERVIEW -->
 
 The gateway breaks that growth link. Instead of advertising all N downstream
-tools, it advertises three:
+tools, it advertises four:
 
 | Meta-tool | Step | Returns |
 |---|---|---|
-| `gateway.search(query)` | 1 — discover | a shortlist of `{name, summary}` — **not** schemas |
-| `gateway.describe(name)` | 2 — load schema | the full JSON argument schema for **one** tool |
-| `gateway.call(name, arguments)` | 3 — run | the tool's result, injected like a native tool |
+| `gateway.search(query)` | 1 — discover | a shortlist of `{name, summary, authority}` — **not** schemas |
+| `gateway.describe(name)` | 2 — load schema | schema, downstream annotations, authority, and required invocation tool |
+| `gateway.call(name, arguments)` | 3 — run regular | a non-destructive tool's result, injected like a native tool |
+| `gateway.call_destructive(name, arguments)` | 3 — run destructive | a destructive tool's result, injected like a native tool |
 
 Now the model **discovers** a tool by intent, **loads one schema** on demand, and
-**runs it** — and Continue's resting context holds only the three gateway schemas.
+**runs it** — and Continue's resting context holds only the four gateway schemas.
 Add 50 more tools and the resting cost doesn't move.
 
 ### The honest tradeoff: head vs. tail
@@ -76,30 +77,35 @@ promote a tool to direct registration the moment its per-hop latency annoys you.
 ```
 
 **The gateway is both an MCP server and an MCP client.** To Continue it's a server
-with three tools. Internally it's a client that spawns and connects to your
+with four tools. Internally it's a client that spawns and connects to your
 downstream stdio servers.
 
 **Lifecycle.** On startup (`lifespan`), the gateway reads `gateway.config.json`,
 connects to every downstream server, calls each one's `tools/list`, and builds an
 in-memory **catalog**: `display_name → {server, raw tool name, one-line summary,
-full schema, keywords}`. The connections stay open for the gateway's lifetime and
+full schema, annotations, keywords}`. The connections stay open for the gateway's lifetime and
 are closed on shutdown. The gateway owns the downstream processes.
 
 **Naming.** Downstream tools are exposed as `"<server>.<tool>"` (e.g.
 `shell.start`, `search.grep`). Server names must not contain `_` so routing is
 unambiguous. `call("shell.start", …)` maps back to server `shell`, tool `start`.
 
-**The three tools (`registry.py` holds the pure logic):**
+**The four tools (`registry.py` holds the pure logic):**
 - **search** ranks the catalog against the query — substring hits on the name score
   highest, then token overlap with name/keywords, then with the summary — and
   returns only `{name, summary}`. An empty query lists everything. This is the only
   step that must be cheap in tokens, and it is.
-- **describe** returns the full description + JSON schema for one resolved name
-  (case-insensitive; suggests close names on a typo).
-- **call** routes to the owning downstream client, invokes the real tool, and
-  returns its payload **faithfully** (structured data if present, else text) so
-  Continue injects it exactly like a native tool result. Downstream errors are
-  returned as `{error: …}` rather than crashing the gateway.
+- **describe** returns the full description + JSON schema, preserved downstream
+  annotations, authority (`regular` or `destructive`), and the required invocation
+  tool for one resolved name (case-insensitive; suggests close names on a typo).
+- **call** routes only non-destructive tools; **call_destructive** routes only tools
+  carrying `destructiveHint: true`. Calls through the wrong authority fail with a
+  structured `{ok: false, error: ...}` response naming the correct gateway tool.
+  Both invocation tools return the downstream payload **faithfully** (including
+  content blocks, structured content, metadata, and error status) so
+  Continue injects it exactly like a native tool result. Gateway metadata success
+  responses carry `ok: true`; expected gateway failures carry
+  `{ok: false, error: …}` rather than crashing the gateway.
 
 **Why `registry.py` is separate and dependency-free:** the valuable, testable logic
 (catalog, ranking, summarizing) has no MCP or network in it, so it's unit-tested in
@@ -151,8 +157,9 @@ from the toolkit root starts the checkout's example config directly.
 3. Exclude the built-in Continue tools you're replacing (`run_terminal_command`,
    Grep/Glob search, Edit/Create file) as before — their replacements now live
    behind the gateway.
-4. Set `gateway.search` / `gateway.describe` → **Automatic** (read-only, cheap) and
-   `gateway.call` → **Ask First** until you trust it (it can reach write tools).
+4. Set `gateway.search` / `gateway.describe` → **Automatic** (read-only, cheap).
+   Apply your normal policy to `gateway.call`; reserve **Ask First** for
+   `gateway.call_destructive`, which is advertised with `destructiveHint: true`.
 
 ### The flow the model follows
 
@@ -163,11 +170,12 @@ gateway.search({ "query": "replace text in a file" })
 
 // 2. load one schema
 gateway.describe({ "name": "edit.edit" })
-//   -> { input_schema: { properties: { path, old_string, new_string, replace_all } … } }
+//   -> { ok: true, authority: "destructive", invoke_with: "call_destructive",
+//        annotations: { destructiveHint: true }, input_schema: { … } }
 
 // 3. run it
-gateway.call({ "name": "edit.edit",
-               "arguments": { "path": "a.py", "old_string": "foo", "new_string": "bar" } })
+gateway.call_destructive({ "name": "edit.edit",
+  "arguments": { "path": "a.py", "old_string": "foo", "new_string": "bar" } })
 //   -> the edit tool's result, injected natively
 ```
 
@@ -179,7 +187,7 @@ the server ships an `instructions` string reinforcing it.
 ## 4. Token math (a concrete example)
 
 <!-- BEGIN GENERATED GATEWAY TOKEN MATH -->
-The default tail is `sql-mcp`, `notes-mcp`: 7 tools totaling **~574 tokens** if registered directly. The gateway advertises 3 meta-tools totaling **~311 tokens**, saving **~263 tokens (46%)** of resting schema context. The exact per-tool estimates are generated by `bench/audit.py` and committed in `bench/schema-metrics.json`; described downstream schemas are paid only when used.
+The default tail is `sql-mcp`, `notes-mcp`: 7 tools totaling **~574 tokens** if registered directly. The gateway advertises 4 meta-tools totaling **~412 tokens**, saving **~162 tokens (28%)** of resting schema context. The exact per-tool estimates are generated by `bench/audit.py` and committed in `bench/schema-metrics.json`; described downstream schemas are paid only when used.
 <!-- END GENERATED GATEWAY TOKEN MATH -->
 
 ---

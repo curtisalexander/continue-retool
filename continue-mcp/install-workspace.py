@@ -62,7 +62,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 from continue_mcp_common.metadata import load_servers
 
@@ -75,6 +75,29 @@ GATEWAY_CONFIG_REL = os.path.join(".continue", "gateway.config.json")
 MANIFEST_REL = os.path.join(".continue", ".continue-mcp-install.json")
 BACKUP_DIR_REL = os.path.join(".continue", ".continue-mcp-backups")
 MANIFEST_VERSION = 1
+GATEWAY_META_TOOLS = frozenset({"search", "describe", "call", "call_destructive"})
+
+
+class BackupRecord(TypedDict):
+    backup: str
+    sha256: str
+    mode: int
+
+
+class FileRecord(TypedDict):
+    installed_sha256: str
+    previous: BackupRecord | None
+
+
+class Manifest(TypedDict):
+    version: int
+    files: dict[str, FileRecord]
+    created_dirs: list[str]
+
+
+class _PathSnapshot(TypedDict):
+    data: bytes
+    mode: int
 
 _POLICY_LINES = {server["name"]: server["policy"] for server in SERVER_METADATA}
 
@@ -100,7 +123,7 @@ def policy_checklist(names: list[str]) -> str:
     lines.extend([
         "",
         "For rarely used tools, re-run with --gateway: Continue sees only the",
-        "gateway's three discovery tools while it owns the selected downstreams.",
+        "gateway's four authority-aware meta-tools while it owns the selected downstreams.",
     ])
     return "\n".join(lines)
 
@@ -298,7 +321,7 @@ def _from_manifest_rel(project: str, rel: str) -> str:
     return _require_contained(project, path)
 
 
-def _load_manifest(project: str) -> dict[str, Any]:
+def _load_manifest(project: str) -> Manifest:
     path = _require_contained(project, _manifest_path(project))
     if not os.path.exists(path):
         return {"version": MANIFEST_VERSION, "files": {}, "created_dirs": []}
@@ -327,10 +350,10 @@ def _load_manifest(project: str) -> dict[str, Any]:
             _from_manifest_rel(project, previous["backup"])
     for rel in manifest["created_dirs"]:
         _from_manifest_rel(project, rel)
-    return manifest
+    return cast(Manifest, manifest)
 
 
-def _save_manifest(project: str, manifest: dict[str, Any]) -> None:
+def _save_manifest(project: str, manifest: Manifest) -> None:
     data = (json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False)
             + "\n").encode("utf-8")
     _atomic_write(_require_contained(project, _manifest_path(project)), data, 0o600)
@@ -347,7 +370,7 @@ def _backup_rel(target_rel: str) -> str:
             .replace(os.sep, "/"))
 
 
-def _ensure_dir(project: str, path: str, manifest: dict[str, Any]) -> None:
+def _ensure_dir(project: str, path: str, manifest: Manifest) -> None:
     missing = []
     cursor = path
     while cursor != project and not os.path.exists(cursor):
@@ -364,7 +387,7 @@ def _ensure_dir(project: str, path: str, manifest: dict[str, Any]) -> None:
 
 
 def write_out(project: str, dest: str, content: str,
-              manifest: dict[str, Any]) -> None:
+              manifest: Manifest) -> None:
     """Atomically install one file and record enough state to undo it safely.
 
     A reinstall may replace only the exact bytes from the prior install. This
@@ -470,6 +493,50 @@ def _reject_direct_gateway_overlap(project: str, names: list[str]) -> None:
         )
 
 
+def _validate_write(project: str, dest: str, content: str, manifest: Manifest) -> None:
+    """Validate a rendered output against current ownership before mutation."""
+    content.encode("utf-8")
+    rel = _relative(project, dest)
+    record = manifest["files"].get(rel)
+    if os.path.lexists(dest):
+        if os.path.islink(dest) or not os.path.isfile(dest):
+            raise RuntimeError(f"refusing to replace non-regular file: {dest}")
+        if record is not None:
+            with open(dest, "rb") as f:
+                if _sha256(f.read()) != record["installed_sha256"]:
+                    raise RuntimeError(
+                        f"refusing to overwrite locally modified installed file: {dest}"
+                    )
+
+
+def _rollback_install(project: str, snapshots: dict[str, _PathSnapshot | None],
+                      existing_dirs: set[str]) -> None:
+    """Restore every path this invocation could have changed."""
+    for path, snapshot in snapshots.items():
+        if snapshot is None:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        else:
+            _atomic_write(path, snapshot["data"], snapshot["mode"])
+    root = os.path.join(project, ".continue")
+    if os.path.isdir(root):
+        for current, dirs, _files in os.walk(root, topdown=False):
+            for directory in dirs:
+                path = os.path.join(current, directory)
+                if path not in existing_dirs:
+                    try:
+                        os.rmdir(path)
+                    except OSError:
+                        pass
+        if root not in existing_dirs:
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
+
+
 def install(project: str, names: list[str], uv_path: str, gateway: bool = False) -> None:
     mcp_dir = os.path.join(project, ".continue", "mcpServers")
     rules_dir = os.path.join(project, ".continue", "rules")
@@ -478,9 +545,7 @@ def install(project: str, names: list[str], uv_path: str, gateway: bool = False)
     else:
         _reject_direct_gateway_overlap(project, names)
     manifest = _load_manifest(project)
-    _ensure_dir(project, mcp_dir, manifest)
-    _ensure_dir(project, rules_dir, manifest)
-
+    outputs: list[tuple[str, str]] = []
     installed_names = [GATEWAY] if gateway else names
     for name in installed_names:
         src = os.path.join(KIT_DIR, f"{name}-mcp", ".continue", "mcpServers", f"{name}.yaml")
@@ -488,21 +553,51 @@ def install(project: str, names: list[str], uv_path: str, gateway: bool = False)
             content = stamp(f.read(), name, project, uv_path)
         if name == "shell":
             content = stamp_shell_interpreters(content)
-        write_out(project, os.path.join(mcp_dir, f"{name}.yaml"), content, manifest)
+        outputs.append((os.path.join(mcp_dir, f"{name}.yaml"), content))
 
     if gateway:
-        write_out(
-            project,
-            os.path.join(project, GATEWAY_CONFIG_REL),
-            _gateway_downstream_config(project, names, uv_path),
-            manifest,
-        )
+        outputs.append((os.path.join(project, GATEWAY_CONFIG_REL),
+                        _gateway_downstream_config(project, names, uv_path)))
 
     for rule in RULES:
         src = os.path.join(KIT_DIR, "rules", rule)
         with open(src, "r", encoding="utf-8") as f:
             content = f.read()
-        write_out(project, os.path.join(rules_dir, rule), content, manifest)
+        outputs.append((os.path.join(rules_dir, rule), content))
+
+    # Rendering, source reads, encoding, and ownership checks all happen before
+    # the first directory, backup, target, or manifest mutation.
+    for dest, content in outputs:
+        _validate_write(project, dest, content, manifest)
+
+    touched = [_manifest_path(project), *(dest for dest, _ in outputs)]
+    for dest, _ in outputs:
+        rel = _relative(project, dest)
+        if rel not in manifest["files"] and os.path.isfile(dest):
+            touched.append(_from_manifest_rel(project, _backup_rel(rel)))
+    snapshots: dict[str, _PathSnapshot | None] = {}
+    for path in touched:
+        if path in snapshots:
+            continue
+        if os.path.isfile(path) and not os.path.islink(path):
+            snapshots[path] = {
+                "data": open(path, "rb").read(),
+                "mode": stat.S_IMODE(os.stat(path).st_mode),
+            }
+        else:
+            snapshots[path] = None
+    existing_dirs: set[str] = set()
+    for current, dirs, _files in os.walk(os.path.join(project, ".continue")):
+        existing_dirs.add(current)
+        existing_dirs.update(os.path.join(current, directory) for directory in dirs)
+    try:
+        _ensure_dir(project, mcp_dir, manifest)
+        _ensure_dir(project, rules_dir, manifest)
+        for dest, content in outputs:
+            write_out(project, dest, content, manifest)
+    except BaseException:
+        _rollback_install(project, snapshots, existing_dirs)
+        raise
 
 
 def _summary_line(out: str, err: str) -> str:
@@ -532,7 +627,7 @@ def sync_deps(names: list[str]) -> int:
     print(CORP_NOTE)
     start = time.monotonic()
     proc = subprocess.run(
-        [uv, "sync", "--project", KIT_DIR], capture_output=True, text=True
+        [uv, "sync", "--locked", "--project", KIT_DIR], capture_output=True, text=True
     )
     duration = time.monotonic() - start
     if proc.returncode:
@@ -615,11 +710,12 @@ def _mcp_handshake(cmd: list[str], *, env: dict[str, str] | None = None,
         tools = recv(2).get("result", {}).get("tools", [])
         tool_names = [t.get("name", "") for t in tools if isinstance(t, dict)]
         if gateway_servers:
-            expected_meta = {"search", "describe", "call"}
-            if set(tool_names) != expected_meta:
+            if set(tool_names) != GATEWAY_META_TOOLS:
                 return False, f"unexpected gateway tools: {', '.join(tool_names)}"
             send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-                "name": "search", "arguments": {"query": ""}}})
+                # Doctor must inspect the complete catalog, not search's
+                # model-facing default shortlist.
+                "name": "search", "arguments": {"query": "", "limit": 10_000}}})
             called = recv(3)
             if "error" in called:
                 return False, f"gateway search failed: {called['error']}"
@@ -636,7 +732,7 @@ def _mcp_handshake(cmd: list[str], *, env: dict[str, str] | None = None,
             missing = sorted(set(gateway_servers) - discovered)
             if missing:
                 return False, f"downstream catalog missing: {', '.join(missing)}"
-            return True, (f"3 gateway tools; downstream catalog reached: "
+            return True, (f"{len(GATEWAY_META_TOOLS)} gateway tools; downstream catalog reached: "
                           f"{', '.join(sorted(discovered))}")
         return True, f"{len(tools)} tool(s): {', '.join(tool_names)}"
     except TimeoutError:
@@ -1020,31 +1116,33 @@ def main(argv: list[str] | None = None) -> int:
 
     mode = f"gateway + {len(names)} downstream server(s)" if args.gateway else f"{len(names)} server(s)"
     print(f"Installing {mode} + {len(RULES)} rule(s) into {project}")
+
+    # Establish the locked environment before installing launch configuration:
+    # a failed sync must not leave Continue pointing at unusable servers.
+    if args.no_sync:
+        print("\nSkipping `uv sync` (--no-sync). Run it at the continue-mcp root "
+              "before the servers will start.")
+    else:
+        sync_names = [GATEWAY, *names] if args.gateway else names
+        if sync_deps(sync_names):
+            print("WARNING: installation was not changed because the shared "
+                  "environment did not sync — see errors above.", file=sys.stderr)
+            print(CORP_NOTE, file=sys.stderr)
+            return 1
+
     try:
         install(project, names, uv_path, args.gateway)
     except (OSError, UnicodeError, RuntimeError) as e:
         print(f"error: install failed: {e}", file=sys.stderr)
         return 1
 
-    failures = 0
-    if args.no_sync:
-        print("\nSkipping `uv sync` (--no-sync). Run it at the continue-mcp root "
-              "before the servers will start.")
-    else:
-        sync_names = [GATEWAY, *names] if args.gateway else names
-        failures = sync_deps(sync_names)
-
     if args.gateway:
         print("\nGateway installed. Continue should register only gateway.yaml for "
               "the selected downstream tools. Set gateway.search/describe to "
-              "Automatic and gateway.call to Ask First.")
+              "Automatic and gateway.call/call_destructive according to their "
+              "advertised authority.")
     else:
         print(policy_checklist(names))
-    if failures:
-        print("WARNING: the shared environment did not sync — see errors above.",
-              file=sys.stderr)
-        print(CORP_NOTE, file=sys.stderr)
-        return 1
     return 0
 
 

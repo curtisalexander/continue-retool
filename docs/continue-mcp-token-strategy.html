@@ -231,7 +231,7 @@ already built <code>edit</code>, <code>search</code>, and
 <p><strong>Rung 2 — Gateway the long tail.</strong> For the many tools
 you use <em>occasionally</em>, register only the gateway and let it hide
 their schemas until needed (§3). Resting cost for the whole tail
-collapses to the gateway's fixed ~3-schema footprint.</p>
+collapses to the gateway's fixed four-schema footprint.</p>
 <p><strong>Rung 3 — Enforce terseness at creation.</strong> The
 <code>new-mcp-tool</code> factory bakes in a token budget per
 description and registers new tools into the gateway catalog, so the
@@ -286,10 +286,10 @@ the near-zero savings both argue for keeping it direct.</p>
 gateway's own fixed cost</h3>
 <!-- BEGIN GENERATED GATEWAY COST -->
 
-<p>The audit currently estimates the gateway's three meta-tool schemas
-at <strong>~311 tokens at rest</strong>. The default tail (sql, notes)
-would cost ~574 tokens if registered directly, so the gateway saves ~263
-resting tokens (46%) before any per-use describe result. These values
+<p>The audit currently estimates the gateway's 4 meta-tool schemas at
+<strong>~412 tokens at rest</strong>. The default tail (sql, notes)
+would cost ~574 tokens if registered directly, so the gateway saves ~162
+resting tokens (28%) before any per-use describe result. These values
 are generated from <code>continue-mcp/bench/schema-metrics.json</code>
 using the repository's deterministic
 <code>ceil(serialized characters / 4)</code> estimator.</p>
@@ -355,15 +355,15 @@ current toolkit</h2>
 </tr>
 <tr>
 <td><code>gateway-mcp</code></td>
-<td style="text-align: right;">3</td>
-<td style="text-align: right;">311</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">412</td>
 <td>gateway-host</td>
 </tr>
 </tbody>
 </table>
 <p>With the metadata defaults, direct servers cost ~2295 tokens and the
-gateway costs ~311, for **~2606 resting tokens**. Registering the same
-tail directly would cost ~2869; the generated hybrid saves ~263 tokens
+gateway costs ~412, for **~2707 resting tokens**. Registering the same
+tail directly would cost ~2869; the generated hybrid saves ~162 tokens
 per request.</p>
 <p>Concretely for Continue, register <code>hello.yaml</code>,
 <code>shell.yaml</code>, <code>search.yaml</code>,

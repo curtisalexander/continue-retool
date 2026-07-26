@@ -1,15 +1,16 @@
 """
-gateway-mcp — one MCP server that hides many tools behind three meta-tools.
+gateway-mcp — one MCP server that hides many tools behind four meta-tools.
 
 Continue connects to ONLY this gateway. The gateway is itself an MCP *client* to
 your downstream servers (shell, search, edit, …), aggregates their tool catalogs,
-and exposes just three tools:
+and exposes just four tools:
 
     gateway.search(query)          -> lightweight {name, summary} shortlist   (step 1)
     gateway.describe(name)         -> full JSON schema for one tool           (step 2)
-    gateway.call(name, arguments)  -> run it; result is injected natively      (step 3)
+    gateway.call(name, arguments)  -> run a regular tool                       (step 3)
+    gateway.call_destructive(...)  -> run a destructive tool                   (step 3)
 
-Net effect: Continue pays for 3 tool schemas at rest instead of N, and the model
+Net effect: Continue pays for 4 tool schemas at rest instead of N, and the model
 loads a real tool's schema only when it needs it — Anthropic's Tool Search /
 progressive-disclosure pattern, reproduced locally so it works with any model.
 
@@ -35,14 +36,15 @@ from fastmcp.tools import ToolResult
 
 from continue_mcp_common.results import result as _result
 
-from .registry import build_catalog, rank_tools
+from .registry import build_catalog, is_destructive, rank_tools
 
 
 INSTRUCTIONS = (
-    "This server exposes many tools behind three meta-tools. To use ANY capability: "
+    "This server exposes many tools behind four meta-tools. To use ANY capability: "
     "1) call search(query) to find the tool, 2) call describe(name) to get its "
     "argument schema, 3) call call(name, arguments) to run it. Do not guess tool "
-    "names or arguments — discover them via search/describe first."
+    "names or arguments — discover them via search/describe first. Use "
+    "call_destructive, not call, when describe reports destructive authority."
 )
 
 
@@ -96,11 +98,15 @@ async def lifespan(_app):
                 client = await stack.enter_async_context(_connect(spec, base_dir))
                 clients[server] = client
                 for t in await client.list_tools():
+                    annotations = getattr(t, "annotations", None)
+                    if hasattr(annotations, "model_dump"):
+                        annotations = annotations.model_dump(by_alias=True, exclude_none=True)
                     raw.append({
                         "server": server,
                         "tool": t.name,
                         "description": getattr(t, "description", "") or "",
                         "input_schema": getattr(t, "inputSchema", None) or {},
+                        "annotations": annotations or {},
                     })
             except Exception as exc:
                 errors[server] = str(exc)
@@ -135,7 +141,7 @@ def _unwrap(result):
     return result
 
 
-# --- the three meta-tools --------------------------------------------------
+# --- the four meta-tools ---------------------------------------------------
 @mcp.tool(annotations={"readOnlyHint": True})
 async def search(query: str = "", limit: int = 15) -> ToolResult:
     """STEP 1 of 3. Find tools by keyword/intent (e.g. 'run a command', 'search
@@ -143,12 +149,14 @@ async def search(query: str = "", limit: int = 15) -> ToolResult:
     full schemas. Then call describe(name) for the arguments. Empty query lists
     everything."""
     if STATE.catalog is None:
-        return _result("catalog not ready", {"error": "catalog not ready"})
+        return _failure("catalog not ready")
     hits = rank_tools(STATE.catalog, query, limit)
     data = {
         "query": query,
         "count": len(hits),
-        "tools": [{"name": e.name, "summary": e.summary} for e in hits],
+        "ok": True,
+        "tools": [{"name": e.name, "summary": e.summary,
+                   "authority": "destructive" if is_destructive(e) else "regular"} for e in hits],
         "unavailable_servers": dict(STATE.errors),
         "next": "call describe(name) to get a tool's argument schema",
     }
@@ -162,12 +170,15 @@ async def describe(name: str) -> ToolResult:
     (a name from search(), e.g. 'shell.start'). Use it to build the arguments for
     call()."""
     if STATE.catalog is None:
-        return _result("catalog not ready", {"error": "catalog not ready"})
+        return _failure("catalog not ready")
     e = STATE.catalog.resolve(name)
     if not e:
-        data = {"error": f"unknown tool {name!r}", "did_you_mean": STATE.catalog.suggest(name)}
+        data = {"ok": False, "error": f"unknown tool {name!r}", "did_you_mean": STATE.catalog.suggest(name)}
         return _result(f"unknown tool {name!r}", data)
-    data = {"name": e.name, "description": e.description, "input_schema": e.schema}
+    data = {"ok": True, "name": e.name, "description": e.description,
+            "input_schema": e.schema, "annotations": e.annotations,
+            "authority": "destructive" if is_destructive(e) else "regular",
+            "invoke_with": "call_destructive" if is_destructive(e) else "call"}
     return _result(f"{e.name}\n{e.description}", data, json.dumps(e.schema, indent=2), lang="json")
 
 
@@ -176,30 +187,50 @@ async def call(name: str, arguments: Optional[dict] = None) -> ToolResult:
     """STEP 3 of 3. Run a tool discovered via search()/describe(). `name` is like
     'shell.start'; `arguments` must match that tool's schema (see describe()). The
     tool's result is returned and injected into context just like a native tool."""
+    return await _invoke(name, arguments, destructive=False)
+
+
+@mcp.tool(annotations={"destructiveHint": True, "openWorldHint": True})
+async def call_destructive(name: str, arguments: Optional[dict] = None) -> ToolResult:
+    """Run a downstream tool whose describe() response reports destructive
+    authority. Non-destructive tools must be invoked with call() instead."""
+    return await _invoke(name, arguments, destructive=True)
+
+
+async def _invoke(name: str, arguments: Optional[dict], *, destructive: bool) -> ToolResult:
     if STATE.catalog is None:
-        return _result("catalog not ready", {"error": "catalog not ready"})
+        return _failure("catalog not ready")
     e = STATE.catalog.resolve(name)
     if not e:
-        data = {"error": f"unknown tool {name!r}; call search() first",
+        data = {"ok": False, "error": f"unknown tool {name!r}; call search() first",
                 "did_you_mean": STATE.catalog.suggest(name)}
         return _result(f"unknown tool {name!r}", data)
+    if is_destructive(e) != destructive:
+        required = "call_destructive" if is_destructive(e) else "call"
+        return _failure(f"{name!r} has {'destructive' if is_destructive(e) else 'regular'} authority; use {required}()")
     client = STATE.clients.get(e.server)
     if client is None:
-        return _result(f"downstream {e.server!r} not connected",
-                       {"error": f"downstream server {e.server!r} is not connected"})
+        return _failure(f"downstream server {e.server!r} is not connected")
     try:
-        result = await client.call_tool(e.tool, arguments or {})
+        result = await client.call_tool(e.tool, arguments or {}, raise_on_error=False)
     except Exception as exc:  # surface downstream errors to the model, don't crash
-        return _result(f"call to {name} failed: {exc}", {"error": f"call to {name} failed: {exc}"})
+        return _failure(f"call to {name} failed: {exc}")
     # Pass the downstream tool's rendering straight through: keep its content
     # blocks (so a diff/console still shows in the UI) AND its structured data.
     content = _list_content(result)
     structured = getattr(result, "structured_content", None)
-    if not isinstance(structured, dict):
-        structured = None
     if not content and structured is None:
-        return _result(f"{name} ok", {"result": _unwrap(result)})
-    return ToolResult(content=content, structured_content=structured)
+        return _result(f"{name} ok", {"ok": True, "result": _unwrap(result)})
+    return ToolResult(
+        content=content,
+        structured_content=structured,
+        meta=getattr(result, "meta", None),
+        is_error=getattr(result, "is_error", False),
+    )
+
+
+def _failure(message: str) -> ToolResult:
+    return _result(message, {"ok": False, "error": message})
 
 
 def _list_content(result) -> list:
