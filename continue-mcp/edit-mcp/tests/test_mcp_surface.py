@@ -324,7 +324,8 @@ def test_move_file_no_replace_cross_device_commits_without_clobber(
     assert res.data["ok"] is True
     assert not src.exists()
     assert dest.read_text(encoding="utf-8") == "payload\n"
-    assert dest.stat().st_mode & 0o777 == 0o640
+    if os.name != "nt":
+        assert dest.stat().st_mode & 0o777 == 0o640
     assert not list(tmp_path.glob(".dest.txt.*.tmp"))
 
 
