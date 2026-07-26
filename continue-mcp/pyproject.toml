@@ -7,7 +7,6 @@ name = "continue-mcp"
 version = "0.1.0"
 description = "A unified collection of focused MCP servers for Continue.dev"
 readme = "README.md"
-license = "MIT"
 requires-python = ">=3.11"
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -24,11 +23,6 @@ dependencies = [
   "fastmcp>=3,<4",
   "sqruff>=0.39",
 ]
-
-[project.urls]
-Homepage = "https://curtisalexander.github.io/continue-retool/"
-Repository = "https://github.com/curtisalexander/continue-retool"
-Issues = "https://github.com/curtisalexander/continue-retool/issues"
 
 [dependency-groups]
 dev = [
