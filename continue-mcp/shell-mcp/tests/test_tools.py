@@ -90,8 +90,18 @@ def test_build_argv_bash(monkeypatch):
 def test_build_argv_pwsh(monkeypatch):
     monkeypatch.setenv("SHELL_MCP_PWSH", r"C:/PS/pwsh.exe")
     assert build_argv("Get-ChildItem", "pwsh") == [
-        r"C:/PS/pwsh.exe", "-NoProfile", "-Command", "Get-ChildItem",
+        r"C:/PS/pwsh.exe",
+        "-NoProfile",
+        "-Command",
+        server._POWERSHELL_UTF8_PREFIX + "Get-ChildItem",
     ]
+
+
+def test_build_argv_windows_powershell_enables_utf8(monkeypatch):
+    monkeypatch.setenv("SHELL_MCP_POWERSHELL", r"C:/Windows/powershell.exe")
+    argv = build_argv("Write-Output '🚀'", "powershell")
+    assert argv[-1].startswith(server._POWERSHELL_UTF8_PREFIX)
+    assert argv[-1].endswith("Write-Output '🚀'")
 
 
 def test_build_argv_unknown_shell_raises():
@@ -425,8 +435,8 @@ def test_windows_absolute_pwsh_child_stays_piped(tmp_path):
         pytest.skip("PowerShell 7 is unavailable")
     script = tmp_path / "output.ps1"
     script.write_text(
-        '[Console]::Out.WriteLine("pwsh-stdout")\n'
-        '[Console]::Error.WriteLine("pwsh-stderr")\n',
+        '[Console]::Out.WriteLine("pwsh-stdout 🚀")\n'
+        '[Console]::Error.WriteLine("pwsh-stderr 🧪")\n',
         encoding="utf-8",
     )
     quoted_pwsh = pwsh.replace("'", "''")
@@ -434,14 +444,15 @@ def test_windows_absolute_pwsh_child_stays_piped(tmp_path):
 
     async def scenario():
         command = f"& '{quoted_pwsh}' -NoProfile -File '{quoted_script}'"
-        return (
-            await server.run(command, shell="pwsh", cwd=str(tmp_path), timeout=15)
-        ).structured_content
+        return await server.run(command, shell="pwsh", cwd=str(tmp_path), timeout=15)
 
-    res = asyncio.run(scenario())
+    result = asyncio.run(scenario())
+    res = result.structured_content
     assert res["state"] == "exited" and res["exit_code"] == 0
-    assert "pwsh-stdout" in res["stdout"]
-    assert "pwsh-stderr" in res["stderr"]
+    assert "pwsh-stdout 🚀" in res["stdout"]
+    assert "pwsh-stderr 🧪" in res["stderr"]
+    assert "🚀" in result.content[0].text
+    assert "🧪" in result.content[0].text
 
 
 def test_timeout_kills_and_reports():

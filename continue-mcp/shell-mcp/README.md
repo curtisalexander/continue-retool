@@ -38,9 +38,10 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
   tools can open it), and the `...[N bytes truncated — full output: …]...` marker
   names the file. A job that fits in the buffer never touches disk.
   `SHELL_MCP_SPILL=0` disables spilling; `SHELL_MCP_SPILL_DIR` relocates it.
-- **Right encoding per platform.** UTF-8 when the bytes are UTF-8; otherwise
-  the Windows OEM code page that cmd/PowerShell 5.1 actually emit. Force one
-  with `SHELL_MCP_ENCODING`.
+- **Right encoding per platform.** PowerShell starts with UTF-8 console and
+  pipeline encodings so characters such as emoji are preserved before capture.
+  Output is decoded as UTF-8 when valid, otherwise with the Windows OEM code
+  page for legacy commands. Force decoding with `SHELL_MCP_ENCODING`.
 - **Interpreter resolution.** `shell = bash | pwsh | powershell | cmd` is
   resolved by the server (installer-stamped `SHELL_MCP_<SHELL>` env → PATH →
   known install locations) so a stale GUI PATH can't break it, and the model

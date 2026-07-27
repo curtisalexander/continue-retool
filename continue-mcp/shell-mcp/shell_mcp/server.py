@@ -199,6 +199,16 @@ _INTERP: dict[str, tuple[str, list[str]]] = {
     "cmd":        ("cmd.exe",        ["/c"]),
 }
 
+# Decoding as UTF-8 is too late when Windows PowerShell has already replaced an
+# unrepresentable character with '?'. Establish UTF-8 before the user's command
+# runs. Console.OutputEncoding controls PowerShell/native process output;
+# $OutputEncoding controls text PowerShell pipes into native processes.
+_POWERSHELL_UTF8_PREFIX = (
+    "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);"
+    "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
+    "$OutputEncoding=[Text.UTF8Encoding]::new($false);"
+)
+
 
 def _known_locations(shell: str) -> list[str]:
     """Fixed install paths to try when PATH lookup misses (the stale-GUI-PATH
@@ -278,6 +288,8 @@ def build_argv(cmd: str, shell: Optional[str]) -> list[str]:
             f"(bash|pwsh|powershell|cmd); do NOT prefix cmd with an interpreter "
             f"name or an absolute path."
         )
+    if shell in ("pwsh", "powershell"):
+        cmd = _POWERSHELL_UTF8_PREFIX + cmd
     return [exe, *wrap, cmd]
 
 
