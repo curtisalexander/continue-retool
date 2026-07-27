@@ -3,7 +3,7 @@
 # Then in Continue's Agent tool settings:
 #   * set the built-in  Edit file    policy to  Excluded
 #   * set the built-in  Create file  policy to  Excluded
-#   * set  edit.edit / edit.multi_edit / edit.create_file  to  Ask First
+#   * set  edit.edit / edit.create_file  to  Ask First
 #     (these write to disk — keep a human in the loop until you trust them)
 name: edit
 version: 0.0.1

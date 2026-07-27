@@ -10,7 +10,6 @@ import pytest
 
 from edit_mcp.matcher import (
     EditError,
-    apply_edits,
     detect_line_ending,
     find_and_replace,
     normalize_for_fuzzy,
@@ -150,15 +149,70 @@ def test_no_match_raises_with_hint():
         find_and_replace("def alpha():\n    return 1", "def beta():\n    return 1", "x")
 
 
-# --- multi-edit ------------------------------------------------------------
-def test_apply_edits_sequential():
-    content = "one two three"
-    out, results = apply_edits(content, [
-        {"old_string": "one", "new_string": "1"},
-        {"old_string": "three", "new_string": "3"},
-    ])
-    assert out == "1 two 3"
-    assert [r["replacements"] for r in results] == [1, 1]
+def test_fuzzy_preserves_unrelated_same_line_bytes_and_trailing_spaces():
+    source = 'keep “smart” and café; change — me; tail ’   '
+    out, strategy, _ = find_and_replace(source, "change - me", "changed")
+    assert strategy == "fuzzy"
+    assert out == 'keep “smart” and café; changed; tail ’   '
+
+
+def test_nfkc_expansion_maps_to_original_span_only():
+    out, strategy, _ = find_and_replace("left ㍿ right — keep", "株式会社", "company")
+    assert strategy == "fuzzy"
+    assert out == "left company right — keep"
+
+
+@pytest.mark.parametrize(
+    ("source", "old", "expected"),
+    [
+        ("Ａ¼B", "1", "ＡXB"),
+        ("㍿", "株式", "X"),
+        ("Ａ¼Ｂ¼C", "1⁄4B1⁄4", "ＡXC"),
+    ],
+)
+def test_partial_nfkc_expansions_consume_only_their_source_clusters(source, old, expected):
+    out, strategy, count = find_and_replace(source, old, "X")
+    assert (out, strategy, count) == (expected, "fuzzy", 1)
+
+
+def test_nfd_cluster_partial_normalized_match_consumes_complete_cluster():
+    source = "a cafe\N{COMBINING ACUTE ACCENT} z"
+    out, _, _ = find_and_replace(source, "é", "E")
+    assert out == "a cafE z"
+
+
+@pytest.mark.parametrize(
+    ("source", "old", "expected"),
+    [
+        ("가", "가", "X"),
+        ("ｶﾞ", "ガ", "X"),
+    ],
+)
+def test_cross_character_nfkc_composition_maps_to_complete_source(source, old, expected):
+    out, strategy, count = find_and_replace(source, old, "X")
+    assert (out, strategy, count) == (expected, "fuzzy", 1)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["cafe\N{COMBINING ACUTE ACCENT}", "가", "ｶﾞ", "Ａ¼B", "a — b\nnext   "],
+)
+def test_provenance_normalization_matches_public_normalization(source):
+    from edit_mcp.matcher import _normalize_with_provenance
+
+    normalized, provenance = _normalize_with_provenance(source)
+    assert normalized == normalize_for_fuzzy(source)
+    assert len(normalized) == len(provenance)
+
+
+def test_multiple_expansions_replace_all_uses_nonoverlapping_source_snapshot():
+    out, strategy, count = find_and_replace("㍿/㍿/keep", "株式", "X", replace_all=True)
+    assert (out, strategy, count) == ("X/X/keep", "fuzzy", 2)
+
+
+def test_multiline_expansion_boundaries_do_not_absorb_neighbors():
+    out, _, _ = find_and_replace("left Ａ¼\n㍿ right", "1⁄4\n株式", "X")
+    assert out == "left ＡX right"
 
 
 # --- primitives ------------------------------------------------------------

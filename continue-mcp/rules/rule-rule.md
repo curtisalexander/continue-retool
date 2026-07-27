@@ -11,7 +11,8 @@ Rule Block tool):
 - **Scope it.** Use `globs`/`description` so the rule loads only when relevant;
   reserve `alwaysApply: true` for true universals.
 - **Rules are policy, not memory.** "How we do things" belongs in a rule;
-  facts, task state, and discoveries belong in notes (`notes.write`).
-- **Propose, don't impose.** A preference must prove itself repeatedly (see
-  the notes rule) before becoming a rule — suggest it to the user rather than
+  facts, task state, and discoveries belong in an explicit worklog or project
+  documentation.
+- **Propose, don't impose.** A preference must prove itself repeatedly in
+  documented project practice before becoming a rule — suggest it rather than
   silently creating it.

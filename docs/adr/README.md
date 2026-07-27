@@ -8,7 +8,7 @@ They are intentionally short; experiments and superseded alternatives remain in
 |---|---|---|
 | [0001](0001-unified-distribution.md) | Accepted | One distribution, selective activation |
 | [0002](0002-tool-authority-and-workspace-boundaries.md) | Accepted | Tool authority and workspace boundaries |
-| [0003](0003-direct-and-gateway-registration.md) | Accepted | Direct and gateway registration |
+| [0003](0003-direct-and-gateway-registration.md) | Superseded | Historical direct and gateway registration |
 | [0004](0004-safe-mutation-and-bounded-execution.md) | Accepted | Safe mutation and bounded execution |
 
 New records are append-only. If a decision changes, add an ADR that supersedes

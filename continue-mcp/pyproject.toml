@@ -42,28 +42,22 @@ rg = ["ripgrep-bin==15.2.0"]
 
 [project.scripts]
 # BEGIN GENERATED SERVER ENTRY POINTS
-hello-mcp = "hello_mcp.server:main"
 shell-mcp = "shell_mcp.server:main"
+fs-mcp = "fs_mcp.server:main"
 search-mcp = "search_mcp.server:main"
 edit-mcp = "edit_mcp.server:main"
-fs-mcp = "fs_mcp.server:main"
 sql-mcp = "sql_mcp.server:main"
-notes-mcp = "notes_mcp.server:main"
-gateway-mcp = "gateway_mcp.server:main"
 # END GENERATED SERVER ENTRY POINTS
 
 [tool.hatch.build.targets.wheel]
 packages = [
   "continue_mcp_common",
 # BEGIN GENERATED SERVER PACKAGES
-  "hello-mcp/hello_mcp",
   "shell-mcp/shell_mcp",
+  "fs-mcp/fs_mcp",
   "search-mcp/search_mcp",
   "edit-mcp/edit_mcp",
-  "fs-mcp/fs_mcp",
   "sql-mcp/sql_mcp",
-  "notes-mcp/notes_mcp",
-  "gateway-mcp/gateway_mcp",
 # END GENERATED SERVER PACKAGES
 ]
 

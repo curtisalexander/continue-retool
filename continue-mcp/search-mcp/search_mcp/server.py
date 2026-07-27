@@ -56,14 +56,9 @@ MAX_ERROR_BYTES = 64 * 1024
 T = TypeVar("T")
 
 
-# --- workspace jail (default ON) --------------------------------------------
-# The recommended tool policy runs this server on Automatic — no human approval
-# per call — so a prompt-injected "read ~/.ssh/id_rsa" must fail closed, not
-# silently succeed. Every path is realpath'd (a symlink inside the workspace
-# can't tunnel out) and must live under the workspace root or an extra root
-# from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
-# sanctioned escape hatch for a legitimate out-of-workspace file is the shell
-# tool, which is approval-gated by policy.
+# --- defense-in-depth workspace path scoping (default ON) -------------------
+# Realpath containment rejects straightforward paths outside MCP_WORKSPACE or
+# MCP_JAIL_EXTRA roots. It is not a sandbox or a complete TOCTOU guarantee.
 # --- locate the rg binary --------------------------------------------------
 def rg_bin() -> str:
     """Find the ripgrep binary. Resolution order:
@@ -83,8 +78,7 @@ def rg_bin() -> str:
             "  4. Point at an existing rg: set RIPGREP_BIN=/abs/path/to/rg\n"
             "Options 2 and 3 install `ripgrep-bin`, a THIRD-PARTY repackage "
             "(Bing-su/pip-binary-factory) of ripgrep's OFFICIAL release binaries — "
-            "not published by ripgrep's author. Prefer 1 or 4 to avoid it.\n"
-            "The installer's doctor (install-workspace.py --check) also prints this."
+            "not published by ripgrep's author. Prefer 1 or 4 to avoid it."
         )
     return b
 

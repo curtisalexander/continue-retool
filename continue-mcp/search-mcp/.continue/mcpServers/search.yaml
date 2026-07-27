@@ -2,12 +2,12 @@
 #
 # Prereq: an `rg` binary the server can find (see search-mcp/README). Bring your
 # own (brew/apt/choco install ripgrep), or `uv tool install ripgrep-bin` (a
-# third-party prebuilt), or set RIPGREP_BIN below. `--check` (doctor) verifies it.
+# third-party prebuilt), or set RIPGREP_BIN below.
 #
 # Then in Continue's Agent tool settings:
 #   * set the built-in  Grep search  policy to  Excluded
 #   * set the built-in  Glob search  policy to  Excluded
-#   * set  search.grep / search.files  to  Automatic  (read-only; safe to auto-run)
+#   * consider search.grep / search.files for Automatic under your threat model
 name: search
 version: 0.0.1
 schema: v1

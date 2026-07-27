@@ -1,6 +1,10 @@
 # Keeping Token Costs Down: Which Tools to Replace, and Where to Put Them
 
-*Strategy record, begun 2026-07-01. Companion to `ARCHITECTURE.md`. Answers:
+*Historical strategy record, begun 2026-07-01. Gateway and factory recommendations
+below are superseded by the 2026-07 repository contraction; retained for design
+context only. The current product is direct shell/fs/search/edit plus optional SQL.*
+
+*Originally answered:
 how do I replace Continue's tools to minimize token cost — and for each tool, do I
 register it **directly** (paid every request) or hide it behind the **gateway**
 (paid per use)? The long-tail-vs-starting-cost tradeoff, made concrete.*
@@ -14,7 +18,7 @@ register it **directly** (paid every request) or hide it behind the **gateway**
 | **Exclude built-ins you never use** | Always, first | Free win. Every built-in tool you don't need is pure resting tax you can delete in the tool-policy UI. |
 | **Replace hot tools with *terse* MCPs, keep them DIRECT** | edit, shell-run, grep — the 2–3 you use every message | Cuts resting cost (terse < fat built-in) *without* adding latency. This alone fixes most of the pain. |
 | **Gateway the long tail** | Once you have ~10+ occasional tools | Near-zero resting cost for tools you rarely touch; a small per-use hop you barely notice because you barely use them. |
-| **Enforce terse descriptions** | Every new tool | ≤ 2 sentences, ≤ ~80 tokens — baked into the `new-mcp-tool` factory. |
+| **Enforce terse descriptions** | Every new tool | ≤ 2 sentences, ≤ ~80 tokens — enforce this in review and schema audits. |
 
 **The one mental model to keep:** a tool's *gateway-worthiness* ≈
 **`schema_size × (1 − how_often_you_use_it)`**. Big schema **and** rarely used →
@@ -68,10 +72,10 @@ sweet spot for your everyday tools — you already built `edit`, `search`, and
 register only the gateway and let it hide their schemas until needed (§3). Resting
 cost for the whole tail collapses to the gateway's fixed four-schema footprint.
 
-**Rung 3 — Enforce terseness at creation.** The `new-mcp-tool` factory bakes in a
-token budget per description and registers new tools into the gateway catalog, so
-the toolkit can grow without the prompt growing. Discipline by construction, not
-willpower.
+**Rung 3 — Enforce terseness at creation.** Apply a token budget to each
+description and verify it in schema audits, so the toolkit cannot grow its prompt
+silently. Make prompt cost a reviewed interface constraint rather than relying on
+author discipline.
 
 ---
 
@@ -123,18 +127,22 @@ The clean gateway win is the **top-right: big schema, rarely used.** The clean
 direct win is the **whole left column: anything you use often**, regardless of
 size, because latency and the near-zero savings both argue for keeping it direct.
 
-### Don't forget the gateway's own fixed cost
+### Historical gateway fixed-cost snapshot
+
+The following figures were generated before the contraction. They are retained
+only as an example of the estimator and do not describe files or servers in the
+current checkout.
 
 <!-- BEGIN GENERATED GATEWAY COST -->
-The audit currently estimates the gateway's 4 meta-tool schemas at **~412 tokens at rest**. The default tail (sql, notes) would cost ~574 tokens if registered directly, so the gateway saves ~162 resting tokens (28%) before any per-use describe result. These values are generated from `continue-mcp/bench/schema-metrics.json` using the repository's deterministic `ceil(serialized characters / 4)` estimator.
+The historical audit estimated the gateway's 4 meta-tool schemas at **~412 tokens at rest**. The then-default tail (sql, notes) cost ~574 tokens if registered directly, so that design saved ~162 resting tokens (28%) before per-use describe results. These are frozen historical values, not current audit output.
 <!-- END GENERATED GATEWAY COST -->
 
 ---
 
-## 4. Worked example — the current toolkit
+## 4. Worked example — historical pre-contraction toolkit
 
 <!-- BEGIN GENERATED TOOLKIT EXAMPLE -->
-The current measured inventory is:
+The inventory measured at the time was:
 
 | Server | Tools | Schema ~tokens | Default registration |
 |---|---:|---:|---|
@@ -196,7 +204,6 @@ resting tokens, a fast hot path, and unlimited expansion — the three goals at 
 - [MCP context-bloat fix 2026: Tool Search / Code Mode / progressive disclosure](https://mcp.directory/blog/mcp-context-bloat-fix-2026-tool-search-code-mode-progressive-disclosure)
 - [MCP token optimization compared (StackOne)](https://www.stackone.com/blog/mcp-token-optimization/) · [Your MCP server is eating your context window (Apideck)](https://www.apideck.com/blog/mcp-server-eating-context-window-cli-alternative)
 - [Anthropic — Tool Search Tool & code execution with MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) · [How Agent Mode Works — Continue Docs](https://docs.continue.dev/ide-extensions/agent/how-it-works)
-- Companion docs in this repo: `ARCHITECTURE.md` (current topology),
-  `docs/history/continue-mcp-toolkit-design.md` (§5 token tax, §5b gateway), and
-  `continue-mcp/gateway-mcp/README.md` (head/tail operation)
+- Current topology: `ARCHITECTURE.md`. Gateway operational files and the tool
+  factory discussed above were removed by the contraction.
 </content>

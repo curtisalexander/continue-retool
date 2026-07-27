@@ -3,14 +3,11 @@
   "schema_version": 1,
   "servers": {
     "edit": {
-      "estimated_tokens": 559,
-      "tool_count": 5,
+      "estimated_tokens": 256,
+      "tool_count": 2,
       "tools": {
         "create_file": 94,
-        "delete_file": 71,
-        "edit": 162,
-        "move_file": 94,
-        "multi_edit": 138
+        "edit": 162
       }
     },
     "fs": {
@@ -19,36 +16,6 @@
       "tools": {
         "list": 110,
         "read": 145
-      }
-    },
-    "gateway": {
-      "estimated_tokens": 412,
-      "tool_count": 4,
-      "tools": {
-        "call": 122,
-        "call_destructive": 101,
-        "describe": 80,
-        "search": 109
-      }
-    },
-    "hello": {
-      "estimated_tokens": 187,
-      "tool_count": 3,
-      "tools": {
-        "echo": 67,
-        "ping": 55,
-        "whoami": 65
-      }
-    },
-    "notes": {
-      "estimated_tokens": 389,
-      "tool_count": 5,
-      "tools": {
-        "delete": 51,
-        "list": 66,
-        "read": 76,
-        "search": 96,
-        "write": 100
       }
     },
     "search": {

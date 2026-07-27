@@ -21,8 +21,9 @@ groups on timeout and shutdown. Return expected failures as structured results.
 
 ## Consequences
 
-Failed create/edit operations preserve existing bytes, and external changes are
-not silently overwritten. Partial results explicitly report truncation. Atomic
-replacement changes the inode and therefore does not preserve hard-link identity
-or every form of special metadata; symlinks and ordinary permission bits require
-explicit handling and tests.
+Failed create/edit operations preserve existing bytes. Optimistic conflict checks
+reject detected external changes but cannot eliminate the residual check/replace
+race. Partial results explicitly report truncation. Atomic replacement changes
+the inode and therefore does not preserve hard-link identity or every form of
+special metadata; symlinks and ordinary permission bits require explicit handling
+and tests.

@@ -73,8 +73,8 @@ mcp = FastMCP("shell", lifespan=lifespan)
 
 # Where full output goes when the ring buffer has to drop the middle. Pi spills
 # to the system tmpdir, but that would be unreadable HERE: fs-mcp/search-mcp are
-# workspace-jailed, so a /tmp path is one the model is told to read and then
-# can't. Inside the workspace it stays greppable by the very tools this kit ships.
+# workspace-scoped, so a /tmp path is one the model is told to read and then
+# cannot. Inside the workspace it stays greppable by the tools this kit ships.
 # SHELL_MCP_SPILL=0 turns spilling off.
 SPILL_DIR = os.environ.get("SHELL_MCP_SPILL_DIR") or os.path.join(".continue-mcp", "logs")
 SPILL_ENABLED = os.environ.get("SHELL_MCP_SPILL", "1").strip().lower() not in (

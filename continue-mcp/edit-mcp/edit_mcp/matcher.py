@@ -24,9 +24,6 @@ from __future__ import annotations
 import difflib
 import re
 import unicodedata
-from bisect import bisect_right
-from dataclasses import dataclass, field
-from typing import NotRequired, TypedDict
 
 # --- character classes we fold during fuzzy matching (mirrors Pi) ----------
 _SMART_SINGLE = re.compile(r"[‘’‚‛]")           # ‘ ’ ‚ ‛  -> '
@@ -39,25 +36,6 @@ _SPACES = re.compile(
 
 class EditError(Exception):
     """Raised for empty/absent/ambiguous matches, with a model-friendly message."""
-
-
-@dataclass
-class _MatchGroup:
-    start_line: int
-    end_line: int
-    spans: list[tuple[int, int]] = field(default_factory=list)
-
-
-class EditPayload(TypedDict):
-    old_string: str
-    new_string: str
-    replace_all: NotRequired[bool]
-
-
-class EditResult(TypedDict):
-    index: int
-    strategy: str
-    replacements: int
 
 
 # --- primitives ------------------------------------------------------------
@@ -94,24 +72,69 @@ def normalize_for_fuzzy(text: str) -> str:
     return text
 
 
-# --- line-offset helpers for mapping normalized matches back to lines ------
-def _line_starts(lines: list[str]) -> list[int]:
-    starts, off = [], 0
-    for ln in lines:
-        starts.append(off)
-        off += len(ln) + 1  # +1 for the joining newline
-    return starts
+def _normalize_with_provenance(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Normalize text and retain the source span for every output character.
 
+    Characters that interact under NFKC are one source cluster. This includes
+    combining sequences, Hangul Jamo, and compatibility forms such as voiced
+    half-width Kana. Consequently partial matches within a normalization
+    expansion always replace the complete original cluster.
+    """
+    output: list[str] = []
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        end = index + 1
+        if text[index] != "\n":
+            while end < len(text) and text[end] != "\n":
+                following = text[end]
+                decomposition = unicodedata.normalize("NFKD", following)
+                if unicodedata.combining(following) or (
+                    decomposition and unicodedata.combining(decomposition[0])
+                ):
+                    end += 1
+                    continue
+                current = unicodedata.normalize("NFKC", text[index:end])
+                interacts = unicodedata.normalize(
+                    "NFKC", current + following
+                ) != current + unicodedata.normalize("NFKC", following)
+                if not interacts:
+                    break
+                end += 1
+        normalized = unicodedata.normalize("NFKC", text[index:end])
+        normalized = _SMART_SINGLE.sub("'", normalized)
+        normalized = _SMART_DOUBLE.sub('"', normalized)
+        normalized = _DASHES.sub("-", normalized)
+        normalized = _SPACES.sub(" ", normalized)
+        output.extend(normalized)
+        spans.extend([(index, end)] * len(normalized))
+        index = end
 
-def _locate(starts: list[int], offset: int) -> tuple[int, int]:
-    i = bisect_right(starts, offset) - 1
-    return i, offset - starts[i]
-
-
-def _fuzzy_norm_lines(content_lf: str) -> tuple[list[str], list[str], str]:
-    orig_lines = content_lf.split("\n")
-    norm_lines = [normalize_for_fuzzy(ln) for ln in orig_lines]
-    return orig_lines, norm_lines, "\n".join(norm_lines)
+    # Match normalize_for_fuzzy's per-line rstrip while preserving provenance
+    # for all retained characters (especially the newline itself).
+    trimmed_output: list[str] = []
+    trimmed_spans: list[tuple[int, int]] = []
+    line_output: list[str] = []
+    line_spans: list[tuple[int, int]] = []
+    for char, span in zip(output, spans, strict=True):
+        if char == "\n":
+            while line_output and line_output[-1].isspace():
+                line_output.pop()
+                line_spans.pop()
+            trimmed_output.extend(line_output)
+            trimmed_spans.extend(line_spans)
+            trimmed_output.append(char)
+            trimmed_spans.append(span)
+            line_output, line_spans = [], []
+        else:
+            line_output.append(char)
+            line_spans.append(span)
+    while line_output and line_output[-1].isspace():
+        line_output.pop()
+        line_spans.pop()
+    trimmed_output.extend(line_output)
+    trimmed_spans.extend(line_spans)
+    return "".join(trimmed_output), trimmed_spans
 
 
 def _match_spans(content: str, needle: str) -> list[tuple[int, int]]:
@@ -136,7 +159,7 @@ def _fuzzy_replace(
     inserted text is never searched again. Lines outside those groups are copied
     verbatim from the original content.
     """
-    orig_lines, norm_lines, norm_content = _fuzzy_norm_lines(content_lf)
+    norm_content, provenance = _normalize_with_provenance(content_lf)
     norm_old = normalize_for_fuzzy(old_lf)
     spans = _match_spans(norm_content, norm_old)
     if not spans:
@@ -144,41 +167,17 @@ def _fuzzy_replace(
     if not replace_all:
         spans = spans[:1]
 
-    starts = _line_starts(norm_lines)
-    groups: list[_MatchGroup] = []
+    original_spans: list[tuple[int, int]] = []
     for start, end in spans:
-        start_line, _ = _locate(starts, start)
-        # `end` is exclusive. Using it directly would claim the following line
-        # when a match ends exactly at a newline boundary and could normalize
-        # that otherwise-untouched line.
-        end_line, _ = _locate(starts, end - 1)
-        current = groups[-1] if groups else None
-        if current is not None and start_line <= current.end_line:
-            current.end_line = max(current.end_line, end_line)
-            current.spans.append((start, end))
-        else:
-            groups.append(_MatchGroup(start_line, end_line, [(start, end)]))
-
-    rebuilt: list[str] = []
-    next_original_line = 0
-    for group in groups:
-        first = group.start_line
-        last = group.end_line
-        rebuilt.extend(orig_lines[next_original_line:first])
-        group_start = starts[first]
-        group_end = starts[last] + len(norm_lines[last])
-        segment = norm_content[group_start:group_end]
-        for start, end in reversed(group.spans):
-            rel_start, rel_end = start - group_start, end - group_start
-            segment = segment[:rel_start] + new_lf + segment[rel_end:]
-        # rebuilt is joined with one LF between logical line groups. If the
-        # replacement consumed and recreated that boundary, do not emit it twice.
-        if segment.endswith("\n"):
-            segment = segment[:-1]
-        rebuilt.append(segment)
-        next_original_line = last + 1
-    rebuilt.extend(orig_lines[next_original_line:])
-    return "\n".join(rebuilt), len(spans)
+        source_span = (provenance[start][0], provenance[end - 1][1])
+        # Distinct normalized matches can fall within one expansion. Applying
+        # both would overlap in source space, so replace that source cluster once.
+        if not original_spans or source_span[0] >= original_spans[-1][1]:
+            original_spans.append(source_span)
+    result = content_lf
+    for start, end in reversed(original_spans):
+        result = result[:start] + new_lf + result[end:]
+    return result, len(original_spans)
 
 
 def _closest_hint(content_lf: str, old_lf: str, max_lines: int = 5000) -> str | None:
@@ -250,8 +249,14 @@ def find_and_replace(
 
     # 2) FUZZY — normalized match, unchanged lines preserved verbatim.
     norm_old = normalize_for_fuzzy(o)
-    _, _, norm_content = _fuzzy_norm_lines(c)
-    fuzzy = len(_match_spans(norm_content, norm_old))
+    norm_content, provenance = _normalize_with_provenance(c)
+    normalized_spans = _match_spans(norm_content, norm_old)
+    source_spans: list[tuple[int, int]] = []
+    for start, end in normalized_spans:
+        span = (provenance[start][0], provenance[end - 1][1])
+        if not source_spans or span[0] >= source_spans[-1][1]:
+            source_spans.append(span)
+    fuzzy = len(source_spans)
     if fuzzy == 0:
         hint = _closest_hint(c, o)
         raise EditError("old_string not found." + (f"\n{hint}" if hint else ""))
@@ -265,19 +270,3 @@ def find_and_replace(
     assert replaced is not None
     result, count = replaced
     return _finish(bom, result, eol), "fuzzy", count
-
-
-def apply_edits(
-    content: str, edits: list[EditPayload]
-) -> tuple[str, list[EditResult]]:
-    """Apply a list of {old_string, new_string, replace_all?} edits sequentially
-    to `content`. Each edit sees the result of the previous one (which naturally
-    prevents overlap bugs). Returns (new_content, per-edit results)."""
-    results = []
-    current = content
-    for i, e in enumerate(edits):
-        current, strategy, count = find_and_replace(
-            current, e["old_string"], e["new_string"], e.get("replace_all", False)
-        )
-        results.append({"index": i, "strategy": strategy, "replacements": count})
-    return current, results

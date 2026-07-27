@@ -74,59 +74,24 @@
 <li><a href="#continue-mcp-architecture"
 id="toc-continue-mcp-architecture">continue-mcp architecture</a>
 <ul>
-<li><a href="#system-at-a-glance" id="toc-system-at-a-glance">System at
-a glance</a></li>
 <li><a href="#components-and-authority"
 id="toc-components-and-authority">Components and authority</a></li>
-<li><a href="#trust-boundaries" id="toc-trust-boundaries">Trust
-boundaries</a></li>
-<li><a href="#data-safety-and-workload-bounds"
-id="toc-data-safety-and-workload-bounds">Data safety and workload
-bounds</a></li>
-<li><a href="#installation-and-runtime-flow"
-id="toc-installation-and-runtime-flow">Installation and runtime
-flow</a></li>
-<li><a href="#packaging-and-extension-points"
-id="toc-packaging-and-extension-points">Packaging and extension
-points</a></li>
-<li><a href="#decision-and-history-map"
-id="toc-decision-and-history-map">Decision and history map</a></li>
+<li><a href="#trust-and-mutation" id="toc-trust-and-mutation">Trust and
+mutation</a></li>
+<li><a href="#installation-and-packaging"
+id="toc-installation-and-packaging">Installation and packaging</a></li>
+<li><a href="#decisions-and-history"
+id="toc-decisions-and-history">Decisions and history</a></li>
 </ul></li>
 </ul>
 <h1 id="continue-mcp-architecture">continue-mcp architecture</h1>
-<p>This is the maintained description of the system as it exists today.
-Setup and operator commands live in <a
-href="https://github.com/curtisalexander/continue-retool/blob/main/continue-mcp/README.md"><code>continue-mcp/README.md</code></a>;
-why the major choices were made lives in <a
-href="adr/"><code>docs/adr/</code></a>; superseded design exploration is
-preserved in <a
-href="continue-mcp-toolkit.html"><code>docs/history/continue-mcp-toolkit-design.md</code></a>.</p>
-<h2 id="system-at-a-glance">System at a glance</h2>
-<p><code>continue-mcp</code> is one Python distribution that exposes
-eight console commands. Each command starts a separate stdio MCP
-process; sharing a package and virtual environment does not create a
-shared daemon or shared authority.</p>
-<pre class="text"><code>Continue
-  ├─ direct registration ──&gt; hello | shell | search | edit | fs | sql | notes
-  │                           (one process for each selected server)
-  └─ gateway registration ─&gt; gateway ──stdio──&gt; selected downstream servers
-
-installer ──writes──&gt; &lt;workspace&gt;/.continue/{mcpServers,rules,...}
-          └─syncs───&gt; continue-mcp/.venv (once for the unified distribution)</code></pre>
-<p>There are two supported registration topologies:</p>
-<ul>
-<li><strong>Direct:</strong> Continue starts every server selected by
-<code>--only</code>. This is the shortest path for frequently used
-tools.</li>
-<li><strong>Gateway:</strong> Continue starts only
-<code>gateway-mcp</code>; the gateway owns the selected downstream
-processes and exposes them through <code>search</code>,
-<code>describe</code>, and <code>call</code>. A downstream must not also
-be registered directly.</li>
-</ul>
-<p>In both topologies, <code>--only</code> selects active registrations.
-All server code is installed in the shared environment, but unregistered
-entry points never start and receive no tool authority.</p>
+<p>This is the maintained current-state description. Historical designs
+are under <a href="docs/history/"><code>docs/history/</code></a>.</p>
+<p>Continue directly launches selected stdio servers from one packaged
+Python distribution. The installer enables <code>shell</code>,
+<code>fs</code>, <code>search</code>, and <code>edit</code> by default;
+packaged <code>sql</code> is opt-in. There is no gateway, notes service,
+hello service, manifest manager, or tool factory.</p>
 <h2 id="components-and-authority">Components and authority</h2>
 <table>
 <thead>
@@ -141,143 +106,51 @@ entry points never start and receive no tool authority.</p>
 </table>
 <!-- BEGIN GENERATED COMPONENT INVENTORY -->
 
-<p>| <code>hello-mcp</code> | Connectivity and workspace diagnostics |
-Environment and current-directory metadata only | |
-<code>shell-mcp</code> | Foreground and background commands, polling,
-input, cancellation | Arbitrary subprocesses; intended to remain
-human-approved | | <code>search-mcp</code> | Content and file search
-through ripgrep | Read access within configured jail roots; spawns rg |
-| <code>edit-mcp</code> | Atomic create/edit/move/delete with
-Unicode-tolerant matching | File mutation within configured jail roots |
-| <code>fs-mcp</code> | Bounded line reads and directory listings | Read
-access within configured jail roots | | <code>sql-mcp</code> | SQL
-formatting and linting through sqruff | SQL strings and a subprocess; no
-file-path tool input | | <code>notes-mcp</code> | Bounded
-repository-local Markdown memory | The configured note directory under
-the repository root | | <code>gateway-mcp</code> | Discovery and routing
-for downstream MCP tools | The union of the configured downstream
-servers' authority |</p>
+<p>| <code>shell-mcp</code> | Foreground and background commands,
+polling, input, cancellation | Arbitrary subprocesses; keep
+human-approved | | <code>fs-mcp</code> | Bounded line reads and
+directory listings | Read access with defense-in-depth workspace path
+scoping | | <code>search-mcp</code> | Content and file search through
+ripgrep | Read access with defense-in-depth workspace path scoping;
+spawns rg | | <code>edit-mcp</code> | Atomic create/edit with
+Unicode-tolerant matching | File mutation with defense-in-depth
+workspace path scoping | | <code>sql-mcp</code> | SQL formatting and
+linting through sqruff | SQL strings and a subprocess; no file-path tool
+input |</p>
 <!-- END GENERATED COMPONENT INVENTORY -->
 
-<p>| <code>install-workspace.py</code> | Install, verify, and safely
-uninstall workspace configuration | Toolkit environment plus the target
-workspace's <code>.continue/</code> tree |</p>
-<p>The shared <code>continue_mcp_common</code> package is deliberately
-policy-neutral:</p>
-<ul>
-<li><code>config.py</code> parses and clamps numeric environment
-settings.</li>
-<li><code>paths.py</code> resolves workspace-relative paths, Unicode
-path variants, and realpath-based containment.</li>
-<li><code>results.py</code> creates consistent human-readable and
-structured MCP results.</li>
-</ul>
-<p>Server modules retain policy: which roots are allowed, which limits
-apply, and whether an operation is read-only or destructive.</p>
-<h2 id="trust-boundaries">Trust boundaries</h2>
-<p>The primary boundary is the workspace named by
-<code>MCP_WORKSPACE</code>. <code>fs-mcp</code>,
-<code>search-mcp</code>, and <code>edit-mcp</code> resolve symlinks and
-reject a real target outside that root. <code>MCP_JAIL_EXTRA</code> adds
-explicit roots; <code>MCP_JAIL=0</code> disables the boundary. Notes use
-a separate repository-local containment rule and reject absolute names,
-traversal, and escaping storage configurations.</p>
-<p><code>shell-mcp</code> is intentionally not path-jailed: an arbitrary
-command cannot be made safe by checking one path argument. Its tools
-should be human-approved, and it is the explicit escape hatch for
-legitimate work outside the workspace. The gateway preserves downstream
-annotations and separates tools carrying <code>destructiveHint</code>
-into <code>gateway.call_destructive</code>; <code>gateway.call</code>
-handles the remaining tools. This routing does not sandbox open-world
-operations.</p>
-<p>Expected filesystem, configuration, and subprocess failures cross the
-MCP boundary as <code>{ok: false, error: ...}</code> results. Exceptions
-are reserved for unexpected defects. Annotation policy is
-authority-based: observations carry <code>readOnlyHint</code>; any tool
-that can create, replace, edit, move, or delete durable state carries
-<code>destructiveHint</code> (including create operations with an
-overwrite option); and shell execution or input carries
-<code>openWorldHint</code> because commands can affect resources beyond
-modeled arguments. Hints may be combined where applicable and let
-clients apply policy mechanically.</p>
-<h2 id="data-safety-and-workload-bounds">Data safety and workload
-bounds</h2>
-<p>File mutations encode the complete replacement before touching the
-destination, write and <code>fsync</code> a uniquely named sibling,
-preserve ordinary mode bits, and use <code>os.replace</code>. Optimistic
-conflict checks prevent a changed source from being silently
-overwritten. Pre-replacement failures leave the original bytes
-intact.</p>
-<p>Model-facing and internal work is bounded by server-specific limits:
-bytes, lines, entries, recursion depth, matches, subprocess time,
-concurrent jobs, retained job state, and spill logs. Limits supplied
-through the environment are validated and clamped. Partial results
-identify truncation and, where useful, a continuation cursor.</p>
-<p>Subprocess servers drain stdout and stderr concurrently. Shell
-commands run in their own process group (or Windows process tree), are
-killed on timeout and server shutdown, and retain incremental decoder
-state across polls. Search and SQL translate spawn, timeout, decode, and
-non-success exit conditions into structured results.</p>
-<h2 id="installation-and-runtime-flow">Installation and runtime
-flow</h2>
-<p><code>install-workspace.py</code> resolves absolute <code>uv</code>,
-toolkit, and workspace paths; runs one root <code>uv sync</code>; and
-installs only the chosen Continue registrations. Generated commands use
-<code>uv run --no-sync --project &lt;toolkit&gt;</code> so GUI startup
-is PATH-independent and never performs a network sync. Gateway mode also
-writes a workspace-owned downstream configuration.</p>
-<p>The installer records owned-file hashes and backups in
-<code>.continue/.continue-mcp-install.json</code> and
-<code>.continue/.continue-mcp-backups/</code>. Reinstall refuses to
-overwrite a local change. Uninstall removes only unchanged
-installer-created files and restores unchanged files that existed before
-installation.</p>
-<p>Doctor mode (<code>--check</code>) parses the installed YAML and
-launches its exact command, arguments, environment, working directory,
-and timeout. It performs the real MCP initialize/tools-list handshake;
-gateway checks also prove that every selected downstream appears in the
-live catalog.</p>
-<h2 id="packaging-and-extension-points">Packaging and extension
-points</h2>
-<p><a
-href="https://github.com/curtisalexander/continue-retool/blob/main/continue-mcp/servers.json"><code>continue-mcp/servers.json</code></a>
-is the server registry. Packaging entry points, installer choices and
-policies, audit and wheel-smoke coverage, CI suites, documentation
-inventories, token examples, and the sample gateway configuration are
-loaded or generated from it.
-<code>scripts/sync_metadata.py --check</code> is the drift gate used by
-CI.</p>
-<p>The <a
-href="https://github.com/curtisalexander/continue-retool/blob/main/continue-mcp/skills/new-mcp-tool/SKILL.md"><code>new-mcp-tool</code>
-skill</a> creates the files, then
-<code>scripts/register_server.py</code> adds one metadata record and
-regenerates every derived surface. Tests have two layers:
-implementation-focused golden tests and MCP-surface tests using
-FastMCP's in-process client. CI runs those suites on Linux, macOS, and
-Windows, then performs installer, doctor, clean-wheel, lint, type,
-audit, and generated-document checks.</p>
-<h2 id="decision-and-history-map">Decision and history map</h2>
-<ul>
-<li><a
-href="adr/0001-unified-distribution.md"><code>ADR-0001</code></a>: one
-distribution with selective activation.</li>
-<li><a
-href="adr/0002-tool-authority-and-workspace-boundaries.md"><code>ADR-0002</code></a>:
-workspace confinement and approval policy.</li>
-<li><a
-href="adr/0003-direct-and-gateway-registration.md"><code>ADR-0003</code></a>:
-direct and progressive-disclosure topologies.</li>
-<li><a
-href="adr/0004-safe-mutation-and-bounded-execution.md"><code>ADR-0004</code></a>:
-atomic mutation and bounded process/output behavior.</li>
-<li><a
-href="continue-mcp-toolkit.html"><code>Historical toolkit design</code></a>:
-original alternatives, experiments, open questions, and dated decision
-log.</li>
-<li><a
-href="continue-mcp-token-strategy.html"><code>Token-cost strategy</code></a>:
-the detailed head-versus-tail cost model.</li>
-</ul>
+<p><code>continue_mcp_common</code> supplies bounded configuration,
+workspace-relative path resolution, and consistent results. Each server
+remains a separate process.</p>
+<h2 id="trust-and-mutation">Trust and mutation</h2>
+<p><code>fs</code>, <code>search</code>, and <code>edit</code> apply
+realpath-based workspace path scoping. This is defense in depth—not
+process isolation, a sandbox, or a proof against TOCTOU. Extra roots and
+disabling controls remain available through <code>MCP_JAIL_EXTRA</code>
+and <code>MCP_JAIL</code>. Reads may be Automatic under the user's
+threat model; edits and arbitrary shell commands stay Ask First.</p>
+<p>Edit/create encode before writing and use sibling temporary files
+plus atomic replacement where the platform supports it. Edit's bounded
+digest/stat conflict check is optimistic and best-effort; it narrows
+common lost-update windows but cannot make an absolute concurrency
+guarantee.</p>
+<h2 id="installation-and-packaging">Installation and packaging</h2>
+<p><code>servers.json</code> is the compact inventory and
+default-selection source. The installer renders all selected YAML first,
+stamps absolute uv/toolkit/workspace paths and <code>--no-sync</code>,
+refuses differing existing files, and performs one
+<code>uv sync --locked --project &lt;toolkit&gt;</code> unless skipped.
+<code>--check</code> compares exact rendered content and uses FastMCP
+<code>Client</code>/<code>StdioTransport</code> for a live
+handshake.</p>
+<p><code>scripts/sync_metadata.py --check</code> verifies generated
+packaging, inventory, and landing-page cards. Golden and FastMCP surface
+tests cover each server.</p>
+<h2 id="decisions-and-history">Decisions and history</h2>
+<p>ADR-0001 remains current for unified packaging; ADR-0002 applies with
+the scoped defense-in-depth language above; ADR-0003 is superseded by
+direct-only registration; ADR-0004 remains current with optimistic
+conflict qualifications.</p>
 </main>
 <footer>
   Part of <a href="https://github.com/curtisalexander/continue-retool">continue-retool</a> —

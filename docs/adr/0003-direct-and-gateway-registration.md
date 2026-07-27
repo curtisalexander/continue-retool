@@ -1,6 +1,6 @@
 # ADR-0003: Support direct and gateway registration
 
-- Status: Accepted
+- Status: Superseded by the 2026-07 direct-only repository contraction
 - Date: 2026-07-21
 
 ## Context

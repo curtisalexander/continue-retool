@@ -11,10 +11,10 @@ context window.
 | `search.grep(pattern, …)` | Grep search | matching lines as `{file, line, column, text}` |
 | `search.files(glob, …)` | Glob search | file paths matching a glob |
 
-Both tools are **workspace-jailed by default**: the search path must live under
-`MCP_WORKSPACE` (realpath'd), because `search.*` runs on Automatic — no human
-approves each call. `MCP_JAIL_EXTRA` adds roots; `MCP_JAIL=0` disables. See
-the kit README for the full policy story.
+Both tools use **defense-in-depth workspace path scoping by default**: search
+paths are checked against realpath'd `MCP_WORKSPACE`, including symlink targets.
+This reduces accidental and prompt-injected access but is not a sandbox or
+security boundary. `MCP_JAIL_EXTRA` adds roots and `MCP_JAIL=0` disables it.
 
 ## 1. Provide the `rg` binary (the thing we call out to)
 
@@ -45,8 +45,7 @@ option here — it ships no Windows, Intel-Mac, or linux-arm64 wheel.)
 
 If `rg` lives somewhere non-standard, pin it in `search.yaml`:
 `RIPGREP_BIN: /path/to/rg`. When it can't find rg at all, the server raises an
-error that lists every one of these fixes — and `install-workspace.py --check`
-(the doctor) reports the same thing at install time, before your first search.
+error that lists these fixes.
 
 ## 2. Install and run the MCP
 
@@ -62,8 +61,8 @@ uv run search-mcp                            # Continue launches this for you
 2. In Agent-mode tool settings:
    - set built-in **Grep search** → **Excluded**
    - set built-in **Glob search** → **Excluded**
-   - set **`search.grep`** and **`search.files`** → **Automatic** (they're
-     read-only, so auto-running them is safe and keeps the agent fast)
+   - consider **`search.grep`** and **`search.files`** → **Automatic** under
+     your threat model; path scoping reduces mistakes but is not a sandbox
 
 Now the agent reaches for `rg` instead of Continue's built-in search.
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -21,15 +20,10 @@ def test_generated_metadata_is_current():
     assert result.returncode == 0, result.stderr
 
 
-def test_gateway_defaults_come_from_registration_metadata():
-    expected = {
-        server["name"] for server in load_servers()
-        if server["registration"] == "gateway"
-    }
-    config = json.loads(
-        (KIT_DIR / "gateway-mcp" / "gateway.config.json").read_text(encoding="utf-8")
-    )
-    assert set(config["servers"]) == expected
+def test_inventory_defaults_are_explicit():
+    servers = load_servers()
+    assert [s["name"] for s in servers] == ["shell", "fs", "search", "edit", "sql"]
+    assert [s["name"] for s in servers if s["default"]] == ["shell", "fs", "search", "edit"]
 
 
 def test_dependency_update_cutoff_and_command_are_enforced():

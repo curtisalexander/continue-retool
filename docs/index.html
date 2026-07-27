@@ -65,9 +65,9 @@
   <h1>continue-retool</h1>
   <p class="lede">Retooling <a href="https://continue.dev">Continue</a> with <em>our own tools</em> — local
   MCP servers that replace the built-in agent tools (terminal, search, edit) with sharper, more
-  controllable versions, plus a progressive-disclosure gateway and a tool-factory skill for growing the kit.</p>
+  controllable versions. SQL formatting remains available as an optional fifth server.</p>
   <p class="lede" style="margin-top:12px">The premise: the default tools are fine, but your own can be more
-  Unicode-robust, cheaper on tokens, and safer to grant — and once you can build one MCP, you can build the rest.</p>
+  Unicode-robust, bounded, and easier to control. Workspace path scoping is defense in depth, not a sandbox.</p>
   <div class="ghlink"><a href="https://github.com/curtisalexander/continue-retool">github.com/curtisalexander/continue-retool &rarr;</a></div>
 </header>
 
@@ -87,8 +87,7 @@
       <div class="num">02</div>
       <div class="body">
         <p class="t"><a href="./continue-mcp-token-strategy.html">Token-Cost Strategy</a></p>
-        <p class="d">Which built-in tools are worth replacing, and the direct-registration vs.
-        gateway tradeoff for keeping tool schemas cheap at rest.</p>
+        <p class="d">A historical strategy record for token costs; gateway portions are superseded.</p>
       </div>
     </div>
     <div class="doc">
@@ -109,12 +108,12 @@
   <div class="tools">
     <!-- BEGIN GENERATED SERVER CARDS -->
     <div class="tool">
-      <p class="n">hello-mcp <span class="start">start here</span></p>
-      <p class="d">Proves MCP is enabled: ping returns pong, plus echo and workspace diagnostics.</p>
-    </div>
-    <div class="tool">
       <p class="n">shell-mcp</p>
       <p class="d">Terminal runner with background jobs, tree-kill, bounded output, and timeouts.</p>
+    </div>
+    <div class="tool">
+      <p class="n">fs-mcp</p>
+      <p class="d">Bounded line reads and directory listings; replaces built-in Read and List dir.</p>
     </div>
     <div class="tool">
       <p class="n">search-mcp</p>
@@ -122,29 +121,13 @@
     </div>
     <div class="tool">
       <p class="n">edit-mcp</p>
-      <p class="d">Atomic, Unicode-tolerant editing; replaces built-in Edit and Create file.</p>
-    </div>
-    <div class="tool">
-      <p class="n">fs-mcp</p>
-      <p class="d">Bounded line reads and directory listings; replaces built-in Read and List dir.</p>
+      <p class="d">Atomic, Unicode-tolerant edit and create operations.</p>
     </div>
     <div class="tool">
       <p class="n">sql-mcp</p>
-      <p class="d">SQL formatting and linting through sqruff, with Snowflake-oriented defaults.</p>
-    </div>
-    <div class="tool">
-      <p class="n">notes-mcp</p>
-      <p class="d">Repository-local Markdown memory with bounded list, read, search, and writes.</p>
-    </div>
-    <div class="tool">
-      <p class="n">gateway-mcp</p>
-      <p class="d">Progressive disclosure: downstream tools behind four authority-aware meta-tools.</p>
+      <p class="d">Optional SQL formatting and linting through sqruff, with Snowflake-oriented defaults.</p>
     </div>
     <!-- END GENERATED SERVER CARDS -->
-    <div class="tool">
-      <p class="n">skills/new-mcp-tool</p>
-      <p class="d">The tool factory: a skill that scaffolds the next MCP server.</p>
-    </div>
   </div>
 </section>
 

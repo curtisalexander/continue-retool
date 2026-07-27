@@ -10,7 +10,6 @@ catches the rest while leaving untouched lines exactly as they were.
 
 Tools:
   edit(path, old_string, new_string, replace_all?)  -> replaces built-in "Edit file"
-  multi_edit(path, edits)                            -> several edits, one write
   create_file(path, content, overwrite?)             -> replaces built-in "Create file"
 
 Run:  uv run edit-mcp
@@ -18,15 +17,11 @@ Run:  uv run edit-mcp
 from __future__ import annotations
 
 import difflib
-import errno
 import hashlib
-import json
 import os
-import shutil
 import stat
 import tempfile
 from dataclasses import dataclass
-from typing import Union
 
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
@@ -37,12 +32,12 @@ from continue_mcp_common.paths import resolve_existing as _resolve_existing
 from continue_mcp_common.paths import resolve_path as _resolve
 from continue_mcp_common.results import result as _shared_result
 
-from .matcher import EditError, apply_edits, find_and_replace
+from .matcher import EditError, find_and_replace
 
 mcp = FastMCP("edit")
 
 
-# Hashing is the strongest cheap conflict check for ordinary source files. Keep
+# Hashing is a useful best-effort conflict check for ordinary source files. Keep
 # the second read bounded; unusually large files use the stat fingerprint only.
 CONFLICT_HASH_MAX_BYTES = _env_int(
     "EDIT_MCP_CONFLICT_HASH_MAX_BYTES", 1024 * 1024, 0, 64 * 1024 * 1024
@@ -63,14 +58,9 @@ def _result(summary: str, data: dict, diff: str = "") -> ToolResult:
 #   NFC vs NFD  — HFS+/APFS store decomposed ("é" = e + U+0301); models emit NFC
 #   ' vs U+2019 — screenshot names use the curly apostrophe ("Capture d'écran")
 #   NBSP + AM/PM — macOS screenshots put U+202F, not a space, before AM/PM
-# --- workspace jail (default ON) --------------------------------------------
-# The recommended tool policy runs this server on Automatic — no human approval
-# per call — so a prompt-injected "read ~/.ssh/id_rsa" must fail closed, not
-# silently succeed. Every path is realpath'd (a symlink inside the workspace
-# can't tunnel out) and must live under the workspace root or an extra root
-# from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
-# sanctioned escape hatch for a legitimate out-of-workspace file is the shell
-# tool, which is approval-gated by policy.
+# --- defense-in-depth workspace path scoping (default ON) -------------------
+# Realpath containment reduces accidental out-of-workspace mutation. It is not
+# a sandbox or an absolute TOCTOU guarantee; edit tools remain Ask First.
 # --- file IO that preserves bytes we don't touch ---------------------------
 class FileConflictError(Exception):
     """The destination changed after this operation read it."""
@@ -221,52 +211,6 @@ def _write_error(path: str, exc: OSError | UnicodeError | FileConflictError) -> 
     return _result(f"❌ {error}", {"ok": False, "path": path, "error": error})
 
 
-def _move_no_replace(src: str, dest: str) -> None:
-    """Move a regular file without replacing a concurrent destination.
-
-    A hard link supplies an atomic create-if-absent commit. Across filesystems,
-    copy and sync a sibling temporary file before linking it into place.
-    """
-    parent = os.path.dirname(os.path.abspath(dest))
-    temp_path: str | None = None
-    try:
-        try:
-            os.link(src, dest)
-        except OSError as exc:
-            if exc.errno != errno.EXDEV:
-                raise
-            fd, temp_path = tempfile.mkstemp(
-                dir=parent, prefix=f".{os.path.basename(dest)}.", suffix=".tmp"
-            )
-            with os.fdopen(fd, "wb") as target, open(src, "rb") as source:
-                shutil.copyfileobj(source, target)
-                target.flush()
-                os.fsync(target.fileno())
-            os.chmod(temp_path, stat.S_IMODE(os.stat(src).st_mode))
-            os.link(temp_path, dest)
-            os.unlink(temp_path)
-            temp_path = None
-        try:
-            os.unlink(src)
-        except OSError:
-            # Restore the pre-call pathname state if source removal fails.
-            try:
-                os.unlink(dest)
-            except OSError:
-                pass
-            raise
-        _sync_parent(parent)
-        source_parent = os.path.dirname(os.path.abspath(src))
-        if source_parent != parent:
-            _sync_parent(source_parent)
-    finally:
-        if temp_path is not None:
-            try:
-                os.unlink(temp_path)
-            except FileNotFoundError:
-                pass
-
-
 def _preview(before: str, after: str, path: str, max_lines: int = 40) -> str:
     diff = difflib.unified_diff(
         before.splitlines(), after.splitlines(),
@@ -324,64 +268,6 @@ async def edit(
     return _result(f"{verb} {path} — {count} replacement(s), {strategy} match", data, diff)
 
 
-def _coerce_edits(edits: Union[list[dict], str]) -> list[dict]:
-    """Accept `edits` as a JSON string as well as a list. Several models emit the
-    array double-encoded (Pi hard-codes the same workaround, naming Opus 4.6 and
-    GLM-5.1); without this the call dies in schema validation before the tool ever
-    runs, and the model gets a pydantic dump instead of anything actionable."""
-    if isinstance(edits, str):
-        try:
-            parsed = json.loads(edits)
-        except json.JSONDecodeError as e:
-            raise EditError(
-                f"edits was a string but not valid JSON ({e}). Pass a list of "
-                f"{{old_string, new_string, replace_all?}} objects."
-            ) from e
-        if not isinstance(parsed, list):
-            raise EditError(f"edits must be a list, got {type(parsed).__name__}.")
-        edits = parsed
-    for i, e in enumerate(edits):
-        if not isinstance(e, dict):
-            raise EditError(f"edits[{i}] must be an object, got {type(e).__name__}.")
-        for key in ("old_string", "new_string"):
-            if key not in e:
-                raise EditError(f"edits[{i}] is missing {key}.")
-    return edits
-
-
-@mcp.tool(annotations={"destructiveHint": True})
-async def multi_edit(
-    path: str, edits: Union[list[dict], str], dry_run: bool = False
-) -> ToolResult:
-    """Apply several edits to one file in a single write. `edits` is a list of
-    {old_string, new_string, replace_all?}, applied in order (each sees the prior
-    result). All must succeed or the file is left unchanged. dry_run previews only."""
-    path = _resolve_existing(path)
-    if err := jail_error(path):
-        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
-    if not os.path.isfile(path):
-        return _result(f"❌ file not found: {path}",
-                       {"ok": False, "path": path, "error": f"file not found: {path}"})
-    try:
-        before, encoding, version = _read(path)
-    except (OSError, FileConflictError) as e:
-        return _write_error(path, e)
-    try:
-        after, results = apply_edits(before, _coerce_edits(edits))
-    except EditError as e:
-        return _result(f"❌ multi_edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
-    if not dry_run:
-        try:
-            _write(path, after, encoding, expected_version=version)
-        except (OSError, UnicodeError, FileConflictError) as e:
-            return _write_error(path, e)
-    diff = _preview(before, after, path)
-    data = {"ok": True, "path": path, "edits": results, "encoding": encoding,
-            "dry_run": dry_run, "diff": diff}
-    verb = "Would apply (dry run)" if dry_run else "Applied"
-    return _result(f"{verb} {len(results)} edit(s) to {path}", data, diff)
-
-
 @mcp.tool(annotations={"destructiveHint": True})
 async def create_file(path: str, content: str, overwrite: bool = False) -> ToolResult:
     """Create a new file with the given content. Fails if the file exists unless
@@ -401,58 +287,6 @@ async def create_file(path: str, content: str, overwrite: bool = False) -> ToolR
     n = len(content.encode("utf-8"))
     diff = _preview("", content, path)
     return _result(f"Created {path} ({n} bytes)", {"ok": True, "path": path, "bytes": n}, diff)
-
-
-@mcp.tool(annotations={"destructiveHint": True, "idempotentHint": True})
-async def delete_file(path: str) -> ToolResult:
-    """Delete one file (not a directory). Gives file deletion its own policy
-    lane instead of routing rm through the shell tool."""
-    path = _resolve_existing(path)
-    if err := jail_error(path):
-        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
-    if not os.path.isfile(path):
-        return _result(f"❌ file not found: {path}",
-                       {"ok": False, "path": path, "error": f"file not found: {path}"})
-    try:
-        os.remove(path)
-    except OSError as e:
-        return _write_error(path, e)
-    return _result(f"Deleted {path}", {"ok": True, "path": path})
-
-
-@mcp.tool(annotations={"destructiveHint": True})
-async def move_file(path: str, new_path: str, overwrite: bool = False) -> ToolResult:
-    """Move or rename a file. Fails if the destination exists unless overwrite
-    is set. Creates destination parent directories as needed."""
-    src = _resolve_existing(path)
-    dest = _resolve(new_path)  # literal: the destination is being created
-    for p in (src, dest):
-        if err := jail_error(p):
-            return _result(f"❌ {err}", {"ok": False, "path": p, "error": err})
-    if not os.path.isfile(src):
-        return _result(f"❌ file not found: {src}",
-                       {"ok": False, "path": src, "error": f"file not found: {src}"})
-    if os.path.exists(dest) and not overwrite:
-        return _result(
-            f"❌ destination exists: {dest} (pass overwrite=true to replace)",
-            {"ok": False, "path": dest,
-             "error": "destination exists (pass overwrite=true to replace)"},
-        )
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
-        if overwrite:
-            os.replace(src, dest)  # atomic when src/dest share a filesystem
-        else:
-            _move_no_replace(src, dest)
-    except OSError as e:
-        if not overwrite or e.errno != errno.EXDEV:
-            return _write_error(dest, e)
-        try:                       # cross-device cannot be an atomic rename
-            shutil.move(src, dest)
-        except OSError as move_error:
-            return _write_error(dest, move_error)
-    data = {"ok": True, "from": src, "to": dest}
-    return _result(f"Moved {src} → {dest}", data)
 
 
 def main() -> None:

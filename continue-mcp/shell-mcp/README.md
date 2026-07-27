@@ -31,7 +31,7 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
   cursors are *logical byte offsets into the stream*, so they stay valid across
   truncation — a chatty job streams incrementally without duplicated or silently
   dropped chunks. When a stream overflows, the **full** output is spilled to
-  `.continue-mcp/logs/` inside the workspace (so the jailed `fs.read`/`search`
+  `.continue-mcp/logs/` inside the workspace (so workspace-scoped `fs.read`/`search`
   tools can open it), and the `...[N bytes truncated — full output: …]...` marker
   names the file. A job that fits in the buffer never touches disk.
   `SHELL_MCP_SPILL=0` disables spilling; `SHELL_MCP_SPILL_DIR` relocates it.
@@ -63,4 +63,4 @@ uv run shell-mcp                # run the server (stdio)
 
 Register `.continue/mcpServers/shell.yaml` (installer-stamped), set the
 built-in `run_terminal_command` to **Excluded**, and `shell.*` to **Ask First**
-(promote to Automatic once you trust it).
+because commands have open-world authority.

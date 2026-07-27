@@ -14,13 +14,12 @@ whether it receives tool authority.
 
 Ship every server in one `continue-mcp` Python distribution with one lockfile
 and virtual environment. Preserve separate console entry points and operating
-system processes. Keep `--only`, but define it as direct-registration or gateway-
-downstream selection rather than package selection.
+system processes. Keep `--only` as registration selection rather than package
+selection.
 
 ## Consequences
 
 Shared safety behavior has one implementation and installation performs one
 dependency sync. Releases are coordinated by construction. All code is present
 in the environment, while unregistered servers remain inert. Adding a server
-requires updating the package, installer, tests, audit, documentation, and the
-chosen registration topology.
+requires updating the package, inventory, tests, audit, and documentation.

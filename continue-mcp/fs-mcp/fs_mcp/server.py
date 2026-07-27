@@ -94,14 +94,9 @@ def _is_binary(path: str) -> bool:
     return False
 
 
-# --- workspace jail (default ON) --------------------------------------------
-# The recommended tool policy runs this server on Automatic — no human approval
-# per call — so a prompt-injected "read ~/.ssh/id_rsa" must fail closed, not
-# silently succeed. Every path is realpath'd (a symlink inside the workspace
-# can't tunnel out) and must live under the workspace root or an extra root
-# from MCP_JAIL_EXTRA (os.pathsep-separated). MCP_JAIL=0 disables. The
-# sanctioned escape hatch for a legitimate out-of-workspace file is the shell
-# tool, which is approval-gated by policy.
+# --- defense-in-depth workspace path scoping (default ON) -------------------
+# Realpath containment rejects straightforward paths outside MCP_WORKSPACE or
+# MCP_JAIL_EXTRA roots. It is not a sandbox or a complete TOCTOU guarantee.
 # --- tools -----------------------------------------------------------------
 @mcp.tool(annotations={"readOnlyHint": True})
 async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> ToolResult:

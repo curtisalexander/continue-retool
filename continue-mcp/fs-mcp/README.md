@@ -40,10 +40,11 @@ Design points:
   when the model types the plain-ASCII spelling.
 - **Windows-friendly.** UTF-8 BOM stripped, CRLF handled, undecodable bytes in
   *text* files replaced rather than erroring.
-- **Workspace-jailed (default ON).** Both tools run on Automatic, so paths are
-  confined to `MCP_WORKSPACE` (realpath'd — symlinks can't tunnel out). A
-  prompt-injected read of `~/.ssh/…` fails closed with a structured refusal.
-  `MCP_JAIL_EXTRA` adds roots; `MCP_JAIL=0` disables. See the kit README.
+- **Defense-in-depth workspace path scoping (default ON).** Paths are checked
+  against realpath'd `MCP_WORKSPACE`, reducing accidental or prompt-injected
+  access outside the project, including symlink escapes. This is not a sandbox
+  or security boundary. `MCP_JAIL_EXTRA` adds roots and `MCP_JAIL=0` disables
+  scoping; Automatic remains appropriate only for this read-only capability.
 
 ## Setup
 

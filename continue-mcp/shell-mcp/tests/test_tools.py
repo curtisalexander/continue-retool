@@ -628,8 +628,8 @@ def test_ringbuffer_degrades_quietly_when_the_spill_path_is_unwritable(tmp_path)
     assert "line 499" in buf.text()  # buffer still works
 
 
-def test_spill_file_lands_inside_the_workspace_so_jailed_tools_can_read_it(tmp_path, monkeypatch):
-    """Pi spills to the system tmpdir; here fs/search are workspace-jailed, so a
+def test_spill_file_lands_inside_the_workspace_so_scoped_tools_can_read_it(tmp_path, monkeypatch):
+    """Pi spills to the system tmpdir; here fs/search are workspace-scoped, so a
     tmpdir path would be one the model is told to read and then cannot."""
     monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))
     root = server._spill_root()

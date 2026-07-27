@@ -1,8 +1,7 @@
 # Drop this into your workspace's .continue/mcpServers/ directory.
 # Then, in Continue's Agent tool settings:
 #   * set the built-in  run_terminal_command  policy to  Excluded
-#   * set  shell.start / shell.run / shell.kill ... to  Ask First (or Automatic
-#     once you trust them)
+#   * keep shell.start / shell.run / shell.kill ... on Ask First
 name: shell
 version: 0.0.1
 schema: v1

@@ -87,9 +87,9 @@ ladder of token levers (cheapest → most involved)</a></li>
 <li><a href="#3-the-headtail-decision-made-concrete"
 id="toc-3-the-headtail-decision-made-concrete">3. The head/tail
 decision, made concrete</a></li>
-<li><a href="#4-worked-example--the-current-toolkit"
-id="toc-4-worked-example--the-current-toolkit">4. Worked example — the
-current toolkit</a></li>
+<li><a href="#4-worked-example--historical-pre-contraction-toolkit"
+id="toc-4-worked-example--historical-pre-contraction-toolkit">4. Worked
+example — historical pre-contraction toolkit</a></li>
 <li><a href="#5-caveats-and-second-order-effects"
 id="toc-5-caveats-and-second-order-effects">5. Caveats and second-order
 effects</a></li>
@@ -102,9 +102,12 @@ paragraph</a></li>
 <h1
 id="keeping-token-costs-down-which-tools-to-replace-and-where-to-put-them">Keeping
 Token Costs Down: Which Tools to Replace, and Where to Put Them</h1>
-<p><em>Strategy record, begun 2026-07-01. Companion to
-<code>ARCHITECTURE.md</code>. Answers: how do I replace Continue's tools
-to minimize token cost — and for each tool, do I register it
+<p><em>Historical strategy record, begun 2026-07-01. Gateway and factory
+recommendations below are superseded by the 2026-07 repository
+contraction; retained for design context only. The current product is
+direct shell/fs/search/edit plus optional SQL.</em></p>
+<p><em>Originally answered: how do I replace Continue's tools to
+minimize token cost — and for each tool, do I register it
 <strong>directly</strong> (paid every request) or hide it behind the
 <strong>gateway</strong> (paid per use)? The long-tail-vs-starting-cost
 tradeoff, made concrete.</em></p>
@@ -141,8 +144,8 @@ hop you barely notice because you barely use them.</td>
 <tr>
 <td><strong>Enforce terse descriptions</strong></td>
 <td>Every new tool</td>
-<td>≤ 2 sentences, ≤ ~80 tokens — baked into the
-<code>new-mcp-tool</code> factory.</td>
+<td>≤ 2 sentences, ≤ ~80 tokens — enforce this in review and schema
+audits.</td>
 </tr>
 </tbody>
 </table>
@@ -232,11 +235,10 @@ already built <code>edit</code>, <code>search</code>, and
 you use <em>occasionally</em>, register only the gateway and let it hide
 their schemas until needed (§3). Resting cost for the whole tail
 collapses to the gateway's fixed four-schema footprint.</p>
-<p><strong>Rung 3 — Enforce terseness at creation.</strong> The
-<code>new-mcp-tool</code> factory bakes in a token budget per
-description and registers new tools into the gateway catalog, so the
-toolkit can grow without the prompt growing. Discipline by construction,
-not willpower.</p>
+<p><strong>Rung 3 — Enforce terseness at creation.</strong> Apply a
+token budget to each description and verify it in schema audits, so the
+toolkit cannot grow its prompt silently. Make prompt cost a reviewed
+interface constraint rather than relying on author discipline.</p>
 <hr />
 <h2 id="3-the-headtail-decision-made-concrete">3. The head/tail
 decision, made concrete</h2>
@@ -282,25 +284,26 @@ benefit.</p>
 used.</strong> The clean direct win is the <strong>whole left column:
 anything you use often</strong>, regardless of size, because latency and
 the near-zero savings both argue for keeping it direct.</p>
-<h3 id="dont-forget-the-gateways-own-fixed-cost">Don't forget the
-gateway's own fixed cost</h3>
+<h3 id="historical-gateway-fixed-cost-snapshot">Historical gateway
+fixed-cost snapshot</h3>
+<p>The following figures were generated before the contraction. They are
+retained only as an example of the estimator and do not describe files
+or servers in the current checkout.</p>
 <!-- BEGIN GENERATED GATEWAY COST -->
 
-<p>The audit currently estimates the gateway's 4 meta-tool schemas at
-<strong>~412 tokens at rest</strong>. The default tail (sql, notes)
-would cost ~574 tokens if registered directly, so the gateway saves ~162
-resting tokens (28%) before any per-use describe result. These values
-are generated from <code>continue-mcp/bench/schema-metrics.json</code>
-using the repository's deterministic
-<code>ceil(serialized characters / 4)</code> estimator.</p>
+<p>The historical audit estimated the gateway's 4 meta-tool schemas at
+<strong>~412 tokens at rest</strong>. The then-default tail (sql, notes)
+cost ~574 tokens if registered directly, so that design saved ~162
+resting tokens (28%) before per-use describe results. These are frozen
+historical values, not current audit output.</p>
 <!-- END GENERATED GATEWAY COST -->
 
 <hr />
-<h2 id="4-worked-example--the-current-toolkit">4. Worked example — the
-current toolkit</h2>
+<h2 id="4-worked-example--historical-pre-contraction-toolkit">4. Worked
+example — historical pre-contraction toolkit</h2>
 <!-- BEGIN GENERATED TOOLKIT EXAMPLE -->
 
-<p>The current measured inventory is:</p>
+<p>The inventory measured at the time was:</p>
 <table>
 <thead>
 <tr>
@@ -431,11 +434,9 @@ href="https://www.anthropic.com/engineering/code-execution-with-mcp">Anthropic
 — Tool Search Tool &amp; code execution with MCP</a> · <a
 href="https://docs.continue.dev/ide-extensions/agent/how-it-works">How
 Agent Mode Works — Continue Docs</a></li>
-<li>Companion docs in this repo: <code>ARCHITECTURE.md</code> (current
-topology), <code>docs/history/continue-mcp-toolkit-design.md</code> (§5
-token tax, §5b gateway), and
-<code>continue-mcp/gateway-mcp/README.md</code> (head/tail
-operation)</li>
+<li>Current topology: <code>ARCHITECTURE.md</code>. Gateway operational
+files and the tool factory discussed above were removed by the
+contraction.</li>
 </ul>
 </content>
 </main>

@@ -10,8 +10,5 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _workspace_is_tmp(tmp_path, monkeypatch):
-    """The workspace jail (default ON) confines paths to MCP_WORKSPACE. Tests
-    operate on absolute tmp_path files, so point the workspace there — exactly
-    what the installer's stamp does in production. Individual tests still
-    override MCP_WORKSPACE/MCP_JAIL for their own scenarios."""
+    """Point default-on workspace path scoping at each test's temporary root."""
     monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))

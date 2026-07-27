@@ -54,7 +54,7 @@ def resolve_existing(path: str) -> str:
 
 
 def jail_roots() -> list[str]:
-    """Return normalized allowed roots, or an empty list when jail is disabled."""
+    """Return path-scope roots, or an empty list when scoping is disabled."""
     if os.environ.get("MCP_JAIL", "1").strip().lower() in _DISABLED:
         return []
     roots = [os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())]
@@ -74,9 +74,7 @@ def jail_error(path: str) -> str | None:
         if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
             return None
     return (
-        f"path is outside the workspace jail: {path} (workspace: "
-        f"{os.environ.get('MCP_WORKSPACE') or os.getcwd()}). This tool only "
-        "touches the workspace (MCP_JAIL_EXTRA adds roots; MCP_JAIL=0 "
-        "disables). For a legitimate outside file, ask the user or use a "
-        "shell command, which requires approval."
+        f"path is outside the configured workspace path scope: {path} (workspace: "
+        f"{os.environ.get('MCP_WORKSPACE') or os.getcwd()}). This defense-in-depth "
+        "control allows MCP_JAIL_EXTRA roots and can be disabled with MCP_JAIL=0."
     )

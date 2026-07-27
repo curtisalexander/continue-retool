@@ -222,27 +222,27 @@ def test_relative_path_resolves_against_workspace(tmp_path, monkeypatch):
     assert any(e["path"] == "rel.txt" for e in res["entries"])
 
 
-# --- workspace jail (default ON; conftest pins MCP_WORKSPACE to tmp_path) ----
+# --- workspace path scope (default ON; conftest pins MCP_WORKSPACE) ----------
 def test_jail_blocks_outside_read(tmp_path, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside")
     secret = outside / "secret.txt"
     secret.write_text("s3cret\n", encoding="utf-8")
     res = _read(secret)
     assert res["ok"] is False
-    assert "workspace jail" in res["error"]
+    assert "workspace path scope" in res["error"]
 
 
 def test_jail_blocks_outside_list(tmp_path, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside-list")
     res = _list(outside)
     assert res["ok"] is False
-    assert "workspace jail" in res["error"]
+    assert "workspace path scope" in res["error"]
 
 
 def test_jail_blocks_relative_escape(tmp_path):
     res = _read("../escape.txt")
     assert res["ok"] is False
-    assert "workspace jail" in res["error"]
+    assert "workspace path scope" in res["error"]
 
 
 def test_jail_blocks_symlink_escape(tmp_path, tmp_path_factory):
@@ -257,7 +257,7 @@ def test_jail_blocks_symlink_escape(tmp_path, tmp_path_factory):
     os.symlink(target, link)
     res = _read(link)
     assert res["ok"] is False
-    assert "workspace jail" in res["error"]
+    assert "workspace path scope" in res["error"]
 
 
 def test_jail_opt_out(tmp_path, tmp_path_factory, monkeypatch):

@@ -167,8 +167,8 @@ def test_relative_path_resolves_against_workspace(tmp_path, monkeypatch):
     assert res.structured_content["count"] == 1
 
 
-# --- workspace jail (default ON; conftest pins MCP_WORKSPACE to tmp_path) ----
-# The jail check runs before rg is even located, so these need no ripgrep.
+# --- workspace path scope (default ON; conftest pins MCP_WORKSPACE) ----------
+# The scope check runs before rg is even located, so these need no ripgrep.
 def _grep(path):
     return asyncio.run(server.grep("x", path=str(path))).structured_content
 
@@ -177,14 +177,14 @@ def test_jail_blocks_outside_grep(tmp_path, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside")
     res = _grep(outside)
     assert res["count"] == 0
-    assert "workspace jail" in res["error"]
+    assert "workspace path scope" in res["error"]
 
 
 def test_jail_blocks_outside_files(tmp_path, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside-files")
     res = asyncio.run(server.files(path=str(outside))).structured_content
     assert res["count"] == 0
-    assert "workspace jail" in res["error"]
+    assert "workspace path scope" in res["error"]
 
 
 def test_jail_opt_out(tmp_path, tmp_path_factory, monkeypatch):
