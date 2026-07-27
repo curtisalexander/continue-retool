@@ -16,9 +16,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
         with:
           version: "0.11.21"
           python-version: "3.11"
@@ -54,10 +54,10 @@ jobs:
             python: "3.14"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
         with:
           version: "0.11.21"   # pinned: a uv release must not silently change CI
           enable-cache: true
@@ -145,7 +145,7 @@ jobs:
     # markdown sources (i.e. someone edited a .md without re-running pandoc).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - name: Install pandoc (pinned — HTML output must match local rebuilds)
         run: |
           wget -q https://github.com/jgm/pandoc/releases/download/3.10/pandoc-3.10-1-amd64.deb
