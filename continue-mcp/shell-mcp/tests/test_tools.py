@@ -412,6 +412,38 @@ def test_run_captures_stderr():
     assert "err-here" in res["stderr"]
 
 
+@pytest.mark.skipif(not IS_WINDOWS, reason="Windows process-launch regression")
+def test_windows_absolute_pwsh_child_stays_piped(tmp_path):
+    """An absolute-path pwsh fallback must not detach from the MCP pipes.
+
+    Models should select shell=pwsh and invoke the script directly, but this is
+    the fallback form they commonly try when a nested bare `pwsh` is absent from
+    a GUI application's stale PATH. Keep it working without losing either stream.
+    """
+    pwsh = server.resolve_interpreter("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+    script = tmp_path / "output.ps1"
+    script.write_text(
+        '[Console]::Out.WriteLine("pwsh-stdout")\n'
+        '[Console]::Error.WriteLine("pwsh-stderr")\n',
+        encoding="utf-8",
+    )
+    quoted_pwsh = pwsh.replace("'", "''")
+    quoted_script = str(script).replace("'", "''")
+
+    async def scenario():
+        command = f"& '{quoted_pwsh}' -NoProfile -File '{quoted_script}'"
+        return (
+            await server.run(command, shell="pwsh", cwd=str(tmp_path), timeout=15)
+        ).structured_content
+
+    res = asyncio.run(scenario())
+    assert res["state"] == "exited" and res["exit_code"] == 0
+    assert "pwsh-stdout" in res["stdout"]
+    assert "pwsh-stderr" in res["stderr"]
+
+
 def test_timeout_kills_and_reports():
     """A command that outlives its timeout must be killed and reported as timeout,
     not left running and not raising past the model."""

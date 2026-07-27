@@ -47,6 +47,11 @@ MAX_RUNNING_JOBS = _env_int("SHELL_MCP_MAX_RUNNING", 8, 1, 128)
 MIN_TIMEOUT = 0.1
 MAX_TIMEOUT = 86_400.0
 IS_WINDOWS = sys.platform.startswith("win")
+# Keep Windows console programs attached only to our redirected pipes. A GUI-launched
+# MCP server has no useful console to share, and without CREATE_NO_WINDOW Windows can
+# briefly create one for pwsh.exe/cmd.exe. This combines safely with the new process
+# group needed by taskkill-based tree termination.
+WINDOWS_PROCESS_FLAGS = 0x00000200 | 0x08000000  # NEW_PROCESS_GROUP | NO_WINDOW
 
 
 def _validate_timeout(timeout: float | None, default: float) -> float:
@@ -616,7 +621,7 @@ async def _start(
     # new session/group so we can kill the whole tree later
     kwargs: dict = {}
     if IS_WINDOWS:
-        kwargs["creationflags"] = 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = WINDOWS_PROCESS_FLAGS
     else:
         kwargs["start_new_session"] = True  # setsid -> own process group
     if env:

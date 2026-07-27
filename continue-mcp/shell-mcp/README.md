@@ -23,6 +23,9 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
 - **Tree-kill, both OSes.** `setsid` + `killpg` on Unix/macOS, `taskkill /T /F`
   on Windows — killing a job takes down grandchildren too (the golden test
   proves it with a sentinel file).
+- **No flashing Windows consoles.** Windows children run in a new process group
+  with `CREATE_NO_WINDOW`; stdout and stderr remain connected to the MCP's pipes
+  while `taskkill` can still terminate the whole tree.
 - **Server-enforced timeout.** A command that outlives its `timeout` is killed
   and reported as `state: "timeout"` with partial output — never a hung tool
   call.
