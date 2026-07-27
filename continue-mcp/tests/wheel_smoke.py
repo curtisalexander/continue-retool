@@ -17,7 +17,13 @@ def console(venv: Path, name: str) -> str:
     return path
 
 async def handshake(command: str, workspace: str) -> None:
-    async with Client(StdioTransport(command=command, args=[], env={**os.environ, "MCP_WORKSPACE": workspace}, cwd=workspace)) as client:
+    transport = StdioTransport(
+        command=command,
+        args=[],
+        env={**os.environ, "MCP_WORKSPACE": workspace},
+        keep_alive=False,
+    )
+    async with Client(transport, init_timeout=120, timeout=120) as client:
         await client.list_tools()
 
 def main() -> int:
