@@ -207,6 +207,7 @@ _POWERSHELL_UTF8_PREFIX = (
     "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);"
     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"
     "$OutputEncoding=[Text.UTF8Encoding]::new($false);"
+    "if($PSStyle){$PSStyle.OutputRendering='PlainText'};"
 )
 
 
@@ -638,6 +639,24 @@ async def _start(
         kwargs["start_new_session"] = True  # setsid -> own process group
     if env:
         kwargs["env"] = {**os.environ, **env}
+    if IS_WINDOWS and not (env and any(key.upper() == "PATH" for key in env)):
+        # The interpreter itself may have resolved through a known install path
+        # that is absent from a GUI-launched client's stale PATH. Make that same
+        # executable available to commands inside the shell, too. This also makes
+        # the common (though redundant) model command `pwsh ./script.ps1` work.
+        child_env = kwargs.setdefault("env", os.environ.copy())
+        path_key = next(
+            (key for key in child_env if key.upper() == "PATH"), "PATH"
+        )
+        interpreter_dir = os.path.dirname(os.path.abspath(argv[0]))
+        path_dirs = child_env.get(path_key, "").split(os.pathsep)
+        if not any(
+            os.path.normcase(path) == os.path.normcase(interpreter_dir)
+            for path in path_dirs
+        ):
+            child_env[path_key] = os.pathsep.join(
+                [interpreter_dir, child_env.get(path_key, "")]
+            ).rstrip(os.pathsep)
 
     common: dict = dict(
         # stdin defaults to DEVNULL, not inherit: the server's own stdin IS the

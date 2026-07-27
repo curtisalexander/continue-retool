@@ -41,12 +41,14 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
 - **Right encoding per platform.** PowerShell starts with UTF-8 console and
   pipeline encodings so characters such as emoji are preserved before capture.
   Output is decoded as UTF-8 when valid, otherwise with the Windows OEM code
-  page for legacy commands. Force decoding with `SHELL_MCP_ENCODING`.
+  page for legacy commands. ANSI styling is disabled because MCP responses are
+  text rather than terminal emulators. Force decoding with `SHELL_MCP_ENCODING`.
 - **Interpreter resolution.** `shell = bash | pwsh | powershell | cmd` is
   resolved by the server (installer-stamped `SHELL_MCP_<SHELL>` env → PATH →
-  known install locations) so a stale GUI PATH can't break it, and the model
-  never needs `where pwsh`. The Windows default is pwsh-if-installed, else
-  powershell. See the kit README's "interpreter resolution" section.
+  known install locations) so a stale GUI PATH can't break it. On Windows the
+  resolved interpreter's directory is also exposed to commands inside the shell,
+  making a redundant nested `pwsh` work without `where pwsh`. The Windows default
+  is pwsh-if-installed, else powershell.
 - **stdin is never the transport.** Children get `DEVNULL` (or a pipe with
   `interactive=true`) — a child that reads stdin can't eat MCP protocol bytes.
 - **Workspace-relative.** `cwd` defaults to `MCP_WORKSPACE`; relative `cwd`

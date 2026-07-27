@@ -423,27 +423,29 @@ def test_run_captures_stderr():
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="Windows process-launch regression")
-def test_windows_absolute_pwsh_child_stays_piped(tmp_path):
-    """An absolute-path pwsh fallback must not detach from the MCP pipes.
+def test_windows_nested_bare_pwsh_uses_resolved_interpreter_and_stays_piped(
+    tmp_path, monkeypatch
+):
+    """A redundant nested pwsh must use the resolved outer interpreter.
 
-    Models should select shell=pwsh and invoke the script directly, but this is
-    the fallback form they commonly try when a nested bare `pwsh` is absent from
-    a GUI application's stale PATH. Keep it working without losing either stream.
+    Models should invoke the script directly, but commonly emit `pwsh ./file.ps1`.
+    Keep that working even when a GUI application's inherited PATH is stale.
     """
     pwsh = server.resolve_interpreter("pwsh")
     if not pwsh:
         pytest.skip("PowerShell 7 is unavailable")
+    monkeypatch.setenv("SHELL_MCP_PWSH", pwsh)
+    monkeypatch.setenv("PATH", "")
     script = tmp_path / "output.ps1"
     script.write_text(
         '[Console]::Out.WriteLine("pwsh-stdout 🚀")\n'
         '[Console]::Error.WriteLine("pwsh-stderr 🧪")\n',
         encoding="utf-8",
     )
-    quoted_pwsh = pwsh.replace("'", "''")
     quoted_script = str(script).replace("'", "''")
 
     async def scenario():
-        command = f"& '{quoted_pwsh}' -NoProfile -File '{quoted_script}'"
+        command = f"pwsh '{quoted_script}'"
         return await server.run(command, shell="pwsh", cwd=str(tmp_path), timeout=15)
 
     result = asyncio.run(scenario())
@@ -453,6 +455,20 @@ def test_windows_absolute_pwsh_child_stays_piped(tmp_path):
     assert "pwsh-stderr 🧪" in res["stderr"]
     assert "🚀" in result.content[0].text
     assert "🧪" in result.content[0].text
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell rendering regression")
+def test_windows_pwsh_errors_do_not_emit_ansi_sequences():
+    if not server.resolve_interpreter("pwsh"):
+        pytest.skip("PowerShell 7 is unavailable")
+
+    async def scenario():
+        return await server.run("Write-Error 'plain-error'", shell="pwsh", timeout=15)
+
+    result = asyncio.run(scenario())
+    assert "plain-error" in result.structured_content["stderr"]
+    assert "\x1b[" not in result.structured_content["stderr"]
+    assert "\x1b[" not in result.content[0].text
 
 
 def test_timeout_kills_and_reports():
