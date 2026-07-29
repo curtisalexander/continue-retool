@@ -43,6 +43,7 @@ def test_check_uses_handshake_without_subprocess_dependency(tmp_path: Path, monk
     assert calls == [("fs", os.path.abspath("/tools/uv"), tmp_path.resolve(), {"MCP_WORKSPACE": str(tmp_path.resolve())})]
 
 def test_install_stamps_absolute_paths_and_is_idempotent(tmp_path: Path):
+    detected = installer.detect_shell_env()
     installer.install(str(tmp_path), ["shell", "fs"], "/tools/uv")
     before = {p: p.read_bytes() for p in tmp_path.rglob("*.yaml")}
     installer.install(str(tmp_path), ["shell", "fs"], "/tools/uv")
@@ -52,8 +53,8 @@ def test_install_stamps_absolute_paths_and_is_idempotent(tmp_path: Path):
     assert installer._quote(str(tmp_path.resolve())) in text
     assert installer._quote(os.path.abspath("/tools/uv")) in text
     assert '"--no-sync"' in text
-    assert "SHELL_MCP_BASH:" in text
-    assert 'SHELL_MCP_DEFAULT_SHELL: "bash"' in text
+    for name, value in detected.items():
+        assert f"{name}: {installer._quote(value)}" in text
 
 def test_refuses_differing_existing_file_before_any_write(tmp_path: Path):
     target = tmp_path / ".continue/mcpServers/fs.yaml"
