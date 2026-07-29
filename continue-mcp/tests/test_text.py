@@ -8,6 +8,7 @@ from continue_mcp_common.text import (
     decode_byte_range,
     decode_content,
     decode_explicit,
+    decode_filename,
     detect_reader,
     encode_replacement,
 )
@@ -88,3 +89,12 @@ def test_stream_detection_matches_complete_content_without_retaining_text(tmp_pa
     complete = decode_content(path.read_bytes())
     assert detected.text == ""
     assert (detected.codec, detected.bom) == (complete.codec, complete.bom)
+
+
+def test_filename_decode_falls_back_to_surrogateescape(monkeypatch) -> None:
+    def fail_fsdecode(_name):
+        raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid")
+
+    monkeypatch.setattr("continue_mcp_common.text.os.fsdecode", fail_fsdecode)
+    result = decode_filename(b"caf\xe9.txt")
+    assert result.encode(errors="surrogateescape") == b"caf\xe9.txt"

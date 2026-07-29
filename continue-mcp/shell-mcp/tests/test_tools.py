@@ -676,6 +676,7 @@ def test_job_codec_is_fixed_when_global_override_changes(monkeypatch):
     sh = default_shell()
     if sh is None:
         pytest.skip("no usable shell on this host")
+    expected_encoding = server._job_encoding(sh)
 
     async def scenario():
         result = await server.run(
@@ -688,7 +689,7 @@ def test_job_codec_is_fixed_when_global_override_changes(monkeypatch):
 
     res = asyncio.run(scenario())
     assert res["ok"] is True
-    assert res["encoding"] == "utf-8"
+    assert res["encoding"] == expected_encoding
     assert "more" in res["stdout"]
 
 

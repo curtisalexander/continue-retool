@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import os
+import sys
 from dataclasses import dataclass
 from typing import BinaryIO
 
@@ -174,4 +175,12 @@ def decode_byte_range(data: bytes, codec: str) -> ByteRangeText:
 
 def decode_filename(name: bytes | str) -> str:
     """Decode an OS filename without applying file-content heuristics."""
-    return os.fsdecode(name)
+    if isinstance(name, str):
+        return name
+    try:
+        return os.fsdecode(name)
+    except UnicodeDecodeError:
+        # Windows' os.fsdecode uses surrogatepass, which can still reject
+        # malformed byte records emitted by an external producer. Preserve the
+        # bytes as filesystem surrogates instead of crashing the search result.
+        return name.decode(sys.getfilesystemencoding(), errors="surrogateescape")

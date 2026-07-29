@@ -112,7 +112,9 @@ def test_json_data_text_and_cp1252_bytes_with_character_column():
     assert hit["text"] == "é “hit”"
     assert hit["encoding"] == "cp1252" and hit["decode_loss"] is False
     assert hit["byte_column"] == 3 and hit["column"] == 3
-    assert hit["file"] == os.fsdecode(b"caf\xe9.txt")
+    assert hit["file"] == b"caf\xe9.txt".decode(
+        sys.getfilesystemencoding(), errors="surrogateescape"
+    )
 
 
 def test_json_multibyte_byte_and_character_columns_differ():
