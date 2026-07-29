@@ -1,5 +1,6 @@
 """Golden tests for fs-mcp. Run: uv run --extra test pytest -q"""
 import asyncio
+import codecs
 import os
 
 import pytest
@@ -71,6 +72,24 @@ def test_read_bom_and_crlf(tmp_path):
     f.write_bytes(b"\xef\xbb\xbffirst\r\nsecond\r\n")
     res = _read(f)
     assert res["content"] == "1\tfirst\n2\tsecond"  # BOM stripped, CRLF handled
+
+
+@pytest.mark.parametrize(
+    ("raw", "encoding", "bom"),
+    [
+        ("price €\n".encode("cp1252"), "cp1252", None),
+        (b"\xef\xbb\xbf" + "snowman ☃\n".encode(), "utf-8", "efbbbf"),
+        (b"\xff\xfe" + "little\n".encode("utf-16-le"), "utf-16-le", "fffe"),
+        (b"\xfe\xff" + "big\n".encode("utf-16-be"), "utf-16-be", "feff"),
+    ],
+)
+def test_read_reports_decoding_provenance(tmp_path, raw, encoding, bom):
+    f = tmp_path / "encoded.txt"
+    f.write_bytes(raw)
+    res = _read(f)
+    assert res["content"].split("\t", 1)[1] in {"price €", "snowman ☃", "little", "big"}
+    assert (res["encoding"], res["bom"]) == (encoding, bom)
+    assert res["had_errors"] is False and res["decode_loss"] is False
 
 
 def test_read_missing_file(tmp_path):
@@ -361,6 +380,22 @@ def test_read_does_not_mistake_legacy_encoded_text_for_binary(tmp_path):
     f = tmp_path / "cp.txt"
     f.write_bytes("Grüße, naïve café — résumé\n".encode("cp1252"))
     assert _read(f)["ok"] is True
+
+
+def test_read_explicit_encoding_for_shell_spill_bytes(tmp_path):
+    f = tmp_path / "cp850.log"
+    f.write_bytes("Grüße café\n".encode("cp850"))
+    result = asyncio.run(server.read(str(f), encoding="cp850")).structured_content
+    assert result["ok"] is True
+    assert result["encoding"] == "cp850"
+    assert "Grüße café" in result["content"]
+
+
+def test_read_malformed_bom_file_is_structured_decode_failure(tmp_path):
+    f = tmp_path / "broken-utf16.txt"
+    f.write_bytes(codecs.BOM_UTF16_LE + b"a")
+    result = _read(f)
+    assert result["ok"] is False and result["error_type"] == "decode"
 
 
 def test_read_allows_empty_and_emoji_files(tmp_path):

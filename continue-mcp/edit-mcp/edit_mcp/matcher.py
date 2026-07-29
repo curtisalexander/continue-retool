@@ -209,8 +209,43 @@ def _closest_hint(content_lf: str, old_lf: str, max_lines: int = 5000) -> str | 
     return f"Closest match ~{best[0]:.0%} near line {best[1] + 1}:\n" + "\n".join(diff)
 
 
-def _finish(bom: str, result_lf: str, eol: str) -> str:
-    return bom + result_lf.replace("\n", eol)
+def _lf_with_spans(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Normalize separators for matching while retaining raw source spans."""
+    output: list[str] = []
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\r":
+            end = i + 2 if i + 1 < len(text) and text[i + 1] == "\n" else i + 1
+            output.append("\n")
+            spans.append((i, end))
+            i = end
+        else:
+            output.append(text[i])
+            spans.append((i, i + 1))
+            i += 1
+    return "".join(output), spans
+
+
+def _replacement(text: str, consumed: str, body: str, start: int) -> str:
+    """Give replacement breaks consumed separators in order, then a stable default."""
+    separators = re.findall(r"\r\n|\r|\n", consumed)
+    all_separators = list(re.finditer(r"\r\n|\r|\n", body))
+    nearby = next((m.group() for m in reversed(all_separators) if m.start() < start), None)
+    if nearby is None:
+        nearby = next((m.group() for m in all_separators if m.start() >= start), "\n")
+    pieces = re.split(r"\r\n|\r|\n", text)
+    result = pieces[0]
+    for index, piece in enumerate(pieces[1:]):
+        result += (separators[index] if index < len(separators) else nearby) + piece
+    return result
+
+
+def _apply(body: str, spans: list[tuple[int, int]], new: str) -> str:
+    result = body
+    for start, end in reversed(spans):
+        result = result[:start] + _replacement(new, body[start:end], body, start) + result[end:]
+    return result
 
 
 # --- the public entry point ------------------------------------------------
@@ -233,8 +268,8 @@ def find_and_replace(
         )
 
     bom, body = strip_bom(content)
-    eol = detect_line_ending(body)
-    c, o, nw = _to_lf(body), _to_lf(old), _to_lf(new)
+    c, raw_spans = _lf_with_spans(body)
+    o = _to_lf(old)
 
     # 1) EXACT — preserves every byte, no normalization applied.
     exact = c.count(o)
@@ -244,8 +279,11 @@ def find_and_replace(
                 f"old_string is not unique: {exact} exact matches. Add surrounding "
                 f"context to disambiguate, or pass replace_all=true."
             )
-        result = c.replace(o, nw) if replace_all else c.replace(o, nw, 1)
-        return _finish(bom, result, eol), "exact", (exact if replace_all else 1)
+        matches = _match_spans(c, o)
+        if not replace_all:
+            matches = matches[:1]
+        source = [(raw_spans[start][0], raw_spans[end - 1][1]) for start, end in matches]
+        return bom + _apply(body, source, new), "exact", len(source)
 
     # 2) FUZZY — normalized match, unchanged lines preserved verbatim.
     norm_old = normalize_for_fuzzy(o)
@@ -266,7 +304,9 @@ def find_and_replace(
             f"context to disambiguate, or pass replace_all=true."
         )
 
-    replaced = _fuzzy_replace(c, o, nw, replace_all)
-    assert replaced is not None
-    result, count = replaced
-    return _finish(bom, result, eol), "fuzzy", count
+    if not replace_all:
+        source_spans = source_spans[:1]
+    raw_source = [
+        (raw_spans[start][0], raw_spans[end - 1][1]) for start, end in source_spans
+    ]
+    return bom + _apply(body, raw_source, new), "fuzzy", len(raw_source)

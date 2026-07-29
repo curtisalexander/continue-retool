@@ -230,3 +230,21 @@ def test_detect_line_ending():
 def test_normalize_idempotent_on_ascii():
     s = "plain ascii text = 1"
     assert normalize_for_fuzzy(s) == s
+
+
+def test_exact_preserves_mixed_separators_and_reuses_consumed_breaks():
+    content = "outside\r\none\ntwo\rthree\r\ntail\n"
+    result, strategy, _ = find_and_replace(
+        content, "one\ntwo\nthree", "ONE\nTWO\nTHREE\nEXTRA"
+    )
+    assert strategy == "exact"
+    assert result == "outside\r\nONE\nTWO\rTHREE\r\nEXTRA\r\ntail\n"
+
+
+def test_fuzzy_preserves_mixed_separators_within_and_outside_match():
+    content = "head\r\nsmart “quote”\rnext\ntail\r\n"
+    result, strategy, _ = find_and_replace(
+        content, 'smart "quote"\nnext', "changed\nNEXT"
+    )
+    assert strategy == "fuzzy"
+    assert result == "head\r\nchanged\rNEXT\ntail\r\n"

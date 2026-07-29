@@ -21,7 +21,14 @@ service, manifest manager, or tool factory.
 <!-- END GENERATED COMPONENT INVENTORY -->
 
 `continue_mcp_common` supplies bounded configuration, workspace-relative path
-resolution, and consistent results. Each server remains a separate process.
+resolution, consistent results, and the shared byte/text contract. File reads,
+edits, and ripgrep byte records use one deterministic UTF-8/BOM → UTF-16 BOM →
+cp1252 → latin-1 policy; filename bytes remain governed by the operating-system
+filesystem codec. Shell streams instead select one explicit codec per job so
+polling boundaries cannot change their interpretation, including for multibyte
+Windows OEM codecs. Shell-derived codecs are defaults, not guesses that can
+identify every native producer; callers can override the codec and pass spill
+provenance through `fs.read(encoding=...)`. Each server remains a separate process.
 
 ## Trust and mutation
 
@@ -40,7 +47,8 @@ cannot make an absolute concurrency guarantee.
 
 `servers.json` is the compact inventory and default-selection source. The
 installer renders all selected YAML first, stamps absolute uv/toolkit/workspace
-paths and `--no-sync`, refuses differing existing files, and performs one
+and detected-interpreter paths plus `--no-sync`, upgrades only marked or exactly
+recognized legacy generated files, refuses differing user-authored files, and performs one
 `uv sync --locked --project <toolkit>` unless skipped. `--check` compares exact
 rendered content and uses FastMCP `Client`/`StdioTransport` for a live handshake.
 

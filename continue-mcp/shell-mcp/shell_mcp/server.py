@@ -16,6 +16,7 @@ Run:  uv run shell-mcp
 from __future__ import annotations
 
 import asyncio
+import base64
 import codecs
 import locale
 import math
@@ -24,10 +25,11 @@ import shutil
 import signal
 import sys
 import time
+from asyncio.subprocess import DEVNULL, PIPE, Process
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Optional
+from typing import Literal, Optional
 
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
@@ -36,6 +38,13 @@ from mcp.types import TextContent
 from continue_mcp_common.config import env_float as _env_float
 from continue_mcp_common.config import env_int as _env_int
 from continue_mcp_common.results import fenced_block
+from continue_mcp_common.text import decode_byte_range, decode_explicit
+
+Shell = Literal["bash", "pwsh", "powershell", "cmd"]
+
+
+class RedundantInterpreterError(ValueError):
+    """The command tried to launch the shell that the tool already provides."""
 
 # --- configuration ---------------------------------------------------------
 DEFAULT_TIMEOUT = _env_float("SHELL_MCP_DEFAULT_TIMEOUT", 120.0, 1.0, 86_400.0)
@@ -93,10 +102,9 @@ def _spill_root() -> str:
 
 
 # --- output decoding: right encoding per platform --------------------------
-# stdout/stderr come back as raw bytes. UTF-8 is correct for bash and pwsh 7+
-# (emoji and all). But cmd.exe and Windows PowerShell 5.1 emit the console/OEM
-# code page (cp437/cp850/cp1252), which UTF-8 decoding would mangle. So: decode
-# UTF-8 when the bytes are valid UTF-8, else fall back to the platform code page.
+# stdout/stderr remain raw bytes until model/display access. PowerShell's prefix
+# and ordinary Bash establish UTF-8; cmd uses the Windows OEM code page. Select
+# that codec once per job so chunk and polling boundaries cannot change it.
 # Force one explicitly with SHELL_MCP_ENCODING (e.g. "cp1252", "cp850", "utf-8").
 _ENCODING_OVERRIDE = os.environ.get("SHELL_MCP_ENCODING")
 
@@ -106,8 +114,8 @@ def _fallback_encoding() -> str:
         return _ENCODING_OVERRIDE
     if IS_WINDOWS:
         try:
-            import ctypes  # the OEM code page is what cmd/PowerShell 5.1 pipe out
-            return "cp" + str(ctypes.windll.kernel32.GetOEMCP())
+            import ctypes  # cmd's default text convention is the OEM code page
+            return "cp" + str(getattr(ctypes, "windll").kernel32.GetOEMCP())
         except Exception:
             return locale.getpreferredencoding(False) or "cp1252"
     return "utf-8"
@@ -116,70 +124,20 @@ def _fallback_encoding() -> str:
 _FALLBACK_ENCODING = _fallback_encoding()
 
 
-def decode_output(data: bytes) -> str:
-    """Decode child output: UTF-8 if it's valid UTF-8, else the platform code
-    page (never raises — invalid bytes in the fallback are replaced)."""
-    if _ENCODING_OVERRIDE:
-        return data.decode(_ENCODING_OVERRIDE, errors="replace")
+def _job_encoding(shell: str, requested: str | None = None) -> str:
+    """Select one codec for the entire job, never by inspecting output bytes."""
+    selected = requested or _ENCODING_OVERRIDE or (
+        _FALLBACK_ENCODING if shell == "cmd" else "utf-8"
+    )
     try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data.decode(_FALLBACK_ENCODING, errors="replace")
+        return codecs.lookup(selected).name
+    except LookupError as exc:
+        raise ValueError(f"unknown shell output encoding: {selected!r}") from exc
 
 
-def _decode_slice(data: bytes | bytearray) -> str:
-    """decode_output for an arbitrary byte slice of a stream. A byte cursor can
-    split a multibyte UTF-8 character, which strict decoding would misread as
-    'not UTF-8' and push the whole slice to the code-page fallback. So: skip
-    orphaned continuation bytes at the start, and retry without a partial
-    character at the end, before falling back."""
-    b = bytes(data)
-    if _ENCODING_OVERRIDE:
-        return decode_output(b)
-    i = 0
-    while i < min(len(b), 3) and (b[i] & 0xC0) == 0x80:
-        i += 1
-    b = b[i:]
-    try:
-        return b.decode("utf-8")
-    except UnicodeDecodeError:
-        for trim in (1, 2, 3):
-            if trim >= len(b):
-                break
-            try:
-                return b[:-trim].decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-        return decode_output(b)
-
-
-def _incomplete_utf8_suffix(data: bytes | bytearray) -> int:
-    """Return the byte length of a valid-but-incomplete UTF-8 suffix.
-
-    Invalid data is intentionally *not* retained: decode_output() will handle it
-    with the configured platform fallback. Only an otherwise-valid UTF-8 slice
-    ending partway through a character needs to wait for the next pipe read.
-    """
-    b = bytes(data)
-    try:
-        b.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        if exc.reason == "unexpected end of data" and exc.end == len(b):
-            return len(b) - exc.start
-    return 0
-
-
-def _incomplete_output_suffix(data: bytes | bytearray) -> int:
-    """Return bytes held by the configured codec's incremental decoder."""
-    if not _ENCODING_OVERRIDE:
-        return _incomplete_utf8_suffix(data)
-    decoder = codecs.getincrementaldecoder(_ENCODING_OVERRIDE)(errors="strict")
-    try:
-        decoder.decode(bytes(data), final=False)
-    except UnicodeDecodeError:
-        return 0
-    pending, _ = decoder.getstate()
-    return len(pending)
+def decode_output(data: bytes, codec: str = "utf-8") -> str:
+    """Compatibility helper: decode all bytes with one explicit codec."""
+    return decode_explicit(data, codec).text
 
 
 # --- shell selection + interpreter resolution (§2b) ------------------------
@@ -211,6 +169,27 @@ _POWERSHELL_UTF8_PREFIX = (
 )
 
 
+def _powershell_command(cmd: str, codec: str = "utf-8") -> str:
+    """Set stream defaults without changing directives at the start of *cmd*."""
+    encoded = base64.b64encode(cmd.encode("utf-8")).decode("ascii")
+    canonical = codecs.lookup(codec).name
+    prefix = _POWERSHELL_UTF8_PREFIX
+    if canonical != "utf-8":
+        prefix = (
+            f"$__continueMcpEncoding=[Text.Encoding]::GetEncoding('{canonical}');"
+            "[Console]::InputEncoding=$__continueMcpEncoding;"
+            "[Console]::OutputEncoding=$__continueMcpEncoding;"
+            "$OutputEncoding=$__continueMcpEncoding;"
+            "if($PSStyle){$PSStyle.OutputRendering='PlainText'};"
+        )
+    return (
+        prefix
+        + "$__continueMcpScript=[ScriptBlock]::Create("
+        + f"[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')));"
+        + "& $__continueMcpScript"
+    )
+
+
 def _known_locations(shell: str) -> list[str]:
     """Fixed install paths to try when PATH lookup misses (the stale-GUI-PATH
     case). These are where each interpreter actually lives on a default box."""
@@ -229,17 +208,16 @@ def _known_locations(shell: str) -> list[str]:
 def resolve_interpreter(shell: str, exe_name: Optional[str] = None) -> Optional[str]:
     """Locate an interpreter binary so the client never has to `where` it and
     hard-code a path. Order:
-      1. SHELL_MCP_<SHELL> env override — trusted as-is (the installer stamps an
-         absolute path here from a real terminal, mirroring how command: uv is
-         stamped; a stale stamp is a re-run-the-installer situation, like uv).
+      1. SHELL_MCP_<SHELL> env override when it still names a file (the installer
+         stamps an absolute path, but moved/uninstalled programs must fall back).
       2. PATH lookup (shutil.which).
       3. known install locations (patches a stale/thin inherited PATH).
     Returns None if nothing resolves."""
     if exe_name is None:
         exe_name = _INTERP.get(shell, (shell, []))[0]
     override = os.environ.get(f"SHELL_MCP_{shell.upper()}")
-    if override:
-        return override
+    if override and os.path.isfile(override):
+        return os.path.abspath(override)
     found = shutil.which(exe_name)
     if found:
         return found
@@ -256,23 +234,24 @@ def _default_shell() -> str:
     SHELL_MCP_DEFAULT_SHELL (the installer stamps the one it detected)."""
     forced = os.environ.get("SHELL_MCP_DEFAULT_SHELL")
     if forced:
-        return forced.lower()
+        forced = forced.lower()
+        if forced not in _INTERP:
+            raise ValueError(
+                "SHELL_MCP_DEFAULT_SHELL must be bash, pwsh, powershell, or cmd"
+            )
+        if resolve_interpreter(forced) is None:
+            raise ValueError(
+                f"SHELL_MCP_DEFAULT_SHELL={forced!r} has no usable interpreter"
+            )
+        return forced
     if IS_WINDOWS:
         return "pwsh" if resolve_interpreter("pwsh") else "powershell"
     return "bash"
 
 
-if IS_WINDOWS:
-    # The cmd path spawns via create_subprocess_shell (raw-string passthrough),
-    # which builds "%ComSpec% /c <cmd>" from OUR environment — it never sees the
-    # interpreter build_argv resolved. Pointing ComSpec at that resolution makes
-    # the SHELL_MCP_CMD stamp / known-location fallback apply to cmd too.
-    _cmd_exe = resolve_interpreter("cmd")
-    if _cmd_exe:
-        os.environ["ComSpec"] = _cmd_exe
-
-
-def build_argv(cmd: str, shell: Optional[str]) -> list[str]:
+def build_argv(
+    cmd: str, shell: Optional[str], encoding: str = "utf-8"
+) -> list[str]:
     """Map a shell name + a command string to an argv, with argv[0] resolved to
     an absolute interpreter path. We pass the whole command to the shell via
     -c / -Command rather than tokenizing it ourselves."""
@@ -290,8 +269,74 @@ def build_argv(cmd: str, shell: Optional[str]) -> list[str]:
             f"name or an absolute path."
         )
     if shell in ("pwsh", "powershell"):
-        cmd = _POWERSHELL_UTF8_PREFIX + cmd
+        cmd = _powershell_command(cmd, encoding)
     return [exe, *wrap, cmd]
+
+
+def _reject_redundant_interpreter(cmd: str) -> None:
+    """Reject a nested supported shell before interpreter resolution/spawn."""
+    stripped = cmd.lstrip()
+    if not stripped:
+        return
+    if stripped.startswith("&"):
+        stripped = stripped[1:].lstrip()
+        if not stripped:
+            return
+    if stripped[0] in "\"'":
+        quote = stripped[0]
+        end = stripped.find(quote, 1)
+        token = stripped[1:end] if end >= 0 else stripped[1:]
+    else:
+        token = stripped.split(None, 1)[0]
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if name in {"pwsh", "pwsh.exe", "powershell", "powershell.exe", "bash", "bash.exe", "cmd", "cmd.exe"}:
+        raise RedundantInterpreterError(
+            f"command starts with redundant interpreter {token!r}; this server already "
+            "invokes the selected interpreter. Remove it and use the shell argument "
+            "(bash, pwsh, powershell, or cmd)."
+        )
+
+
+def _child_environment(
+    interpreter: str,
+    overrides: dict[str, str | None] | None,
+    *,
+    windows: bool = IS_WINDOWS,
+    base: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a fresh deterministic child environment.
+
+    Interpreter resolution deliberately happens from the server's inherited PATH
+    before this helper: a per-call PATH can affect commands *inside* the selected
+    shell, but can never replace the outer interpreter.
+    """
+    source = os.environ if base is None else base
+    result: dict[str, str] = {}
+    if windows:
+        names: dict[str, str] = {}
+        for key, value in source.items():
+            folded = key.casefold()
+            actual = names.setdefault(folded, key)
+            result[actual] = value
+    else:
+        result.update(source)
+
+    def canonical(key: str) -> str:
+        if not windows:
+            return key
+        return next((old for old in result if old.casefold() == key.casefold()), key)
+
+    path_key = canonical("PATH")
+    interpreter_dir = os.path.dirname(os.path.abspath(interpreter))
+    inherited_path = result.get(path_key, "")
+    result[path_key] = os.pathsep.join(filter(None, (interpreter_dir, inherited_path)))
+    for key, value in (overrides or {}).items():
+        actual = canonical(key)
+        if value is None:
+            result.pop(actual, None)
+        else:
+            result[actual] = value
+    return result
 
 
 # --- a capped buffer so a runaway command can't blow the context window ----
@@ -310,8 +355,10 @@ class RingBuffer:
     chunks are held in `_pending` so the head can still be flushed to the file
     retroactively — a job that stays under the cap never touches the disk."""
 
-    def __init__(self, cap: int = MAX_BUFFER_BYTES, spill_target: str | None = None) -> None:
+    def __init__(self, cap: int = MAX_BUFFER_BYTES, spill_target: str | None = None, codec: str = "utf-8") -> None:
         self.cap = cap
+        self.codec = codec
+        self.decode_errors = False
         self._head = bytearray()   # first bytes of the stream; frozen after 1st drop
         self._tail = bytearray()   # most recent bytes
         self._dropped = 0          # bytes dropped between head and tail
@@ -387,26 +434,73 @@ class RingBuffer:
 
     def _read_range(self, offset: int, end: int) -> str:
         """Decode the retained portions of logical byte range ``[offset, end)``."""
+        def align_utf8_start(data: bytes | bytearray, position: int) -> int:
+            """Skip only the remainder of a valid character begun before position."""
+            if codecs.lookup(self.codec).name != "utf-8" or position >= len(data):
+                return position
+            for start in range(max(0, position - 3), position):
+                first = data[start]
+                width = (
+                    2 if 0xC2 <= first <= 0xDF else
+                    3 if 0xE0 <= first <= 0xEF else
+                    4 if 0xF0 <= first <= 0xF4 else 0
+                )
+                if start < position < start + width <= len(data):
+                    try:
+                        bytes(data[start : start + width]).decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+                    return start + width
+            return position
+
+        def decode(data: bytes | bytearray, *, hold_suffix: bool = False) -> str:
+            if not hold_suffix:
+                decoded = decode_explicit(bytes(data), self.codec)
+                self.decode_errors |= decoded.had_errors
+                return decoded.text
+            ranged = decode_byte_range(bytes(data), self.codec)
+            self.decode_errors |= ranged.decoded.had_errors
+            suffix = ""
+            if self._closed and ranged.held_suffix:
+                decoded_suffix = decode_explicit(ranged.held_suffix, self.codec)
+                self.decode_errors |= decoded_suffix.had_errors
+                suffix = decoded_suffix.text
+            return ranged.text + suffix
+
         offset = max(0, min(offset, self.total))
         end = max(offset, min(end, self.total))
         if not self._dropped:
-            return _decode_slice(self._head[offset:end])
+            offset = align_utf8_start(self._head, offset)
+            return decode(
+                self._head[offset:end],
+                hold_suffix=not self._closed and end == self.total,
+            )
 
         head_end = len(self._head)
         tail_start = self.total - len(self._tail)
         if offset >= tail_start:
-            return _decode_slice(self._tail[offset - tail_start:end - tail_start])
+            local_offset = align_utf8_start(self._tail, offset - tail_start)
+            return decode(
+                self._tail[local_offset:end - tail_start],
+                hold_suffix=not self._closed and end == self.total,
+            )
 
         parts = []
         if offset < head_end:
-            parts.append(_decode_slice(self._head[offset:min(end, head_end)]))
+            head_offset = align_utf8_start(self._head, offset)
+            parts.append(decode(self._head[head_offset:min(end, head_end)]))
         gap_start = max(offset, head_end)
         gap_end = min(end, tail_start)
         if gap_end > gap_start:
             where = f" — full output: {self.spill_path}" if self.spill_path else ""
             parts.append(f"\n...[{gap_end - gap_start} bytes truncated{where}]...\n")
         if end > tail_start:
-            parts.append(_decode_slice(self._tail[:end - tail_start]))
+            parts.append(
+                decode(
+                    self._tail[:end - tail_start],
+                    hold_suffix=not self._closed and end == self.total,
+                )
+            )
         return "".join(parts)
 
     def _incremental_end(self) -> int:
@@ -414,7 +508,7 @@ class RingBuffer:
         if self._closed or not self.total:
             return self.total
         ending = self._tail if self._dropped else self._head
-        return self.total - _incomplete_output_suffix(ending)
+        return self.total - len(decode_byte_range(bytes(ending), self.codec).held_suffix)
 
     def read_incremental(self, offset: int) -> tuple[str, int]:
         """Return decoded new output and the cursor safe to acknowledge.
@@ -456,8 +550,11 @@ class JobState(StrEnum):
 class Job:
     job_id: str
     cmd: str
-    proc: asyncio.subprocess.Process
+    proc: Process
     started: float
+    shell: str = "bash"
+    interpreter: str = ""
+    encoding: str = "utf-8"
     stdout: RingBuffer = field(default_factory=RingBuffer)
     stderr: RingBuffer = field(default_factory=RingBuffer)
     state: JobState = JobState.RUNNING
@@ -506,7 +603,7 @@ async def _drain(stream: asyncio.StreamReader, buf: RingBuffer) -> None:
         buf.write(chunk)
 
 
-def _kill_tree(job: Job, sig: int = signal.SIGTERM) -> None:
+async def _kill_tree(job: Job, sig: int = signal.SIGTERM) -> None:
     """Kill the whole process group, not just the top process (§2b, the #1 bug)."""
     proc = job.proc
     if proc.returncode is not None:
@@ -514,11 +611,26 @@ def _kill_tree(job: Job, sig: int = signal.SIGTERM) -> None:
     try:
         if IS_WINDOWS:
             # taskkill /T walks and kills the whole child tree.
-            import subprocess
-            subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                capture_output=True,
+            taskkill = os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"),
+                "System32", "taskkill.exe",
             )
+            if not os.path.isfile(taskkill):
+                taskkill = "taskkill"
+            killer = await asyncio.create_subprocess_exec(
+                taskkill, "/T", "/F", "/PID", str(proc.pid),
+                stdin=DEVNULL,
+                stdout=DEVNULL,
+                stderr=DEVNULL,
+                creationflags=WINDOWS_PROCESS_FLAGS,
+            )
+            try:
+                await asyncio.wait_for(killer.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                killer.kill()
+                await killer.wait()
+            if killer.returncode != 0 and proc.returncode is None:
+                proc.kill()
         else:
             os.killpg(os.getpgid(proc.pid), sig)
     except (ProcessLookupError, PermissionError):
@@ -529,7 +641,7 @@ async def _watch_timeout(job: Job, timeout: float) -> None:
     await asyncio.sleep(timeout)
     if job.proc.returncode is None:
         job.state = JobState.TIMEOUT
-        _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+        await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
 
 
 async def _shutdown_jobs() -> None:
@@ -537,7 +649,7 @@ async def _shutdown_jobs() -> None:
     running = [job for job in JOBS.values() if job.proc.returncode is None]
     for job in running:
         job.state = JobState.KILLED
-        _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+        await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
 
     reapers = [job._reaper_task for job in running if job._reaper_task is not None]
     if reapers:
@@ -547,7 +659,7 @@ async def _shutdown_jobs() -> None:
             )
         except asyncio.TimeoutError:
             for job in running:
-                _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+                await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
             for task in reapers:
                 if not task.done():
                     task.cancel()
@@ -559,9 +671,12 @@ async def _shutdown_jobs() -> None:
 # while still handing the model the structured fields (structured_content /
 # res.data). Without this the command and output are buried in escaped JSON.
 def _console_text(cmd: str, snap: dict) -> str:
+    def console_newlines(value: str) -> str:
+        return value.replace("\r\n", "\n").replace("\r", "\n")
+
     parts = [f"$ {cmd}"]
-    out = (snap.get("stdout") or "").rstrip("\n")
-    err = (snap.get("stderr") or "").rstrip("\n")
+    out = console_newlines(snap.get("stdout") or "").rstrip("\n")
+    err = console_newlines(snap.get("stderr") or "").rstrip("\n")
     if out:
         parts.append(out)
     if err:
@@ -597,6 +712,8 @@ def _shell_failure(cmd: str, kind: str, error: str, **extra) -> ToolResult:
 
 
 def _start_failure_kind(exc: Exception) -> str:
+    if isinstance(exc, RedundantInterpreterError):
+        return "validation"
     if isinstance(exc, OSError) or "interpreter" in str(exc).lower():
         return "spawn"
     return "validation"
@@ -605,10 +722,11 @@ def _start_failure_kind(exc: Exception) -> str:
 # --- tools (§2c) -----------------------------------------------------------
 async def _start(
     cmd: str,
-    shell: Optional[str] = None,
+    shell: Optional[Shell] = None,
     cwd: Optional[str] = None,
     timeout: Optional[float] = None,
-    env: Optional[dict[str, str]] = None,
+    env: Optional[dict[str, str | None]] = None,
+    encoding: Optional[str] = None,
     interactive: bool = False,
 ) -> dict:
     """Launch the process and register the job. Internal: run()/start() call this;
@@ -622,8 +740,10 @@ async def _start(
             f"shell concurrency limit reached ({MAX_RUNNING_JOBS} running jobs); "
             "wait for or kill a job before starting another"
         )
+    _reject_redundant_interpreter(cmd)
     shell_name = (shell or _default_shell()).lower()
-    argv = build_argv(cmd, shell_name)  # validates even on the cmd path
+    job_encoding = _job_encoding(shell_name, encoding)
+    argv = build_argv(cmd, shell_name, job_encoding)  # validates cmd too
     # cwd defaults to the workspace, and relative cwd resolves against it — the
     # server's own cwd (wherever Continue launched it) is never the implicit base.
     workspace = os.environ.get("MCP_WORKSPACE")
@@ -637,33 +757,14 @@ async def _start(
         kwargs["creationflags"] = WINDOWS_PROCESS_FLAGS
     else:
         kwargs["start_new_session"] = True  # setsid -> own process group
-    if env:
-        kwargs["env"] = {**os.environ, **env}
-    if IS_WINDOWS and not (env and any(key.upper() == "PATH" for key in env)):
-        # The interpreter itself may have resolved through a known install path
-        # that is absent from a GUI-launched client's stale PATH. Make that same
-        # executable available to commands inside the shell, too. This also makes
-        # the common (though redundant) model command `pwsh ./script.ps1` work.
-        child_env = kwargs.setdefault("env", os.environ.copy())
-        path_key = next(
-            (key for key in child_env if key.upper() == "PATH"), "PATH"
-        )
-        interpreter_dir = os.path.dirname(os.path.abspath(argv[0]))
-        path_dirs = child_env.get(path_key, "").split(os.pathsep)
-        if not any(
-            os.path.normcase(path) == os.path.normcase(interpreter_dir)
-            for path in path_dirs
-        ):
-            child_env[path_key] = os.pathsep.join(
-                [interpreter_dir, child_env.get(path_key, "")]
-            ).rstrip(os.pathsep)
+    kwargs["env"] = _child_environment(argv[0], env)
 
     common: dict = dict(
         # stdin defaults to DEVNULL, not inherit: the server's own stdin IS the
         # MCP transport, and a child that reads it would eat protocol bytes.
-        stdin=asyncio.subprocess.PIPE if interactive else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdin=PIPE if interactive else DEVNULL,
+        stdout=PIPE,
+        stderr=PIPE,
         cwd=cwd,
         **kwargs,
     )
@@ -674,9 +775,11 @@ async def _start(
         if IS_WINDOWS and shell_name == "cmd":
             # cmd.exe parses its command line with its own rules; the \"-escaping
             # that list-based spawning applies breaks any quoted command. Hand
-            # cmd.exe the raw string instead (ComSpec /c passthrough — ComSpec is
-            # pointed at the resolved cmd.exe at import time above).
-            proc = await asyncio.create_subprocess_shell(cmd, **common)
+            # cmd.exe the raw string instead and explicitly select the resolved
+            # executable rather than mutating the server's global ComSpec.
+            proc = await asyncio.create_subprocess_shell(
+                cmd, executable=argv[0], **common
+            )
         else:
             proc = await asyncio.create_subprocess_exec(*argv, **common)
     finally:
@@ -685,8 +788,9 @@ async def _start(
     root = _spill_root() if SPILL_ENABLED else None
     job = Job(
         job_id=jid, cmd=cmd, proc=proc, started=time.monotonic(),
-        stdout=RingBuffer(spill_target=os.path.join(root, f"{jid}-stdout.log") if root else None),
-        stderr=RingBuffer(spill_target=os.path.join(root, f"{jid}-stderr.log") if root else None),
+        shell=shell_name, interpreter=argv[0], encoding=job_encoding,
+        stdout=RingBuffer(spill_target=os.path.join(root, f"{jid}-stdout.log") if root else None, codec=job_encoding),
+        stderr=RingBuffer(spill_target=os.path.join(root, f"{jid}-stderr.log") if root else None, codec=job_encoding),
     )
     stdout = proc.stdout
     stderr = proc.stderr
@@ -700,16 +804,31 @@ async def _start(
     )
     JOBS[job.job_id] = job
     job._reaper_task = asyncio.create_task(_reap(job))
-    return {"job_id": job.job_id, "state": job.state}
+    return {"job_id": job.job_id, "state": job.state, "shell": job.shell,
+            "interpreter": job.interpreter, "encoding": job.encoding,
+            "decode_errors": False}
 
 
-@mcp.tool(annotations={"openWorldHint": True})
+@mcp.tool(
+    annotations={"openWorldHint": True},
+    description=(
+        "Start a command in the background. This server already invokes the selected "
+        f"interpreter; use shell rather than prefixing cmd with one. Current "
+        f"{('Windows' if IS_WINDOWS else 'non-Windows')} default: {_default_shell()}. "
+        "The outer interpreter is resolved from the server environment before env "
+        "overrides; per-call PATH affects only commands inside it. env null values "
+        "remove variables. encoding overrides the shell-derived output/input codec "
+        "when a native producer uses another encoding. Poll with output/poll and "
+        "stop with kill."
+    ),
+)
 async def start(
     cmd: str,
-    shell: Optional[str] = None,
+    shell: Optional[Shell] = None,
     cwd: Optional[str] = None,
     timeout: Optional[float] = None,
-    env: Optional[dict[str, str]] = None,
+    env: Optional[dict[str, str | None]] = None,
+    encoding: Optional[str] = None,
     interactive: bool = False,
 ) -> ToolResult:
     """Start a shell command in the background. Returns instantly with a job_id;
@@ -722,10 +841,12 @@ async def start(
     interpreter with the `shell` argument instead — the server locates it for you.
     shell = bash | pwsh | powershell | cmd (default: bash off Windows; on Windows
     pwsh if installed, else powershell). To run a script file, use the shell's
-    own call syntax, e.g. PowerShell `& ./Deploy.ps1 -Env prod`, bash `./deploy.sh`."""
+    own call syntax, e.g. PowerShell `& ./Deploy.ps1 -Env prod`, bash `./deploy.sh`.
+    `encoding` fixes stdout, stderr, and interactive input to one explicit codec;
+    use it when a native program does not emit the shell-derived default."""
     try:
         data = await _start(
-            cmd, shell=shell, cwd=cwd, timeout=timeout, env=env,
+            cmd, shell=shell, cwd=cwd, timeout=timeout, env=env, encoding=encoding,
             interactive=interactive,
         )
     except (OSError, ValueError) as exc:
@@ -735,8 +856,27 @@ async def start(
 
 async def _reap(job: Job) -> None:
     """Wait for exit, finalize state/exit_code once readers have drained."""
-    rc = await job.proc.wait()
-    await asyncio.gather(*job._readers, return_exceptions=True)
+    # asyncio's Process.wait() may not resolve until redirected pipe transports
+    # reach EOF. A descendant can inherit those handles after this parent exits,
+    # so use the independently updated returncode to observe the parent first.
+    while job.proc.returncode is None:
+        await asyncio.sleep(0.01)
+    rc = job.proc.returncode
+    # Descendants may inherit pipe handles after the parent exits. Preserve bytes
+    # while they are arriving, but do not let idle inherited handles keep a
+    # completed job alive forever. The idle deadline resets after every write.
+    pending = set(job._readers)
+    previous_totals = (-1, -1)
+    idle_since = time.monotonic()
+    while pending and time.monotonic() - idle_since < 0.5:
+        _, pending = await asyncio.wait(pending, timeout=0.05)
+        totals = (job.stdout.total, job.stderr.total)
+        if totals != previous_totals:
+            previous_totals = totals
+            idle_since = time.monotonic()
+    for reader in pending:
+        reader.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
     if job._timeout_task:
         job._timeout_task.cancel()
     job.stdout.close()
@@ -758,7 +898,8 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
     stderr, stderr_cursor = job.stderr.read_incremental(since_err)
     timed_out = job.state == JobState.TIMEOUT
     return {
-        "ok": not timed_out,
+        "ok": job.state not in (JobState.TIMEOUT, JobState.KILLED)
+        and (job.exit_code is None or job.exit_code == 0),
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
@@ -767,10 +908,16 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
         "stderr": stderr,
         "stdout_cursor": stdout_cursor,
         "stderr_cursor": stderr_cursor,
+        "shell": job.shell,
+        "interpreter": job.interpreter,
+        "encoding": job.encoding,
+        "decode_errors": job.stdout.decode_errors or job.stderr.decode_errors,
         # Only present once the buffer actually overflowed and spilled; a job
         # that fit in the buffer has nothing more to offer than what's above.
         "stdout_full_output": job.stdout.spill_path,
         "stderr_full_output": job.stderr.spill_path,
+        "stdout_full_output_encoding": job.encoding if job.stdout.spill_path else None,
+        "stderr_full_output_encoding": job.encoding if job.stderr.spill_path else None,
         "error": "command timed out" if timed_out else None,
         "error_type": "timeout" if timed_out else None,
     }
@@ -807,7 +954,8 @@ async def poll(job_id: str) -> ToolResult:
         raise ValueError(f"no such job: {job_id}")
     timed_out = job.state == JobState.TIMEOUT
     data = {
-        "ok": not timed_out,
+        "ok": job.state not in (JobState.TIMEOUT, JobState.KILLED)
+        and (job.exit_code is None or job.exit_code == 0),
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
@@ -828,7 +976,7 @@ async def kill(job_id: str) -> ToolResult:
         raise ValueError(f"no such job: {job_id}")
     if job.proc.returncode is None:
         job.state = JobState.KILLED
-        _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+        await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
     data = {"job_id": job.job_id, "state": job.state}
     text = f"{data['job_id']}: [{data['state']}] · $ {job.cmd}"
     return ToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
@@ -854,13 +1002,24 @@ async def list_jobs() -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
 
 
-@mcp.tool(annotations={"openWorldHint": True})
+@mcp.tool(
+    annotations={"openWorldHint": True},
+    description=(
+        "Run a short command and wait for completion. This server already invokes the "
+        f"selected interpreter; use shell instead of an interpreter prefix. Current "
+        f"{('Windows' if IS_WINDOWS else 'non-Windows')} default: {_default_shell()}. "
+        "The outer interpreter is resolved from the server environment before env "
+        "overrides, so per-call PATH only affects commands inside the shell. encoding "
+        "overrides the shell-derived codec for native programs that emit another one."
+    ),
+)
 async def run(
     cmd: str,
-    shell: Optional[str] = None,
+    shell: Optional[Shell] = None,
     cwd: Optional[str] = None,
     timeout: float = 30.0,
-    env: Optional[dict[str, str]] = None,
+    env: Optional[dict[str, str | None]] = None,
+    encoding: Optional[str] = None,
 ) -> ToolResult:
     """Convenience: start a command and wait up to `timeout` for it to finish.
     For quick one-liners; long jobs should use start()/output() instead.
@@ -870,25 +1029,24 @@ async def run(
     pwsh.exe); choose the interpreter with `shell` = bash | pwsh | powershell | cmd (default:
     bash off Windows; on Windows pwsh if installed, else powershell). The server
     locates the binary. Run a script with the shell's call syntax, e.g.
-    `& ./Deploy.ps1`."""
+    `& ./Deploy.ps1`. `encoding` fixes stdout and stderr to one explicit codec
+    when the native producer does not emit the shell-derived default."""
     try:
         timeout = _validate_timeout(timeout, 30.0)
-        started = await _start(cmd, shell=shell, cwd=cwd, timeout=timeout, env=env)
+        started = await _start(
+            cmd, shell=shell, cwd=cwd, timeout=timeout, env=env, encoding=encoding
+        )
     except (OSError, ValueError) as exc:
         return _shell_failure(cmd, _start_failure_kind(exc), str(exc))
     job = JOBS[started["job_id"]]
-    # Wait on the process itself, not a poll loop. The watchdog fires at
-    # `timeout` and kills the tree; the margin here covers the kill landing.
+    # The reaper observes parent exit independently from inherited pipe handles,
+    # then drains those handles for a bounded idle period. The watchdog fires at
+    # `timeout`; the margin covers tree termination on a slow host.
     try:
-        await asyncio.wait_for(job.proc.wait(), timeout + 10.0)
+        assert job._reaper_task is not None
+        await asyncio.wait_for(asyncio.shield(job._reaper_task), timeout + 10.0)
     except asyncio.TimeoutError:
         pass
-    # Let the reaper/watchdog settle final state (drain readers, set exit_code)
-    # so the snapshot can't report "running" for a process that just ended.
-    for _ in range(100):
-        if job.state != JobState.RUNNING:
-            break
-        await asyncio.sleep(0.05)
     try:
         return _shell_result(cmd, _snapshot(job))
     except (UnicodeError, LookupError) as exc:
@@ -915,11 +1073,21 @@ async def send(job_id: str, text: str, eof: bool = False) -> ToolResult:
         data = {"ok": False, "job_id": job_id, "error": "job already exited"}
         return ToolResult(content=[TextContent(type="text", text=f"❌ {data['error']}")],
                           structured_content=data)
-    stdin.write(text.encode("utf-8"))
+    try:
+        encoded = text.encode(job.encoding)
+    except UnicodeError as exc:
+        error = f"text is not representable as {job.encoding}: {exc}"
+        data = {"ok": False, "job_id": job_id, "error": error,
+                "error_type": "encode", "encoding": job.encoding}
+        return ToolResult(
+            content=[TextContent(type="text", text=f"❌ {error}")],
+            structured_content=data,
+        )
+    stdin.write(encoded)
     await stdin.drain()
     if eof:
         stdin.close()
-    data = {"ok": True, "job_id": job_id, "sent_bytes": len(text.encode("utf-8")),
+    data = {"ok": True, "job_id": job_id, "sent_bytes": len(encoded),
             "eof": eof, "state": job.state}
     return ToolResult(
         content=[TextContent(type="text", text=f"{job_id}: sent {data['sent_bytes']} byte(s)"

@@ -15,7 +15,9 @@ running loop inside start()) stay alive for the duration of the test.
 import asyncio
 import os
 import shutil
+import subprocess
 import sys
+import time
 
 import pytest
 
@@ -83,25 +85,27 @@ def test_job_state_is_string_compatible_and_constrained():
 
 
 def test_build_argv_bash(monkeypatch):
-    monkeypatch.setenv("SHELL_MCP_BASH", "/opt/bash")
+    monkeypatch.setattr(server, "resolve_interpreter", lambda *_args: "/opt/bash")
     assert build_argv("echo hi", "bash") == ["/opt/bash", "-lc", "echo hi"]
 
 
 def test_build_argv_pwsh(monkeypatch):
-    monkeypatch.setenv("SHELL_MCP_PWSH", r"C:/PS/pwsh.exe")
+    monkeypatch.setattr(server, "resolve_interpreter", lambda *_args: r"C:/PS/pwsh.exe")
     assert build_argv("Get-ChildItem", "pwsh") == [
         r"C:/PS/pwsh.exe",
         "-NoProfile",
         "-Command",
-        server._POWERSHELL_UTF8_PREFIX + "Get-ChildItem",
+        server._powershell_command("Get-ChildItem"),
     ]
 
 
 def test_build_argv_windows_powershell_enables_utf8(monkeypatch):
-    monkeypatch.setenv("SHELL_MCP_POWERSHELL", r"C:/Windows/powershell.exe")
+    monkeypatch.setattr(
+        server, "resolve_interpreter", lambda *_args: r"C:/Windows/powershell.exe"
+    )
     argv = build_argv("Write-Output '🚀'", "powershell")
     assert argv[-1].startswith(server._POWERSHELL_UTF8_PREFIX)
-    assert argv[-1].endswith("Write-Output '🚀'")
+    assert argv[-1] == server._powershell_command("Write-Output '🚀'")
 
 
 def test_build_argv_unknown_shell_raises():
@@ -111,9 +115,15 @@ def test_build_argv_unknown_shell_raises():
 
 def test_resolve_interpreter_env_override_wins(monkeypatch):
     from shell_mcp.server import resolve_interpreter
-    monkeypatch.setenv("SHELL_MCP_PWSH", "/somewhere/pwsh")
-    # override is returned verbatim even if it isn't on PATH / disk
-    assert resolve_interpreter("pwsh") == "/somewhere/pwsh"
+    monkeypatch.setenv("SHELL_MCP_PWSH", PY)
+    assert resolve_interpreter("pwsh") == os.path.abspath(PY)
+
+
+def test_resolve_interpreter_stale_override_falls_back(monkeypatch):
+    from shell_mcp.server import resolve_interpreter
+    monkeypatch.setenv("SHELL_MCP_BASH", "/missing/stale/bash")
+    monkeypatch.setattr(server.shutil, "which", lambda _name: PY)
+    assert resolve_interpreter("bash") == PY
 
 
 def test_resolve_interpreter_falls_through_to_which(monkeypatch):
@@ -129,6 +139,7 @@ def test_resolve_interpreter_falls_through_to_which(monkeypatch):
 def test_default_shell_honors_override(monkeypatch):
     from shell_mcp.server import _default_shell
     monkeypatch.setenv("SHELL_MCP_DEFAULT_SHELL", "cmd")
+    monkeypatch.setattr(server, "resolve_interpreter", lambda *_args: "/cmd")
     assert _default_shell() == "cmd"
 
 
@@ -422,39 +433,189 @@ def test_run_captures_stderr():
     assert "err-here" in res["stderr"]
 
 
-@pytest.mark.skipif(not IS_WINDOWS, reason="Windows process-launch regression")
-def test_windows_nested_bare_pwsh_uses_resolved_interpreter_and_stays_piped(
-    tmp_path, monkeypatch
-):
-    """A redundant nested pwsh must use the resolved outer interpreter.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pwsh ./output.ps1",
+        "bash script.sh",
+        '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command hi',
+        "& 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -Command hi",
+    ],
+)
+def test_redundant_interpreter_is_rejected_before_spawn(command, monkeypatch):
+    called = False
 
-    Models should invoke the script directly, but commonly emit `pwsh ./file.ps1`.
-    Keep that working even when a GUI application's inherited PATH is stale.
-    """
-    pwsh = server.resolve_interpreter("pwsh")
-    if not pwsh:
-        pytest.skip("PowerShell 7 is unavailable")
-    monkeypatch.setenv("SHELL_MCP_PWSH", pwsh)
-    monkeypatch.setenv("PATH", "")
-    script = tmp_path / "output.ps1"
+    async def fail_if_called(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("spawn must not be reached")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_if_called)
+    result = asyncio.run(server.run(command, shell="bash"))
+    assert result.structured_content["ok"] is False
+    assert result.structured_content["error_type"] == "validation"
+    assert "already invokes" in result.structured_content["error"]
+    assert called is False
+
+
+def test_windows_environment_overlay_is_case_insensitive_and_can_remove():
+    result = server._child_environment(
+        r"C:\PowerShell\pwsh.exe",
+        {"path": r"C:\tools", "secret": None, "NEW": "yes"},
+        windows=True,
+        base={"Path": r"C:\base", "SECRET": "remove", "Keep": "value"},
+    )
+    assert [key for key in result if key.casefold() == "path"] == ["Path"]
+    assert result["Path"] == r"C:\tools"
+    assert not any(key.casefold() == "secret" for key in result)
+    assert result["NEW"] == "yes" and result["Keep"] == "value"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [(b"caf\xe9", "café"), (b"\x93hi\x94", "“hi”")]
+)
+def test_ring_buffer_fixed_cp1252_never_drops_bytes(raw, expected):
+    rb = RingBuffer(cap=10_000, codec="cp1252")
+    for byte in raw:
+        rb.write(bytes([byte]))
+    rb.close()
+    assert rb.text() == expected
+
+
+def test_ring_buffer_dbcs_poll_boundary_does_not_drop_character():
+    raw = "あ".encode("cp932")
+    rb = RingBuffer(cap=10_000, codec="cp932")
+    rb.write(raw[:1])
+    text, cursor = rb.read_incremental(0)
+    assert text == "" and cursor == 0
+    rb.write(raw[1:])
+    rb.close()
+    assert rb.read_incremental(cursor)[0] == "あ"
+
+
+def test_ring_buffer_malformed_leading_byte_is_never_silently_skipped():
+    rb = RingBuffer(cap=10_000, codec="utf-8")
+    rb.write(b"a")
+    _, cursor = rb.read_incremental(0)
+    rb.write(b"\x80b")
+    rb.close()
+    assert rb.read_incremental(cursor)[0] == "\ufffdb"
+    assert rb.decode_errors is True
+
+
+def test_ring_buffer_finalizes_character_split_by_truncation_gap():
+    rb = RingBuffer(cap=10, codec="utf-8")
+    rb.write(b"aaaa\xe2" + b"x" * 20)
+    text = rb.text()
+    assert text.startswith("aaaa\ufffd\n...[15 bytes truncated")
+    assert rb.decode_errors is True
+
+
+def test_explicit_job_encoding_overrides_shell_default():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    raw = "café".encode("cp1252")
+    code = f"import sys;sys.stdout.buffer.write(bytes.fromhex('{raw.hex()}'))"
+    result = asyncio.run(
+        server.run(f'"{PY}" -c "{code}"', shell=sh, encoding="cp1252")
+    ).structured_content
+    assert result["stdout"] == "café" and result["encoding"] == "cp1252"
+
+
+def test_invalid_explicit_job_encoding_is_validation_failure():
+    result = asyncio.run(server.run("echo hi", encoding="not-a-real-codec"))
+    assert result.structured_content["ok"] is False
+    assert result.structured_content["error_type"] == "validation"
+
+
+def test_nonzero_exit_is_not_ok():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    result = asyncio.run(server.run(f'"{PY}" -c "raise SystemExit(7)"', shell=sh))
+    assert result.structured_content["exit_code"] == 7
+    assert result.structured_content["ok"] is False
+
+
+def test_descendant_inheriting_pipes_cannot_hang_completed_parent(tmp_path):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    child_pid = tmp_path / "child.pid"
+    script = tmp_path / "inherited_handle.py"
     script.write_text(
-        '[Console]::Out.WriteLine("pwsh-stdout 🚀")\n'
-        '[Console]::Error.WriteLine("pwsh-stderr 🧪")\n',
+        "import pathlib, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n",
         encoding="utf-8",
     )
-    quoted_script = str(script).replace("'", "''")
 
     async def scenario():
-        command = f"pwsh '{quoted_script}'"
-        return await server.run(command, shell="pwsh", cwd=str(tmp_path), timeout=15)
+        started = time.monotonic()
+        result = await server.run(
+            f'"{PY}" "{script}" "{child_pid}"', shell=sh, timeout=10
+        )
+        return result.structured_content, time.monotonic() - started
+
+    result, elapsed = asyncio.run(scenario())
+    try:
+        pid = int(child_pid.read_text(encoding="utf-8"))
+        if IS_WINDOWS:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True
+            )
+        else:
+            os.kill(pid, 9)
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+    assert result["state"] == "exited" and result["exit_code"] == 0
+    assert elapsed < 3
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="Windows PowerShell Unicode integration")
+@pytest.mark.parametrize("shell", ["pwsh", "powershell"])
+def test_windows_powershell_variants_emit_utf8_unicode(shell):
+    if not server.resolve_interpreter(shell):
+        pytest.skip(f"{shell} is unavailable")
+    result = asyncio.run(
+        server.run("Write-Output 'Grüße 日本語 🚀'", shell=shell, timeout=15)
+    ).structured_content
+    assert result["ok"] is True and result["encoding"] == "utf-8"
+    assert "Grüße 日本語 🚀" in result["stdout"]
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="Windows cmd OEM integration")
+def test_windows_cmd_uses_one_oem_codec():
+    text = "Grüße café"
+    raw = text.encode(server._FALLBACK_ENCODING)
+    code = f"import sys;sys.stdout.buffer.write(bytes.fromhex('{raw.hex()}'))"
+    result = asyncio.run(
+        server.run(f'"{PY}" -c "{code}"', shell="cmd", timeout=15)
+    ).structured_content
+    assert result["encoding"] == server._FALLBACK_ENCODING
+    assert result["stdout"] == text
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="Windows PowerShell stdin integration")
+def test_windows_pwsh_interactive_utf8_input():
+    if not server.resolve_interpreter("pwsh"):
+        pytest.skip("pwsh is unavailable")
+
+    async def scenario():
+        started = (await server.start(
+            "$line=[Console]::In.ReadLine();[Console]::Out.Write($line)",
+            shell="pwsh", timeout=15, interactive=True,
+        )).structured_content
+        await server.send(started["job_id"], "Grüße 日本語 🚀\n", eof=True)
+        job = server.JOBS[started["job_id"]]
+        assert job._reaper_task is not None
+        await asyncio.wait_for(job._reaper_task, timeout=15)
+        return (await server.output(started["job_id"])).structured_content
 
     result = asyncio.run(scenario())
-    res = result.structured_content
-    assert res["state"] == "exited" and res["exit_code"] == 0
-    assert "pwsh-stdout 🚀" in res["stdout"]
-    assert "pwsh-stderr 🧪" in res["stderr"]
-    assert "🚀" in result.content[0].text
-    assert "🧪" in result.content[0].text
+    assert result["ok"] is True
+    assert result["stdout"] == "Grüße 日本語 🚀"
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell rendering regression")
@@ -511,7 +672,7 @@ def test_spawn_failure_is_a_structured_result(monkeypatch):
     assert res["error_type"] == "spawn"
 
 
-def test_output_decode_failure_is_a_structured_result(monkeypatch):
+def test_job_codec_is_fixed_when_global_override_changes(monkeypatch):
     sh = default_shell()
     if sh is None:
         pytest.skip("no usable shell on this host")
@@ -526,8 +687,9 @@ def test_output_decode_failure_is_a_structured_result(monkeypatch):
         return (await server.output(job_id)).structured_content
 
     res = asyncio.run(scenario())
-    assert res["ok"] is False
-    assert res["error_type"] == "decode"
+    assert res["ok"] is True
+    assert res["encoding"] == "utf-8"
+    assert "more" in res["stdout"]
 
 
 def test_kill_terminates_process_tree(tmp_path):

@@ -120,7 +120,15 @@ input |</p>
 <!-- END GENERATED COMPONENT INVENTORY -->
 
 <p><code>continue_mcp_common</code> supplies bounded configuration,
-workspace-relative path resolution, and consistent results. Each server
+workspace-relative path resolution, consistent results, and the shared
+byte/text contract. File reads, edits, and ripgrep byte records use one
+deterministic UTF-8/BOM → UTF-16 BOM → cp1252 → latin-1 policy; filename
+bytes remain governed by the operating-system filesystem codec. Shell
+streams instead select one explicit codec per job so polling boundaries
+cannot change their interpretation, including for multibyte Windows OEM
+codecs. Shell-derived codecs are defaults, not guesses that can identify
+every native producer; callers can override the codec and pass spill
+provenance through <code>fs.read(encoding=...)</code>. Each server
 remains a separate process.</p>
 <h2 id="trust-and-mutation">Trust and mutation</h2>
 <p><code>fs</code>, <code>search</code>, and <code>edit</code> apply
@@ -137,11 +145,12 @@ guarantee.</p>
 <h2 id="installation-and-packaging">Installation and packaging</h2>
 <p><code>servers.json</code> is the compact inventory and
 default-selection source. The installer renders all selected YAML first,
-stamps absolute uv/toolkit/workspace paths and <code>--no-sync</code>,
-refuses differing existing files, and performs one
-<code>uv sync --locked --project &lt;toolkit&gt;</code> unless skipped.
-<code>--check</code> compares exact rendered content and uses FastMCP
-<code>Client</code>/<code>StdioTransport</code> for a live
+stamps absolute uv/toolkit/workspace and detected-interpreter paths plus
+<code>--no-sync</code>, upgrades only marked or exactly recognized
+legacy generated files, refuses differing user-authored files, and
+performs one <code>uv sync --locked --project &lt;toolkit&gt;</code>
+unless skipped. <code>--check</code> compares exact rendered content and
+uses FastMCP <code>Client</code>/<code>StdioTransport</code> for a live
 handshake.</p>
 <p><code>scripts/sync_metadata.py --check</code> verifies generated
 packaging, inventory, and landing-page cards. Golden and FastMCP surface

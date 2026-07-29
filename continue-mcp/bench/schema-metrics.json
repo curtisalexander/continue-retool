@@ -11,32 +11,32 @@
       }
     },
     "fs": {
-      "estimated_tokens": 255,
+      "estimated_tokens": 304,
       "tool_count": 2,
       "tools": {
         "list": 110,
-        "read": 145
+        "read": 194
       }
     },
     "search": {
-      "estimated_tokens": 357,
+      "estimated_tokens": 409,
       "tool_count": 2,
       "tools": {
         "files": 140,
-        "grep": 217
+        "grep": 269
       }
     },
     "shell": {
-      "estimated_tokens": 937,
+      "estimated_tokens": 898,
       "tool_count": 7,
       "tools": {
         "kill": 51,
         "list_jobs": 38,
         "output": 130,
         "poll": 57,
-        "run": 249,
+        "run": 246,
         "send": 92,
-        "start": 320
+        "start": 284
       }
     },
     "sql": {

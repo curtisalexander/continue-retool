@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import sys
+from asyncio.subprocess import PIPE
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -74,9 +75,9 @@ async def _run_sqruff(subcmd: list[str], sql: str) -> tuple[int, str, str]:
         executable = sqruff_bin()
         proc = await asyncio.create_subprocess_exec(
             executable, *subcmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdin=PIPE,
+            stdout=PIPE,
+            stderr=PIPE,
         )
     except (OSError, RuntimeError) as exc:
         raise SubprocessFailure("spawn", str(exc)) from exc

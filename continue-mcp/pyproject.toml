@@ -30,12 +30,6 @@ dev = [
   "ty==0.0.1a16",
 ]
 
-[tool.ty.rules]
-# ty alpha cannot yet model platform-conditional stdlib attributes or
-# os.path's same-type overload reliably.
-unresolved-attribute = "ignore"
-invalid-return-type = "ignore"
-
 [project.optional-dependencies]
 test = ["pytest>=8"]
 rg = ["ripgrep-bin==15.2.0"]

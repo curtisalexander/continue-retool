@@ -51,6 +51,15 @@ def test_descriptions_present_and_within_budget():
         )
 
 
+def test_shell_schema_and_description_make_interpreter_selection_explicit():
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    for name in ("run", "start"):
+        shell_schema = tools[name].parameters["properties"]["shell"]["anyOf"][0]
+        assert shell_schema["enum"] == ["bash", "pwsh", "powershell", "cmd"]
+        assert "already invokes" in tools[name].description
+        assert "default:" in tools[name].description
+
+
 def test_every_tool_advertises_expected_authority():
     async def scenario():
         async with Client(mcp) as c:

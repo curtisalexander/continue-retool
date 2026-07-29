@@ -8,7 +8,7 @@ context window.
 
 | Tool | Replaces | Returns |
 |---|---|---|
-| `search.grep(pattern, …)` | Grep search | matching lines as `{file, line, column, text}` |
+| `search.grep(pattern, …)` | Grep search | matching lines as `{file, line, column, byte_column, text}` |
 | `search.files(glob, …)` | Glob search | file paths matching a glob |
 
 Both tools use **defense-in-depth workspace path scoping by default**: search
@@ -72,6 +72,7 @@ Now the agent reaches for `rg` instead of Continue's built-in search.
 search.grep({ "pattern": "TODO|FIXME", "glob": ["*.py"] })
 search.grep({ "pattern": "def \\w+", "path": "src", "max_results": 50 })
 search.grep({ "pattern": "start.*end", "multiline": true, "context": 2 })
+search.grep({ "pattern": "café", "path": "legacy.txt", "encoding": "windows-1252" })
 search.files({ "glob": ["*.ts", "!**/dist/**"] })
 ```
 
@@ -81,6 +82,15 @@ search.files({ "glob": ["*.ts", "!**/dist/**"] })
   searches are capped (`SEARCH_MCP_MAX_RESULTS`, default 1000) and flagged
   `truncated: true` so the model knows to narrow the query rather than assume it
   saw everything.
+- **Arbitrary path/content bytes are supported.** Ripgrep's JSON `text` and
+  base64 `bytes` variants are both decoded. Content uses the toolkit's shared
+  UTF-8/BOM, UTF-16 BOM, cp1252, then latin-1 policy; paths use the operating
+  system filesystem codec. `column` is a Unicode character position and
+  `byte_column` preserves ripgrep's original byte offset. File listing is
+  NUL-delimited, so legal Unix filenames containing newlines remain one path.
+  For non-ASCII patterns in a known legacy file, pass its reported encoding as
+  `encoding="windows-1252"`; ripgrep then transcodes before matching and the hit
+  reports `source_encoding`.
 - **Long lines can't crash or flood.** `rg --json` emits the *whole* matching
   line (and `--max-columns` is ignored in JSON mode), so a match in minified JS or
   a one-line lockfile once overran asyncio's stream buffer and crashed the tool.

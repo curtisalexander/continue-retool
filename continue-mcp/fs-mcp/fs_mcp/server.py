@@ -17,6 +17,7 @@ Run:  uv run fs-mcp
 from __future__ import annotations
 
 import codecs
+import io
 import os
 from typing import List, Optional
 
@@ -27,6 +28,7 @@ from continue_mcp_common.config import env_int as _env_int
 from continue_mcp_common.paths import jail_error
 from continue_mcp_common.paths import resolve_existing as _resolve_existing
 from continue_mcp_common.results import result as _result
+from continue_mcp_common.text import detect_reader
 
 mcp = FastMCP("fs")
 
@@ -74,6 +76,8 @@ def _is_binary(path: str) -> bool:
         return False
     if not chunk:
         return False  # empty file is a fine, if boring, text file
+    if chunk.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return False
     if b"\x00" in chunk:
         return True
     nontext = chunk.translate(None, delete=_TEXT_BYTES)
@@ -99,11 +103,18 @@ def _is_binary(path: str) -> bool:
 # MCP_JAIL_EXTRA roots. It is not a sandbox or a complete TOCTOU guarantee.
 # --- tools -----------------------------------------------------------------
 @mcp.tool(annotations={"readOnlyHint": True})
-async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> ToolResult:
+async def read(
+    path: str,
+    start_line: int = 1,
+    limit: Optional[int] = None,
+    encoding: Optional[str] = None,
+) -> ToolResult:
     """Read a file as numbered lines: "LINENO<TAB>text". start_line is 1-based;
     limit caps the line count (default 2000). Output is also capped at 50KB total,
     whichever limit hits first. When the result is truncated it tells you the
-    start_line to pass next; repeat until truncated is false to read the whole file."""
+    start_line to pass next; repeat until truncated is false to read the whole file.
+    Pass encoding for bytes with a known external codec, such as the encoding
+    reported next to a shell full-output spill path."""
     path = _resolve_existing(path)
     if err := jail_error(path):
         return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
@@ -122,17 +133,28 @@ async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> T
     start = max(1, start_line)
     stop = start + limit  # exclusive
 
-    # Stream line by line — a multi-GB log must never be slurped into memory
-    # to serve a 50-line window. Stop after one look-ahead line proves that a
-    # next page exists. An exact total is reported only when this read reaches
-    # EOF; counting the rest of a huge file would defeat bounded paging.
     numbered: List[str] = []
     observed_lines = 0
     budget = MAX_BYTES
     truncated_by: Optional[str] = None
     reached_eof = False
-    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-        for observed_lines, ln in enumerate(f, start=1):
+    # Detect with bounded memory, then stream only through the requested page.
+    # Legacy encoding detection may scan the file, but a multi-GB log is never
+    # retained merely to return a small page.
+    try:
+        with open(path, "rb") as raw:
+            decoded = detect_reader(raw, codec=encoding)
+    except (LookupError, UnicodeError) as exc:
+        error = f"could not decode {path}: {exc}"
+        return _result(
+            f"❌ {error}",
+            {"ok": False, "path": path, "error": error, "error_type": "decode"},
+        )
+    with open(path, "rb") as raw:
+        raw.seek(len(decoded.bom))
+        errors = "replace" if decoded.had_errors else "strict"
+        text = io.TextIOWrapper(raw, encoding=decoded.codec, errors=errors, newline=None)
+        for observed_lines, ln in enumerate(text, start=1):
             if observed_lines >= stop:
                 truncated_by = "lines"
                 break
@@ -167,6 +189,10 @@ async def read(path: str, start_line: int = 1, limit: Optional[int] = None) -> T
         "truncated": not reached_eof,
         "truncated_by": truncated_by if not reached_eof else None,
         "next_start_line": end + 1 if not reached_eof else None,
+        "encoding": decoded.codec,
+        "bom": decoded.bom.hex() if decoded.bom else None,
+        "had_errors": decoded.had_errors,
+        "decode_loss": decoded.loss,
     }
     total_label = str(total_lines) if reached_eof else f"at least {observed_lines}"
     summary = (f"{data['path']} · lines {data['start_line']}–{data['end_line']} "

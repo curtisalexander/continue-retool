@@ -18,12 +18,15 @@ Run:  uv run search-mcp
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import os
 import shutil
+from asyncio.subprocess import PIPE
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Optional, TypeVar
+from typing import Literal, Optional, TypeVar
 
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
@@ -33,6 +36,7 @@ from continue_mcp_common.config import env_int as _env_int
 from continue_mcp_common.paths import jail_error
 from continue_mcp_common.paths import resolve_path as _resolve
 from continue_mcp_common.results import result as _result
+from continue_mcp_common.text import decode_content, decode_filename
 
 mcp = FastMCP("search")
 
@@ -54,6 +58,7 @@ MAX_RECORD_BYTES = _env_int(
 MAX_ERROR_BYTES = 64 * 1024
 
 T = TypeVar("T")
+SearchEncoding = Literal["utf-8", "utf-16le", "utf-16be", "windows-1252"]
 
 
 # --- defense-in-depth workspace path scoping (default ON) -------------------
@@ -93,6 +98,7 @@ def build_grep_args(
     context: int = 0,
     hidden: bool = False,
     no_ignore: bool = False,
+    encoding: Optional[SearchEncoding] = None,
 ) -> list[str]:
     args = ["--json"]
     if ignore_case:
@@ -105,6 +111,8 @@ def build_grep_args(
         args.append("--hidden")
     if no_ignore:
         args.append("--no-ignore")
+    if encoding:
+        args += ["--encoding", encoding]
     for g in glob or []:
         args += ["-g", g]
     args += ["--", pattern, path]
@@ -117,7 +125,7 @@ def build_files_args(
     hidden: bool = False,
     no_ignore: bool = False,
 ) -> list[str]:
-    args = ["--files"]
+    args = ["--files", "--null"]
     if hidden:
         args.append("--hidden")
     if no_ignore:
@@ -150,29 +158,72 @@ async def _collect_json(
             flags["decode_error"] = True
             continue
         except json.JSONDecodeError:
+            flags["decode_error"] = True
             continue
         t = obj.get("type")
         if t not in ("match", "context"):
             continue
-        d = obj["data"]
-        text, clipped = _clip(d["lines"]["text"].rstrip("\n"))
+        try:
+            d = obj["data"]
+            line_bytes = _json_data_bytes(d["lines"])
+            path_value = _json_data_value(d["path"])
+            decoded = decode_content(line_bytes)
+            text, clipped = _clip(decoded.text.rstrip("\r\n"))
+        except (KeyError, TypeError, ValueError, binascii.Error):
+            flags["decode_error"] = True
+            continue
         if clipped:
             flags["line_clipped"] = True
         row = {
-            "file": d["path"]["text"],
+            "file": decode_filename(path_value),
             "line": d.get("line_number"),
             "text": text,
             "kind": t,
         }
+        if decoded.codec != "utf-8" or decoded.had_errors or decoded.loss:
+            row["encoding"] = decoded.codec
+            row["decode_loss"] = decoded.loss
+        if flags.get("source_encoding"):
+            row["source_encoding"] = flags["source_encoding"]
         if t == "match":
             subs = d.get("submatches") or []
             if subs:
-                row["column"] = subs[0]["start"] + 1
+                try:
+                    byte_offset = int(subs[0]["start"])
+                    if byte_offset < 0 or byte_offset > len(line_bytes):
+                        raise ValueError("invalid submatch byte offset")
+                    prefix = line_bytes[:byte_offset]
+                    # Use the complete-content policy independently on the exact
+                    # raw byte prefix. Character count, unlike byte count, is
+                    # encoding-dependent.
+                    char_column = len(decode_content(prefix).text) + 1
+                    row["byte_column"] = byte_offset + 1
+                    row["column"] = char_column
+                except (KeyError, TypeError, ValueError):
+                    flags["decode_error"] = True
             matches += 1
         out.append(row)
         if matches >= max_results:
             return True
     return False
+
+
+def _json_data_value(value: object) -> bytes | str:
+    """Read ripgrep's JSON Data union without assuming either representation."""
+    if not isinstance(value, dict):
+        raise TypeError("ripgrep Data must be an object")
+    text = value.get("text")
+    if isinstance(text, str):
+        return text
+    encoded = value.get("bytes")
+    if isinstance(encoded, str):
+        return base64.b64decode(encoded, validate=True)
+    raise ValueError("ripgrep Data has neither text nor bytes")
+
+
+def _json_data_bytes(value: object) -> bytes:
+    data = _json_data_value(value)
+    return data.encode("utf-8") if isinstance(data, str) else data
 
 
 async def _collect_stderr(stream: asyncio.StreamReader) -> tuple[str, bool]:
@@ -225,8 +276,8 @@ async def _run_process(
     kwargs = {"limit": limit} if limit is not None else {}
     proc = await asyncio.create_subprocess_exec(
         rg_bin(), *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=PIPE,
+        stderr=PIPE,
         **kwargs,
     )
     assert proc.stdout is not None and proc.stderr is not None
@@ -238,7 +289,7 @@ async def _run_process(
         value = await asyncio.wait_for(collector(proc.stdout), timeout)
     except asyncio.TimeoutError:
         timed_out = True
-    except ValueError as exc:
+    except Exception as exc:
         collector_error = exc
     finally:
         # EOF normally means rg has exited; let asyncio observe its real status
@@ -252,17 +303,27 @@ async def _run_process(
     return _ProcessRun(value, proc.returncode, stderr, timed_out, collector_error)
 
 
-async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict:
+async def _run_capped(
+    args: list[str], max_results: int, timeout: float,
+    source_encoding: Optional[SearchEncoding] = None,
+) -> dict:
     out: list = []
-    flags: dict = {}
+    flags: dict = {"source_encoding": source_encoding} if source_encoding else {}
     run = await _run_process(
         args, timeout,
         lambda stdout: _collect_json(stdout, out, max_results, flags),
         limit=MAX_RECORD_BYTES,
     )
+    return _capped_result(run, out, flags, timeout)
+
+
+def _capped_result(
+    run: _ProcessRun, out: list, flags: dict, timeout: float
+) -> dict:
     timed_out = run.timed_out
     oversize = isinstance(run.collector_error, ValueError)
-    truncated = bool(run.value) or oversize
+    collector_failed = run.collector_error is not None
+    truncated = bool(run.value) or collector_failed or bool(flags.get("decode_error"))
     # rg exit codes: 0 = matches, 1 = none, 2 = real error.
     error = None
     error_type = None
@@ -274,11 +335,14 @@ async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict
             "Refine the pattern or use the shell tool."
         )
         error_type = "decode"
+    elif run.collector_error is not None:
+        error = f"could not parse ripgrep output; results are partial: {run.collector_error}"
+        error_type = "decode"
     elif run.returncode == 2:
         error = run.stderr or "ripgrep exited with code 2"
         error_type = "process"
     elif flags.get("decode_error"):
-        error = "ripgrep emitted output that was not valid UTF-8; results are partial"
+        error = "could not decode one or more ripgrep records; results are partial"
         error_type = "decode"
     elif timed_out:
         error = f"ripgrep timed out after {timeout}s; results are partial"
@@ -298,22 +362,35 @@ async def _run_capped(args: list[str], max_results: int, timeout: float) -> dict
 async def _run_files(args: list[str], cap: int, timeout: float) -> dict:
     paths: list[str] = []
     async def _collect_files(stdout: asyncio.StreamReader) -> bool:
-        async for raw in stdout:
-            paths.append(raw.decode("utf-8", "replace").rstrip("\r\n"))
+        pending = bytearray()
+        while chunk := await stdout.read(8192):
+            pending.extend(chunk)
+            while (end := pending.find(0)) >= 0:
+                paths.append(decode_filename(bytes(pending[:end])))
+                del pending[: end + 1]
+                if len(paths) >= cap:
+                    return True
+            if len(pending) > MAX_RECORD_BYTES:
+                raise ValueError("a file path exceeded the record limit")
+        # Defensive support for producers that omit the final delimiter.
+        if pending:
+            paths.append(decode_filename(bytes(pending)))
             if len(paths) >= cap:
                 return True
         return False
 
     run = await _run_process(args, timeout, _collect_files)
-    if run.collector_error is not None:
-        raise run.collector_error
-    truncated = bool(run.value)
+    collector_error = run.collector_error
+    truncated = bool(run.value) or collector_error is not None
     timed_out = run.timed_out
     error = (
         run.stderr or "ripgrep exited with code 2"
     ) if run.returncode == 2 else None
     error_type = "process" if error else None
-    if timed_out:
+    if collector_error is not None:
+        error = f"could not decode a file record; results are partial: {collector_error}"
+        error_type = "decode"
+    elif timed_out:
         error = f"ripgrep timed out after {timeout}s; results are partial"
         error_type = "timeout"
     return {
@@ -355,11 +432,13 @@ async def grep(
     hidden: bool = False,
     no_ignore: bool = False,
     max_results: int = 200,
+    encoding: Optional[SearchEncoding] = None,
 ) -> ToolResult:
     """Search file contents with ripgrep (regex, gitignore-aware). Returns matching
     lines as {file, line, column, text}; capped at max_results and flagged truncated
     if the cap is hit. Long matching lines are clipped to 500 chars (line_clipped
-    flags it). Use `glob` (e.g. ['*.py']) to scope by file type."""
+    flags it). Use `glob` (e.g. ['*.py']) to scope by file type. For a known
+    legacy file, set encoding='windows-1252' so non-ASCII patterns match."""
     path = _resolve(path)
     if err := jail_error(path):
         return _result(f"❌ {err}",
@@ -367,10 +446,15 @@ async def grep(
                         "line_clipped": False, "timed_out": False, "error": err})
     cap = max(1, min(max_results, MAX_RESULTS_CAP))
     args = build_grep_args(
-        pattern, path, ignore_case, glob, multiline, context, hidden, no_ignore
+        pattern, path, ignore_case, glob, multiline, context, hidden, no_ignore,
+        encoding,
     )
     try:
-        data = await _run_capped(args, cap, DEFAULT_TIMEOUT)
+        # Ripgrep transcodes an explicit source encoding to UTF-8 JSON. Preserve
+        # that provenance even though the returned line bytes are now UTF-8.
+        data = await _run_capped(
+            args, cap, DEFAULT_TIMEOUT, source_encoding=encoding
+        )
     except (OSError, RuntimeError) as exc:
         data = _subprocess_failure("spawn", str(exc), files=False)
     n = data["count"]

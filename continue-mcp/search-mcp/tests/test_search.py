@@ -6,6 +6,9 @@ and are skipped if ripgrep isn't installed (see README: a system rg, or
 `uv tool install ripgrep-bin`).
 """
 import asyncio
+import base64
+import json
+import os
 import shutil
 import sys
 
@@ -48,6 +51,11 @@ def test_grep_args_flags_and_globs():
     assert args[gi[0] + 1] == "*.py"
 
 
+def test_grep_args_explicit_legacy_encoding():
+    args = build_grep_args("café", encoding="windows-1252")
+    assert args[args.index("--encoding") + 1] == "windows-1252"
+
+
 def test_grep_args_multiline_and_context():
     args = build_grep_args("a.*b", multiline=True, context=3)
     assert "--multiline" in args and "--multiline-dotall" in args
@@ -57,6 +65,7 @@ def test_grep_args_multiline_and_context():
 def test_files_args_globs():
     args = build_files_args(glob=["*.ts"], path="app")
     assert args[0] == "--files"
+    assert "--null" in args
     assert "-g" in args and "*.ts" in args
     assert args[-1] == "app"
 
@@ -67,7 +76,7 @@ def test_file_listing_drains_large_stderr_concurrently(tmp_path, monkeypatch):
         "import sys\n"
         "sys.stderr.write('e' * 1000000)\n"
         "sys.stderr.flush()\n"
-        "sys.stdout.buffer.write(b'visible.py\\r\\n')\n",
+        "sys.stdout.buffer.write(b'visible.py\\0')\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)
@@ -75,6 +84,78 @@ def test_file_listing_drains_large_stderr_concurrently(tmp_path, monkeypatch):
     assert data["files"] == ["visible.py"]
     assert data["error"] is None
     assert data["timed_out"] is False
+
+
+async def _collect_payload(data: bytes):
+    reader = asyncio.StreamReader()
+    reader.feed_data(data)
+    reader.feed_eof()
+    out, flags = [], {}
+    await server._collect_json(reader, out, 10, flags)
+    return out, flags
+
+
+def test_json_data_text_and_cp1252_bytes_with_character_column():
+    raw_line = "é “hit”\n".encode("cp1252")
+    records = [
+        {"type": "context", "data": {"path": {"text": "plain.txt"},
+         "lines": {"text": "context\n"}, "line_number": 1}},
+        {"type": "match", "data": {
+            "path": {"bytes": base64.b64encode(b"caf\xe9.txt").decode()},
+            "lines": {"bytes": base64.b64encode(raw_line).decode()},
+            "line_number": 2, "submatches": [{"start": 2, "end": 5}] }},
+    ]
+    payload = b"".join(json.dumps(record).encode() + b"\n" for record in records)
+    out, flags = asyncio.run(_collect_payload(payload))
+    assert out[0]["text"] == "context"
+    hit = out[1]
+    assert hit["text"] == "é “hit”"
+    assert hit["encoding"] == "cp1252" and hit["decode_loss"] is False
+    assert hit["byte_column"] == 3 and hit["column"] == 3
+    assert hit["file"] == os.fsdecode(b"caf\xe9.txt")
+
+
+def test_json_multibyte_byte_and_character_columns_differ():
+    line = "éhit\n".encode()
+    record = {"type": "match", "data": {"path": {"text": "x"},
+        "lines": {"bytes": base64.b64encode(line).decode()}, "line_number": 1,
+        "submatches": [{"start": 2, "end": 5}]}}
+    out, flags = asyncio.run(_collect_payload(json.dumps(record).encode() + b"\n"))
+    assert out[0]["byte_column"] == 3
+    assert out[0]["column"] == 2
+
+
+def test_malformed_base64_is_structured_partial_failure(tmp_path, monkeypatch):
+    script = tmp_path / "bad_rg.py"
+    record = {"type": "match", "data": {"path": {"text": "x"},
+        "lines": {"bytes": "%%%"}, "line_number": 1, "submatches": []}}
+    script.write_text("import sys\nsys.stdout.write(" + repr(json.dumps(record) + "\n") + ")\n")
+    monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)
+    data = asyncio.run(server._run_capped([str(script)], 10, 2))
+    assert data["ok"] is False and data["error_type"] == "decode"
+    assert data["matches"] == []
+    assert data["truncated"] is True
+
+
+def test_malformed_json_is_structured_partial_failure(tmp_path, monkeypatch):
+    script = tmp_path / "bad_json_rg.py"
+    script.write_text("print('{not json')\n", encoding="utf-8")
+    monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)
+    data = asyncio.run(server._run_capped([str(script)], 10, 2))
+    assert data["ok"] is False and data["error_type"] == "decode"
+    assert data["truncated"] is True
+
+
+def test_files_handles_split_nuls_and_unterminated_record(tmp_path, monkeypatch):
+    script = tmp_path / "paths.py"
+    script.write_text(
+        "import sys,time\n"
+        "for x in (b'one\\0two', b'\\nname\\0last'):\n"
+        " sys.stdout.buffer.write(x); sys.stdout.buffer.flush(); time.sleep(.01)\n"
+    )
+    monkeypatch.setattr(server, "rg_bin", lambda: sys.executable)
+    data = asyncio.run(server._run_files([str(script)], 10, 2))
+    assert data["files"] == ["one", "two\nname", "last"]
 
 
 def test_file_listing_reports_ripgrep_exit_two(tmp_path, monkeypatch):
@@ -155,6 +236,16 @@ def test_files_lists_by_glob(tmp_path):
     res = asyncio.run(server.files(glob=["*.py"], path=str(tmp_path)))
     assert res.structured_content["count"] == 2
     assert all(p.endswith(".py") for p in res.structured_content["files"])
+
+
+@needs_rg
+@pytest.mark.skipif(os.name == "nt", reason="newline filename is a Unix behavior")
+def test_files_preserves_newline_in_unix_filename(tmp_path):
+    filename = "line\nbreak.txt"
+    (tmp_path / filename).write_text("")
+    data = asyncio.run(server.files(path=str(tmp_path))).structured_content
+    assert data["count"] == 1
+    assert data["files"][0].endswith(filename)
 
 
 @needs_rg

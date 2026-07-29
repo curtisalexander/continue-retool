@@ -31,6 +31,7 @@ from continue_mcp_common.paths import jail_error
 from continue_mcp_common.paths import resolve_existing as _resolve_existing
 from continue_mcp_common.paths import resolve_path as _resolve
 from continue_mcp_common.results import result as _shared_result
+from continue_mcp_common.text import DecodedText, decode_content, encode_replacement
 
 from .matcher import EditError, find_and_replace
 
@@ -80,7 +81,7 @@ def _digest(raw: bytes) -> bytes:
     return hashlib.blake2b(raw, digest_size=16).digest()
 
 
-def _read(path: str) -> tuple[str, str, FileVersion]:
+def _read(path: str) -> tuple[DecodedText, FileVersion]:
     """Returns (content, encoding, version).
 
     Concurrency note: the tools below do a synchronous read-modify-write —
@@ -106,12 +107,7 @@ def _read(path: str) -> tuple[str, str, FileVersion]:
         stat_key=_stat_key(after),
         digest=_digest(raw) if len(raw) <= CONFLICT_HASH_MAX_BYTES else None,
     )
-    for enc in ("utf-8", "cp1252", "latin-1"):
-        try:
-            return raw.decode(enc), enc, version
-        except UnicodeDecodeError:
-            continue
-    raise AssertionError("unreachable: latin-1 decodes any byte string")
+    return decode_content(raw), version
 
 
 def _sync_parent(path: str) -> None:
@@ -153,7 +149,7 @@ def _verify_unchanged(path: str, expected: FileVersion) -> None:
 def _write(
     path: str,
     content: str,
-    encoding: str = "utf-8",
+    decoded: DecodedText | None = None,
     expected_version: FileVersion | None = None,
     no_replace: bool = False,
 ) -> None:
@@ -163,7 +159,11 @@ def _write(
     os.replace(). Resolve the final symlink so editing a safe in-workspace link
     updates its target rather than replacing the link itself.
     """
-    payload = content.encode(encoding)  # fail before touching the destination
+    payload = (
+        encode_replacement(decoded, content)
+        if decoded is not None
+        else content.encode("utf-8")
+    )  # fail before touching the destination
     target = os.path.realpath(path)
     if error := jail_error(target):
         raise PermissionError(error)
@@ -242,8 +242,9 @@ async def edit(
         return _result(f"❌ file not found: {path}",
                        {"ok": False, "path": path, "error": f"file not found: {path}"})
     try:
-        before, encoding, version = _read(path)
-    except (OSError, FileConflictError) as e:
+        decoded, version = _read(path)
+        before = decoded.text
+    except (OSError, UnicodeError, FileConflictError) as e:
         return _write_error(path, e)
     try:
         after, strategy, count = find_and_replace(before, old_string, new_string, replace_all)
@@ -251,7 +252,7 @@ async def edit(
         return _result(f"❌ edit failed: {e}", {"ok": False, "path": path, "error": str(e)})
     if not dry_run:
         try:
-            _write(path, after, encoding, expected_version=version)
+            _write(path, after, decoded, expected_version=version)
         except (OSError, UnicodeError, FileConflictError) as e:
             return _write_error(path, e)
     diff = _preview(before, after, path)
@@ -260,7 +261,10 @@ async def edit(
         "path": path,
         "strategy": strategy,          # "exact" or "fuzzy"
         "replacements": count,
-        "encoding": encoding,
+        "encoding": decoded.codec,
+        "bom": decoded.bom.hex() if decoded.bom else None,
+        "had_errors": decoded.had_errors,
+        "decode_loss": decoded.loss,
         "dry_run": dry_run,
         "diff": diff,
     }

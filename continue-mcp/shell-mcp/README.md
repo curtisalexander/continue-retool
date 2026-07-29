@@ -10,8 +10,8 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
 
 | Tool | What it does |
 |---|---|
-| `shell.run(cmd, shell?, cwd?, timeout?, env?)` | Start + wait (default 30s); for quick one-liners |
-| `shell.start(cmd, shell?, cwd?, timeout?, env?, interactive?)` | Launch in the background, returns a `job_id` instantly |
+| `shell.run(cmd, shell?, cwd?, timeout?, env?, encoding?)` | Start + wait (default 30s); for quick one-liners |
+| `shell.start(cmd, shell?, cwd?, timeout?, env?, encoding?, interactive?)` | Launch in the background, returns a `job_id` instantly |
 | `shell.output(job_id, since_stdout?, since_stderr?, tail?)` | Incremental output via stable byte cursors; `tail=N` returns just the last N lines |
 | `shell.poll(job_id)` | Lightweight state/exit-code/runtime check (read-only) |
 | `shell.send(job_id, text, eof?)` | Write to an `interactive=true` job's stdin (prompts, REPLs) |
@@ -38,21 +38,33 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
   tools can open it), and the `...[N bytes truncated — full output: …]...` marker
   names the file. A job that fits in the buffer never touches disk.
   `SHELL_MCP_SPILL=0` disables spilling; `SHELL_MCP_SPILL_DIR` relocates it.
-- **Right encoding per platform.** PowerShell starts with UTF-8 console and
-  pipeline encodings so characters such as emoji are preserved before capture.
-  Output is decoded as UTF-8 when valid, otherwise with the Windows OEM code
-  page for legacy commands. ANSI styling is disabled because MCP responses are
-  text rather than terminal emulators. Force decoding with `SHELL_MCP_ENCODING`.
+- **One encoding per job.** PowerShell starts with UTF-8 console and pipeline
+  defaults so PowerShell text and cooperating programs preserve emoji before
+  capture. Bash/PowerShell default to UTF-8; `cmd` defaults to the Windows OEM
+  code page. Native programs can emit ANSI, OEM, UTF-8, or tool-specific bytes,
+  so `encoding` selects the producer's actual codec per call and
+  `SHELL_MCP_ENCODING` changes the server-wide default. The codec is selected
+  once and reported with decode-loss metadata, so polling boundaries cannot
+  change the interpretation or silently discard multibyte legacy characters.
+  Raw spill paths return a matching `*_full_output_encoding`; pass it to
+  `fs.read(encoding=...)`. ANSI styling is disabled because MCP responses are
+  text rather than terminal emulators.
 - **Interpreter resolution.** `shell = bash | pwsh | powershell | cmd` is
   resolved by the server (installer-stamped `SHELL_MCP_<SHELL>` env → PATH →
-  known install locations) so a stale GUI PATH can't break it. On Windows the
-  resolved interpreter's directory is also exposed to commands inside the shell,
-  making a redundant nested `pwsh` work without `where pwsh`. The Windows default
-  is pwsh-if-installed, else powershell.
+  known install locations) so a stale GUI PATH can't break it. The model-facing
+  schema is an enum and names the actual platform default. A redundant nested
+  `pwsh`, `powershell`, `bash`, or `cmd` is rejected with an actionable error:
+  the tool already invokes the interpreter. The Windows default is
+  pwsh-if-installed, else powershell.
 - **stdin is never the transport.** Children get `DEVNULL` (or a pipe with
   `interactive=true`) — a child that reads stdin can't eat MCP protocol bytes.
-- **Workspace-relative.** `cwd` defaults to `MCP_WORKSPACE`; relative `cwd`
-  resolves against it. `env` overlays the server's environment per call.
+- **Workspace-relative and deterministic environment.** `cwd` defaults to
+  `MCP_WORKSPACE`; relative `cwd` resolves against it. `env` overlays the copied
+  server environment per call; a null value removes a variable. Windows names
+  are merged case-insensitively, and no per-call value leaks into later jobs.
+- **Bounded pipe completion.** Output continues draining after the parent shell
+  exits while bytes are arriving, but an idle descendant-held pipe cannot keep
+  the MCP job alive forever.
 - **Bounded registry.** Finished jobs beyond `SHELL_MCP_MAX_FINISHED`
   (default 20) are pruned, oldest first — a week-long session can't leak
   buffers or spill logs. Spill logs remain available while their jobs are

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+uv_version="0.11.21"
+pandoc_version="3.10"
+
+echo "[setup] ensuring uv ${uv_version}"
+if ! command -v uv >/dev/null 2>&1 || [[ "$(uv --version | awk '{print $2}')" != "$uv_version" ]]; then
+  curl -LsSf "https://astral.sh/uv/${uv_version}/install.sh" | sh
+fi
+export PATH="$HOME/.local/bin:$PATH"
+
+echo "[setup] syncing the locked Python environment"
+uv sync --project "$repo_root/continue-mcp" --frozen --extra test --group dev
+
+echo "[setup] ensuring the pinned ripgrep binary"
+if ! command -v rg >/dev/null 2>&1; then
+  uv tool install "ripgrep-bin==15.2.0"
+fi
+
+echo "[setup] ensuring pandoc ${pandoc_version} for deterministic docs"
+if ! command -v pandoc >/dev/null 2>&1 || [[ "$(pandoc --version | awk 'NR==1 {print $2}')" != "$pandoc_version" ]]; then
+  archive="${TMPDIR:-/tmp}/pandoc-${pandoc_version}-amd64.deb"
+  install_root="$HOME/.local/opt/pandoc-${pandoc_version}"
+  curl -LsSf -o "$archive" \
+    "https://github.com/jgm/pandoc/releases/download/${pandoc_version}/pandoc-${pandoc_version}-1-amd64.deb"
+  rm -rf "$install_root"
+  mkdir -p "$install_root"
+  dpkg-deb -x "$archive" "$install_root"
+  ln -sfn "$install_root/usr/bin/pandoc" "$HOME/.local/bin/pandoc"
+  rm -f "$archive"
+fi
+
+echo "[setup] verifying tools from a clean login shell"
+env -i HOME="$HOME" PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin" \
+  /bin/bash -lc 'command -v uv >/dev/null && command -v rg >/dev/null && command -v pandoc >/dev/null'
+
+echo "[setup] complete"

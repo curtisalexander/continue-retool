@@ -22,17 +22,21 @@ uv run --project . --no-sync python install-workspace.py /path/to/project --chec
 ```
 
 `--only` conflicts with `--with-sql`. Installation runs one locked root sync,
-then writes only missing YAML files; identical files are unchanged and differing
-files are refused. YAML stamps absolute uv, toolkit, and workspace paths and
-`--no-sync`. Check mode compares exact current rendering and performs a real
+then creates or upgrades installer-owned YAML files; identical files are unchanged
+and differing user-authored files are refused. A versioned ownership marker makes
+that distinction explicit, with exact recognition for legacy unmarked generated
+files. YAML stamps absolute uv, toolkit, workspace, and detected shell-interpreter
+paths plus `--no-sync`. Check mode compares exact current rendering and performs a real
 FastMCP stdio handshake. Invoking check through the synced toolkit environment
 as shown above ensures its FastMCP import is available; import failures are also
 reported as a clean installer failure. The optional `rules/rule-rule.md` guidance is not
 installed automatically.
 
-Shell interpreters resolve at runtime. Override with `SHELL_MCP_BASH`,
-`SHELL_MCP_PWSH`, `SHELL_MCP_POWERSHELL`, `SHELL_MCP_CMD`, and
-`SHELL_MCP_DEFAULT_SHELL` where GUI PATH differs.
+The installer detects and stamps available shell interpreters so a GUI's stale
+PATH is not authoritative. Runtime resolution validates those paths and falls
+back to PATH/standard locations. Override detection with `SHELL_MCP_BASH`,
+`SHELL_MCP_PWSH`, `SHELL_MCP_POWERSHELL`, or `SHELL_MCP_CMD`; the stamped
+`SHELL_MCP_DEFAULT_SHELL` is a shell name (`bash`, `pwsh`, `powershell`, or `cmd`).
 
 ## Development
 
