@@ -68,4 +68,4 @@ model-visible display. Check an item only after its focused tests pass.
 - [x] Add fixtures covering cp1252, UTF-8 BOM, UTF-16, emoji, CJK, combining characters, and mixed line endings across the tool suites.
 - [x] Update architecture and tool documentation with the final encoding/environment contracts.
 - [x] Run CI lint/type checks, all server and installer tests, metadata/docs checks, and build/package smoke tests available in the orb.
-- [ ] Confirm the Windows-only tests on the `windows-latest` CI runner; this Linux orb cannot execute PowerShell 5.1 or `cmd.exe`.
+- [x] Confirm the Windows-only tests on the `windows-latest` CI runner.
