@@ -14,6 +14,7 @@ running loop inside start()) stay alive for the duration of the test.
 """
 import asyncio
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -177,7 +178,7 @@ def test_ring_buffer_spill_write_error_preserves_capped_drain(tmp_path, monkeypa
             raise OSError(28, "No space left on device")
         def close(self):
             pass
-    monkeypatch.setattr("builtins.open", lambda *_a, **_k: BrokenSink())
+    monkeypatch.setattr(rb, "_spill_file", BrokenSink())
     rb.write(b"x" * 500)
     rb.write(b"y" * 500)
     rb.close()
@@ -443,14 +444,14 @@ def test_run_env_overlay():
     assert "overlay-42" in res["stdout"]
 
 
-def test_interactive_send_reaches_stdin():
-    sh = default_shell()
-    if sh is None:
-        pytest.skip("no usable shell on this host")
+def test_interactive_send_reaches_stdin(shell_case, tmp_path):
+    sh = shell_case.name
+    script = tmp_path / "interactive input.py"
+    script.write_text("print('got:' + input())\n", encoding="utf-8")
 
     async def scenario():
         started = (await server.start(
-            f'"{PY}" -c "print(\'got:\' + input())"',
+            shell_case.invoke(PY, script),
             shell=sh, timeout=15, interactive=True,
         )).structured_content
         jid = started["job_id"]
@@ -533,13 +534,13 @@ def test_output_tail_mode():
 
 
 # --- subprocess behavior ---------------------------------------------------
-def test_run_captures_stdout_and_exit_code():
-    sh = default_shell()
-    if sh is None:
-        pytest.skip("no usable shell on this host")
+def test_run_captures_stdout_and_exit_code(shell_case, tmp_path):
+    sh = shell_case.name
+    script = tmp_path / "capture.py"
+    script.write_text("print('hello-out')\n", encoding="utf-8")
 
     async def scenario():
-        return (await server.run(f'"{PY}" -c "print(\'hello-out\')"', shell=sh, timeout=15)).structured_content
+        return (await server.run(shell_case.invoke(PY, script), shell=sh, timeout=15)).structured_content
 
     res = asyncio.run(scenario())
     assert res["exit_code"] == 0
@@ -665,6 +666,84 @@ def test_nonzero_exit_is_not_ok():
     assert result.structured_content["ok"] is False
 
 
+def test_shell_specific_python_quoting_handles_spaces_and_unicode(shell_case, tmp_path):
+    script = tmp_path / "space 日本語 quote's script.py"
+    script.write_text("import sys\nprint(sys.argv[1])\n", encoding="utf-8")
+    result = asyncio.run(server.run(
+        shell_case.invoke(PY, script, "Grüße 日本語 🚀 quote's value"),
+        shell=shell_case.name, timeout=15,
+        env={"PYTHONIOENCODING": "utf-8"}, encoding="utf-8",
+    )).structured_content
+    assert result["exit_code"] == 0
+    assert result["stdout"].strip() == "Grüße 日本語 🚀 quote's value"
+
+
+@pytest.mark.parametrize(
+    ("statement", "exit_code", "stream", "text"),
+    [
+        ("Write-Output 'success'", 0, "stdout", "success"),
+        ("try { throw 'handled' } catch { Write-Output 'recovered' }", 0, "stdout", "recovered"),
+        ("throw 'thrown-error'", 1, "stderr", "thrown-error"),
+        ("Write-Error 'written-error'", 1, "stderr", "written-error"),
+        ("exit 7", 7, "stdout", ""),
+    ],
+)
+def test_powershell_exit_semantics(shell_case, statement, exit_code, stream, text):
+    if shell_case.name not in ("pwsh", "powershell"):
+        pytest.skip("PowerShell-only syntax")
+    result = asyncio.run(server.run(statement, shell=shell_case.name, timeout=15)).structured_content
+    assert result["exit_code"] == exit_code
+    assert result["ok"] is (exit_code == 0)
+    assert text in result[stream]
+
+
+def test_powershell_native_nonzero_is_normalized_to_one(shell_case, tmp_path):
+    if shell_case.name not in ("pwsh", "powershell"):
+        pytest.skip("PowerShell-only behavior")
+    script = tmp_path / "native-exit.py"
+    script.write_text("raise SystemExit(7)\n", encoding="utf-8")
+    result = asyncio.run(server.run(
+        shell_case.invoke(PY, script), shell=shell_case.name, timeout=15
+    )).structured_content
+    assert result["exit_code"] == 1
+
+
+def test_default_shell_strict_override_does_not_fallback(monkeypatch):
+    monkeypatch.setattr(server, "IS_WINDOWS", True)
+    monkeypatch.setenv("SHELL_MCP_DEFAULT_SHELL", "pwsh")
+    monkeypatch.setattr(server, "resolve_interpreter", lambda shell, *_: None if shell == "pwsh" else "/powershell")
+    with pytest.raises(ValueError, match="DEFAULT_SHELL='pwsh'.*no usable"):
+        server._default_shell()
+
+
+def test_default_shell_preferred_missing_falls_back(monkeypatch):
+    monkeypatch.setattr(server, "IS_WINDOWS", True)
+    monkeypatch.delenv("SHELL_MCP_DEFAULT_SHELL", raising=False)
+    monkeypatch.setenv("SHELL_MCP_PREFERRED_SHELL", "pwsh")
+    monkeypatch.setattr(server, "resolve_interpreter", lambda shell, *_: "/powershell" if shell == "powershell" else None)
+    assert server._default_shell() == "powershell"
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX process groups")
+def test_posix_kill_tree_uses_saved_group_after_parent_exit(monkeypatch):
+    calls = []
+    proc = type("Proc", (), {"pid": 4321, "returncode": 0})()
+    job = type("Job", (), {"proc": proc, "ownership": None})()
+    monkeypatch.setattr(server, "IS_WINDOWS", False)
+    monkeypatch.setattr(server.os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    asyncio.run(server._kill_tree(job, signal.SIGKILL))
+    assert calls == [(4321, signal.SIGKILL)]
+
+
+def test_windows_kill_tree_closes_owned_job_after_parent_exit(monkeypatch):
+    owner = type("Owner", (), {"closed": False, "close": lambda self: setattr(self, "closed", True)})()
+    proc = type("Proc", (), {"pid": 4321, "returncode": 0})()
+    job = type("Job", (), {"proc": proc, "ownership": owner})()
+    monkeypatch.setattr(server, "IS_WINDOWS", True)
+    asyncio.run(server._kill_tree(job))
+    assert owner.closed is True
+
+
 def test_descendant_inheriting_pipes_cannot_hang_completed_parent(tmp_path):
     sh = default_shell()
     if sh is None:
@@ -698,6 +777,107 @@ def test_descendant_inheriting_pipes_cannot_hang_completed_parent(tmp_path):
         pass
     assert result["state"] == "exited" and result["exit_code"] == 0
     assert elapsed < 3
+
+
+def _write_exited_parent_fixture(tmp_path, *, chatty):
+    ready = tmp_path / "ready"
+    trigger = tmp_path / "trigger"
+    sentinel = tmp_path / "sentinel"
+    child = tmp_path / "lingering child.py"
+    child.write_text(
+        "import pathlib, sys, time\n"
+        "ready, trigger, sentinel, chatty = map(pathlib.Path, sys.argv[1:])\n"
+        "ready.touch()\n"
+        "while not trigger.exists():\n"
+        "    if chatty.name == 'yes': print('still-writing', flush=True)\n"
+        "    time.sleep(.01)\n"
+        "sentinel.touch()\n",
+        encoding="utf-8",
+    )
+    parent = tmp_path / "short parent.py"
+    parent.write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    return parent, child, ready, trigger, sentinel, (tmp_path / ("yes" if chatty else "no"))
+
+
+@pytest.mark.parametrize("chatty", [False, True])
+def test_timeout_still_applies_while_draining_exited_parent(shell_case, tmp_path, monkeypatch, chatty):
+    parts = _write_exited_parent_fixture(tmp_path, chatty=chatty)
+    parent, child, ready, trigger, sentinel, mode = parts
+    monkeypatch.setattr(server, "POST_EXIT_DRAIN_SECONDS", 5)
+
+    async def scenario():
+        result = await server._start(
+            shell_case.invoke(PY, parent, child, ready, trigger, sentinel, mode),
+            shell=shell_case.name, timeout=20,
+        )
+        job = server.JOBS[result["job_id"]]
+        async with asyncio.timeout(10):
+            while not ready.exists() or job.proc.returncode is None:
+                await asyncio.sleep(.01)
+        assert job._timeout_task and job._reaper_task
+        job._timeout_task.cancel()
+        # Start the short deadline only once we have proved that a descendant
+        # survived its parent; slow PowerShell startup cannot satisfy this test.
+        job._timeout_task = asyncio.create_task(server._watch_timeout(job, .1))
+        started = time.monotonic()
+        await asyncio.wait_for(asyncio.shield(job._reaper_task), 3)
+        return server._snapshot(job), time.monotonic() - started
+
+    result, elapsed = asyncio.run(scenario())
+    trigger.touch()
+    time.sleep(.2)
+    assert result["state"] == "timeout"
+    assert elapsed < .8
+    assert not sentinel.exists()
+
+
+def test_post_exit_drain_hard_bounds_chatty_descendant(shell_case, tmp_path):
+    parent, child, ready, trigger, sentinel, mode = _write_exited_parent_fixture(tmp_path, chatty=True)
+    started = time.monotonic()
+    result = asyncio.run(server.run(
+        shell_case.invoke(PY, parent, child, ready, trigger, sentinel, mode),
+        shell=shell_case.name, timeout=10,
+    )).structured_content
+    elapsed = time.monotonic() - started
+    trigger.touch()
+    time.sleep(.2)
+    assert result["state"] == "exited" and result["exit_code"] == 0
+    assert server.POST_EXIT_DRAIN_SECONDS <= elapsed < 3
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("operation", ["kill", "shutdown"])
+def test_tree_operation_after_parent_exit_kills_child(shell_case, tmp_path, monkeypatch, operation):
+    parent, child, ready, trigger, sentinel, mode = _write_exited_parent_fixture(tmp_path, chatty=True)
+    # Hold the reaper in its drain window long enough to deterministically issue
+    # the operation after the shell parent has exited but while its child lives.
+    monkeypatch.setattr(server, "POST_EXIT_DRAIN_SECONDS", 5)
+
+    async def scenario():
+        started = await server._start(
+            shell_case.invoke(PY, parent, child, ready, trigger, sentinel, mode),
+            shell=shell_case.name, timeout=20,
+        )
+        job = server.JOBS[started["job_id"]]
+        async with asyncio.timeout(5):
+            while not ready.exists() or job.proc.returncode is None:
+                await asyncio.sleep(.01)
+        if operation == "kill":
+            await server.kill(job.job_id)
+        else:
+            await server._shutdown_jobs()
+        trigger.touch()
+        await asyncio.sleep(.3)
+        return job
+
+    job = asyncio.run(scenario())
+    assert job.state == "killed"
+    assert job._reaper_task and job._reaper_task.done()
+    assert not sentinel.exists()
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="Windows PowerShell Unicode integration")
@@ -820,11 +1000,9 @@ def test_job_codec_is_fixed_when_global_override_changes(monkeypatch):
     assert "more" in res["stdout"]
 
 
-def test_kill_terminates_process_tree(tmp_path):
+def test_kill_terminates_process_tree(tmp_path, shell_case):
     """Killing the JOB must take down a confirmed-running grandchild."""
-    sh = default_shell()
-    if sh is None:
-        pytest.skip("no usable shell on this host")
+    sh = shell_case.name
 
     sentinel = tmp_path / "grandchild_ran.txt"
     ready = tmp_path / "grandchild_ready.txt"
@@ -848,7 +1026,7 @@ def test_kill_terminates_process_tree(tmp_path):
 
     async def scenario():
         started = (await server.start(
-            f'"{PY}" "{parent}" "{grandchild}" "{sentinel}" "{ready}" "{trigger}"',
+            shell_case.invoke(PY, parent, grandchild, sentinel, ready, trigger),
             shell=sh, timeout=60,
         )).structured_content
         jid = started["job_id"]

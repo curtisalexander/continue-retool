@@ -1,16 +1,14 @@
 from __future__ import annotations
-import importlib.util
+import asyncio
 import os
 from pathlib import Path
-from typing import Any, cast
+import shutil
+import subprocess
+import sys
 import pytest
 from mcp.types import TextContent
 
-SCRIPT = Path(__file__).parents[1] / "install-workspace.py"
-SPEC = importlib.util.spec_from_file_location("install_workspace", SCRIPT)
-assert SPEC and SPEC.loader
-installer = cast(Any, importlib.util.module_from_spec(SPEC))
-SPEC.loader.exec_module(installer)
+from continue_mcp_common import installer
 
 def test_defaults_and_sql_selection():
     assert installer._selection(None, False) == ["shell", "fs", "search"]
@@ -26,6 +24,36 @@ def test_defaults_and_sql_selection():
 def test_install_requires_existing_directory(tmp_path: Path):
     with pytest.raises(RuntimeError, match="does not exist or is not a directory"):
         installer.install(str(tmp_path / "missing"), ["fs"], "/tools/uv")
+
+
+def test_cli_unicode_paths_survive_legacy_redirected_output(tmp_path):
+    workspace = tmp_path / "workspace 日本語"
+    workspace.mkdir()
+    command = [sys.executable, str(installer.KIT_DIR / "install-workspace.py"),
+               str(workspace), "--only", "fs", "--no-sync"]
+    result = subprocess.run(command, capture_output=True,
+                            env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+    assert result.returncode == 0, result.stderr
+    assert (workspace / ".continue/mcpServers/fs.yaml").is_file()
+    command[2] = str(workspace / "missing 🚀")
+    result = subprocess.run(command, capture_output=True,
+                            env={**os.environ, "PYTHONIOENCODING": "cp1252"})
+    assert result.returncode == 1
+    assert b"does not exist" in result.stderr and b"Traceback" not in result.stderr
+
+
+def test_upgrade_migrates_stamped_default_to_preference(tmp_path):
+    target = tmp_path / ".continue/mcpServers/shell.yaml"
+    target.parent.mkdir(parents=True)
+    previous = installer.render_config("shell", "/tools/uv", tmp_path).replace(
+        "SHELL_MCP_PREFERRED_SHELL", "SHELL_MCP_DEFAULT_SHELL",
+    )
+    target.write_text(previous, encoding="utf-8")
+    installer.install(str(tmp_path), ["shell"], "/tools/uv")
+    current = target.read_text(encoding="utf-8")
+    assert "SHELL_MCP_PREFERRED_SHELL" in current
+    assert "SHELL_MCP_DEFAULT_SHELL" not in current
+
 
 def test_install_rejects_escaping_continue_symlink(tmp_path: Path):
     project = tmp_path / "project"
@@ -66,6 +94,80 @@ def test_handshake_dispatches_functional_fs_check(tmp_path: Path, monkeypatch):
     assert calls[0][0] == "read"
     assert calls[0][2] == {"raise_on_error": False}
     assert not list(tmp_path.glob(".continue-mcp-check-*"))
+
+
+@pytest.mark.parametrize(
+    ("env", "actual_shell", "selection"),
+    [
+        ({"SHELL_MCP_DEFAULT_SHELL": "powershell"}, "powershell", "explicit default powershell"),
+        ({"SHELL_MCP_PREFERRED_SHELL": "pwsh"}, "powershell", "preferred pwsh unavailable; fallback"),
+    ],
+)
+def test_handshake_reports_bounded_powershell_capabilities(
+    tmp_path: Path, monkeypatch, env, actual_shell, selection
+):
+    calls = []
+
+    class Result:
+        is_error = False
+        content = []
+
+        def __init__(self, data, text):
+            self.structured_content = data
+            self.content = [TextContent(type="text", text=text)]
+
+    class Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def call_tool(self, name, arguments, **kwargs):
+            calls.append((name, arguments, kwargs))
+            if len(calls) == 1:
+                data = {"exit_code": 0, "stdout": "continue-mcp-check-7c19\n",
+                        "shell": actual_shell, "interpreter": "ignored-first.exe"}
+                return Result(data, data["stdout"])
+            stdout = "continue-mcp-check-7c19\t5.1.19041.1\tDesktop\t雪🚀\n"
+            data = {"exit_code": 0, "stdout": stdout, "shell": actual_shell,
+                    "interpreter": r"C:\Windows\PowerShell\powershell.exe"}
+            return Result(data, stdout)
+
+    monkeypatch.setattr("fastmcp.Client", Client)
+    report = asyncio.run(installer._handshake("shell", "/tools/uv", tmp_path, env))
+    assert len(calls) == 2
+    assert calls[1][1]["shell"] == actual_shell
+    assert calls[1][1]["timeout"] == 15
+    assert "version=5.1.19041.1 edition=Desktop unicode=ok" in report
+    assert f"selection={selection}" in report
+    assert r"executable=C:\Windows\PowerShell\powershell.exe" in report
+
+
+def test_check_prints_shell_capability_diagnostic(tmp_path: Path, monkeypatch, capsys):
+    installer.install(str(tmp_path), ["shell"], "/tools/uv")
+
+    async def handshake(*args):
+        return "PowerShell: executable=/pwsh version=7.4 edition=Core unicode=ok"
+
+    monkeypatch.setattr(installer, "_handshake", handshake)
+    installer.check(str(tmp_path), ["shell"], "/tools/uv")
+    output = capsys.readouterr().out
+    assert "ok shell-mcp" in output
+    assert "PowerShell: executable=/pwsh version=7.4 edition=Core unicode=ok" in output
+
+
+@pytest.mark.parametrize("shell", ["pwsh", "powershell"])
+def test_real_powershell_doctor_probe(tmp_path, shell):
+    executable = os.environ.get(f"SHELL_MCP_{shell.upper()}") or shutil.which(shell)
+    uv = shutil.which("uv")
+    if not executable or not uv:
+        pytest.skip("PowerShell interpreter and uv required")
+    report = asyncio.run(installer._handshake("shell", uv, tmp_path, {
+        "MCP_WORKSPACE": str(tmp_path),
+        "SHELL_MCP_DEFAULT_SHELL": shell,
+        f"SHELL_MCP_{shell.upper()}": executable,
+    }))
+    assert f"shell={shell}" in report and "unicode=ok" in report
+    assert f"selection=explicit default {shell}" in report
+    assert "version=" in report and "edition=" in report
 
 
 def test_search_operational_check_reports_missing_rg(tmp_path: Path, monkeypatch):
@@ -195,18 +297,19 @@ def test_shell_detection_override_path_fallback_and_default(tmp_path: Path, monk
     pwsh.write_text("")
     monkeypatch.setattr(installer, "_is_windows", lambda: False)
     monkeypatch.setenv("SHELL_MCP_BASH", str(tmp_path / "stale"))
+    monkeypatch.delenv("SHELL_MCP_PWSH", raising=False)
     monkeypatch.setattr(installer.shutil, "which", lambda command: str(bash) if command == "bash" else (str(pwsh) if command == "pwsh" else None))
     detected = installer.detect_shell_env()
     assert detected["SHELL_MCP_BASH"] == str(bash.resolve())
     assert detected["SHELL_MCP_PWSH"] == str(pwsh.resolve())
-    assert detected["SHELL_MCP_DEFAULT_SHELL"] == "bash"
+    assert detected["SHELL_MCP_PREFERRED_SHELL"] == "bash"
 
 
 def test_windows_default_order(monkeypatch):
     monkeypatch.setattr(installer, "_is_windows", lambda: True)
     available = {"SHELL_MCP_POWERSHELL": "/powershell", "SHELL_MCP_CMD": "/cmd"}
     monkeypatch.setattr(installer, "_find_interpreter", lambda name, commands, known: available.get(name))
-    assert installer.detect_shell_env()["SHELL_MCP_DEFAULT_SHELL"] == "powershell"
+    assert installer.detect_shell_env()["SHELL_MCP_PREFERRED_SHELL"] == "powershell"
 
 
 def test_shell_detection_fails_without_platform_default(monkeypatch):

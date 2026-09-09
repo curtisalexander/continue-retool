@@ -90,3 +90,32 @@ Windows/macOS CI and live extension acceptance are separate evidence. A Linux
 test run does not certify PowerShell, cmd, remote routing, UI permissions, or
 unsaved-buffer integration. Preserve the results of the acceptance checklist
 with the exact extension version before calling a deployment a replacement.
+
+## Optional Windows model acceptance scenarios
+
+Run these in a disposable, saved single-root Windows workspace through the
+actual Continue Agent mode, separately from deterministic CI. Record the model,
+extension/VS Code versions, PowerShell version, tool policy, actual tool-call
+arguments and text results. Use a fresh unpredictable marker per run, and verify
+output/side effects rather than trusting the model's claim of success. These
+scenarios use model tokens and require a configured Continue host; a standalone
+MCP client is not a substitute.
+
+| Scenario | Prompt/task | Evidence required |
+|---|---|---|
+| Unscripted shell choice | "This is Windows. Report the current directory and value of TEMP, then print `<marker> 雪🚀`." Do not prescribe commands or tool names. | MCP shell selected; correct PowerShell syntax (`$env:TEMP`, quoted paths with `&` when invoking); no redundant interpreter; exact marker/Unicode in actual stdout. |
+| Incremental output | Ask it to start a job emitting a numbered marker once per second, retrieve two successive batches, then stop it. | Returned job ID reused; stdout/stderr cursors passed back separately; no duplicate lines; explicit `shell_kill`, verified process/child exit. |
+| Truncation recovery | Ask for numbered output larger than the configured memory cap and recovery of a known middle line. | Truncation marker and workspace spill path visible in text; fs/search reads actual spill content using reported encoding; no fabricated missing lines. |
+| Timeout and retry | Ask for a harmless command that exceeds a short server timeout, then a short successful replacement. | First result is a timeout error with partial output; second is a new successful call, not a claim that the timed-out job succeeded. |
+| Input and errors | Request an interactive line read and send a Unicode marker, then run an explicit `exit 7`. | `interactive=true` and `shell_send`; marker round trip; failure is visible through `isError` and text, not only structured data. |
+| Permissions and Stop | Decline a shell request, then separately allow a long background job and press Continue Stop. | Declined request has no side effect; do not assume Stop kills the job—explicitly invoke `shell_kill` and verify exit. |
+
+Repeat relevant scenarios with PowerShell 7 and Windows PowerShell 5.1; the latter
+must not receive `&&`/`||`. A prescribed-command test proves transport behavior,
+not autonomous dialect selection, so retain the unscripted scenario.
+
+The Pi reference extension can change active tools, intercept `!`, render job
+widgets and post asynchronous failure notifications using Pi host APIs. This
+MCP server does not provide those host capabilities. Do not automatically
+disable Continue tools or claim notification/Stop integration without a tested
+Continue adapter; configure built-ins and permissions using the checklist above.

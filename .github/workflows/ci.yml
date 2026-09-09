@@ -1,6 +1,6 @@
 # Deterministic CI: every suite runs the servers directly and over the MCP
 # protocol via fastmcp's in-process Client — no LLM, no Continue install.
-# windows-latest is the project's only Windows testbed (tree-kill via taskkill).
+# windows-latest exercises native Job Objects and both PowerShell generations.
 name: CI
 
 on:
@@ -64,70 +64,91 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Sync committed lockfile
+        if: runner.os != 'Windows'
         run: uv sync --project continue-mcp --frozen --extra test
+
+      - name: Assert Windows command interpreters
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-Command cmd.exe -CommandType Application -ErrorAction Stop | Out-Null
+          cmd.exe /d /c exit 0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Command powershell.exe -CommandType Application -ErrorAction Stop | Out-Null
+          powershell.exe -NoLogo -NoProfile -NonInteractive -Command "exit 0"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Command pwsh.exe -CommandType Application -ErrorAction Stop | Out-Null
+          pwsh.exe -NoLogo -NoProfile -NonInteractive -Command "exit 0"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Sync committed lockfile (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          uv sync --project continue-mcp --frozen --extra test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # ripgrep is bring-your-own (search-mcp/pyproject.toml never depends on
       # it) — install the global prebuilt binary the same way the READMEs
       # tell a user to, so search-mcp's tests and the installer doctor's
       # "ripgrep resolves" check both have a real rg on PATH.
       - name: Install ripgrep
+        if: runner.os != 'Windows'
         run: uv tool install ripgrep-bin==15.2.0
 
+      - name: Install ripgrep (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          uv tool install ripgrep-bin==15.2.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Run all test suites
+        if: runner.os != 'Windows'
         shell: bash
         run: uv run --project continue-mcp --no-sync python continue-mcp/scripts/run_server_tests.py
 
-      - name: Installer smoke test
-        shell: bash
+      - name: Run all test suites (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          set -euo pipefail
-          target="$RUNNER_TEMP/blank-project"
-          mkdir -p "$target"
-          uv run --project continue-mcp --no-sync python \
-            continue-mcp/install-workspace.py "$target" --no-sync
-          test -f "$target/.continue/mcpServers/shell.yaml"
-          if grep -r "/absolute/path/to" "$target/.continue"; then
-            echo "unstamped placeholders remain" && exit 1
-          fi
+          uv run --project continue-mcp --no-sync python continue-mcp/scripts/run_server_tests.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Installer recovery and configuration tests
+        if: runner.os != 'Windows'
         shell: bash
         run: uv run --project continue-mcp --no-sync pytest -q continue-mcp/tests
 
-      # Doctor drives a REAL initialize + tools/list handshake against every
-      # server over stdio — the same flow Continue performs at connect.
-      - name: Installer doctor (live MCP handshake per server)
-        shell: bash
+      - name: Installer recovery and configuration tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          set -euo pipefail
-          uv run --project continue-mcp --no-sync python \
-            continue-mcp/install-workspace.py "$RUNNER_TEMP/blank-project" --check
+          uv run --project continue-mcp --no-sync pytest -q continue-mcp/tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Clean wheel and sdist install and console-script smoke tests
+      # Copies the toolkit and creates a workspace under paths containing both
+      # spaces and Unicode, then runs the source installer + doctor and clean
+      # wheel/sdist installs. The packaged smoke also invokes the installer.
+      - name: Installer, doctor, wheel, and sdist release smoke tests
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          dist="$RUNNER_TEMP/continue-mcp-dist"
-          wheel_venv="$RUNNER_TEMP/continue-mcp-wheel-venv"
-          sdist_venv="$RUNNER_TEMP/continue-mcp-sdist-venv"
-          mkdir -p "$dist"
-          uv build --project continue-mcp --out-dir "$dist"
-          uv venv "$wheel_venv"
-          uv pip install --python "$wheel_venv" "$dist"/*.whl
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            wheel_python="$wheel_venv/Scripts/python.exe"
-          else
-            wheel_python="$wheel_venv/bin/python"
-          fi
-          "$wheel_python" continue-mcp/tests/wheel_smoke.py "$wheel_venv"
-          uv venv "$sdist_venv"
-          uv pip install --python "$sdist_venv" "$dist"/*.tar.gz
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            sdist_python="$sdist_venv/Scripts/python.exe"
-          else
-            sdist_python="$sdist_venv/bin/python"
-          fi
-          "$sdist_python" continue-mcp/tests/wheel_smoke.py "$sdist_venv"
+          uv run --project continue-mcp --no-sync python continue-mcp/scripts/release_smoke.py "$RUNNER_TEMP/release smoke"
+
+      - name: Installer, doctor, wheel, and sdist release smoke tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          uv run --project continue-mcp --no-sync python continue-mcp/scripts/release_smoke.py "$env:RUNNER_TEMP/release smoke"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $toolkit = Join-Path "$env:RUNNER_TEMP/release smoke" 'toolkit path 工具包'
+          $workspace = Join-Path "$env:RUNNER_TEMP/release smoke" 'workspace path 工作区'
+          uv run --project "$toolkit" --no-sync python "$toolkit/install-workspace.py" "$workspace" --no-sync
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --project "$toolkit" --no-sync python "$toolkit/install-workspace.py" "$workspace" --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Informational: resting token cost per tool + cold-start latency.
       # Watch this output drift across PRs; it is the toolkit's price tag.

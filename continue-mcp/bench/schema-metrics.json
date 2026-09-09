@@ -27,16 +27,16 @@
       }
     },
     "shell": {
-      "estimated_tokens": 898,
+      "estimated_tokens": 1001,
       "tool_count": 7,
       "tools": {
         "kill": 51,
         "list_jobs": 38,
         "output": 130,
         "poll": 57,
-        "run": 246,
+        "run": 290,
         "send": 92,
-        "start": 284
+        "start": 343
       }
     },
     "sql": {

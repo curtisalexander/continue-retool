@@ -43,9 +43,11 @@ you'd rather not trust a repackager, use **A** or point `RIPGREP_BIN` at any rg
 you already have. (The similarly named PyPI `ripgrep` package is **not** an
 option here — it ships no Windows, Intel-Mac, or linux-arm64 wheel.)
 
-If `rg` lives somewhere non-standard, pin it in `search.yaml`:
-`RIPGREP_BIN: /path/to/rg`. When it can't find rg at all, the server raises an
-error that lists these fixes.
+If `rg` lives somewhere non-standard, pin its absolute path in `search.yaml`:
+`RIPGREP_BIN: /path/to/rg` (quote Windows paths containing spaces or Unicode).
+GUI-launched editors often do not inherit terminal PATH/environment changes, so
+restart the editor or configure YAML explicitly. When it cannot find rg, the
+server raises an error that lists these fixes.
 
 ## 2. Install and run the MCP
 

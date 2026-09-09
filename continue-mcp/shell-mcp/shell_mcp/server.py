@@ -8,8 +8,8 @@ Implements the shape described in the historical toolkit design §2–3:
   - cancel/kill of the WHOLE process tree (process group / new session)
   - server-enforced timeout that kills + reports partial output
 
-Pure-async Python (FastMCP option "B"). Tree-kill is `setsid` + `killpg` on
-Unix/macOS and `taskkill /T /F` on Windows.
+Pure-async Python (FastMCP option "B"). Tree ownership uses `setsid` + `killpg`
+on Unix/macOS and kill-on-close Job Objects on Windows.
 
 Run:  uv run shell-mcp
 """
@@ -25,6 +25,7 @@ import shutil
 import signal
 import sys
 import time
+import uuid
 from asyncio.subprocess import DEVNULL, PIPE, Process
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from continue_mcp_common.config import env_float as _env_float
 from continue_mcp_common.config import env_int as _env_int
 from continue_mcp_common.results import fenced_block
 from continue_mcp_common.text import decode_byte_range, decode_explicit
+from shell_mcp import windows_job
 
 Shell = Literal["bash", "pwsh", "powershell", "cmd"]
 
@@ -59,11 +61,12 @@ MAX_SPILL_BYTES = _env_int(
 )
 MIN_TIMEOUT = 0.1
 MAX_TIMEOUT = 86_400.0
+POST_EXIT_DRAIN_SECONDS = 1.0
 IS_WINDOWS = sys.platform.startswith("win")
 # Keep Windows console programs attached only to our redirected pipes. A GUI-launched
 # MCP server has no useful console to share, and without CREATE_NO_WINDOW Windows can
 # briefly create one for pwsh.exe/cmd.exe. This combines safely with the new process
-# group needed by taskkill-based tree termination.
+# group; a Job Object owns the launcher, shell, and their descendants.
 WINDOWS_PROCESS_FLAGS = 0x00000200 | 0x08000000  # NEW_PROCESS_GROUP | NO_WINDOW
 
 
@@ -81,6 +84,8 @@ def _validate_timeout(timeout: float | None, default: float) -> float:
 
 @asynccontextmanager
 async def lifespan(_app):
+    global _shutting_down
+    _shutting_down = False
     try:
         yield
     finally:
@@ -98,11 +103,13 @@ SPILL_DIR = os.environ.get("SHELL_MCP_SPILL_DIR") or os.path.join(".continue-mcp
 SPILL_ENABLED = os.environ.get("SHELL_MCP_SPILL", "1").strip().lower() not in (
     "0", "false", "off", "no",
 )
+_INSTANCE_ID = f"{os.getpid()}-{uuid.uuid4().hex}"
 
 
 def _spill_root() -> str:
     base = os.path.abspath(os.environ.get("MCP_WORKSPACE") or os.getcwd())
-    return SPILL_DIR if os.path.isabs(SPILL_DIR) else os.path.join(base, SPILL_DIR)
+    root = SPILL_DIR if os.path.isabs(SPILL_DIR) else os.path.join(base, SPILL_DIR)
+    return os.path.join(root, _INSTANCE_ID)
 
 
 # --- output decoding: right encoding per platform --------------------------
@@ -175,7 +182,11 @@ _POWERSHELL_UTF8_PREFIX = (
 
 def _powershell_command(cmd: str, codec: str = "utf-8") -> str:
     """Set stream defaults without changing directives at the start of *cmd*."""
-    encoded = base64.b64encode(cmd.encode("utf-8")).decode("ascii")
+    # Calling a script block can reset $? to true even when its last command
+    # failed. Capture that status inside the block. Explicit exit and caught
+    # errors retain PowerShell's semantics; do not make all errors terminating.
+    script = cmd + "\nif (-not $?) { exit 1 }\n"
+    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
     canonical = codecs.lookup(codec).name
     prefix = _POWERSHELL_UTF8_PREFIX
     if canonical != "utf-8":
@@ -235,7 +246,7 @@ def _default_shell() -> str:
     """Pick a default interpreter that actually exists. On Windows that's pwsh
     (PowerShell 7) when present, else powershell (5.1, always installed) — never
     a hard default at an interpreter that may be absent. Override with
-    SHELL_MCP_DEFAULT_SHELL (the installer stamps the one it detected)."""
+    SHELL_MCP_DEFAULT_SHELL is strict; the installer's PREFERRED_SHELL is not."""
     forced = os.environ.get("SHELL_MCP_DEFAULT_SHELL")
     if forced:
         forced = forced.lower()
@@ -248,9 +259,13 @@ def _default_shell() -> str:
                 f"SHELL_MCP_DEFAULT_SHELL={forced!r} has no usable interpreter"
             )
         return forced
-    if IS_WINDOWS:
-        return "pwsh" if resolve_interpreter("pwsh") else "powershell"
-    return "bash"
+    preferred = os.environ.get("SHELL_MCP_PREFERRED_SHELL", "").lower()
+    if preferred in _INTERP and resolve_interpreter(preferred):
+        return preferred
+    for candidate in (("pwsh", "powershell", "cmd") if IS_WINDOWS else ("bash",)):
+        if resolve_interpreter(candidate):
+            return candidate
+    raise ValueError("no usable default shell interpreter found")
 
 
 def build_argv(
@@ -397,13 +412,15 @@ class RingBuffer:
             return
         payload = chunk[:remaining]
         try:
-            written = self._spill_file.write(payload)
-            if written is None:
-                written = len(payload)
-            self.spill_bytes += written
-            if written != len(payload):
-                self._disable_spill("short write to spill file; full output is incomplete")
-            elif len(chunk) > remaining:
+            offset = 0
+            while offset < len(payload):
+                written = self._spill_file.write(payload[offset:])
+                if not written:
+                    self._disable_spill("zero write to spill file; full output is incomplete")
+                    return
+                self.spill_bytes += written
+                offset += written
+            if len(chunk) > remaining:
                 self._disable_spill(f"spill cap reached ({self.spill_cap} bytes); full output is incomplete")
         except OSError as exc:
             self._disable_spill(f"spill write failed ({exc}); full output is incomplete")
@@ -412,8 +429,9 @@ class RingBuffer:
         if self._spill_file is not None or not self.spill_target:
             return
         try:
-            os.makedirs(os.path.dirname(self.spill_target), exist_ok=True)
-            self._spill_file = open(self.spill_target, "wb")
+            os.makedirs(os.path.dirname(self.spill_target), mode=0o700, exist_ok=True)
+            fd = os.open(self.spill_target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            self._spill_file = os.fdopen(fd, "wb")
         except OSError as exc:
             self._disable_spill(f"spill open failed ({exc}); full output is unavailable")
             return
@@ -424,13 +442,42 @@ class RingBuffer:
                 break
         self._pending.clear()
 
-    def write(self, chunk: bytes) -> None:
-        self.total += len(chunk)
+    def _capture_spill(self, chunk: bytes) -> None:
         if self.spill_target:
             if self._spill_file is not None:
                 self._spill_write(chunk)
             else:
                 self._pending.append(chunk)
+                if self._dropped:
+                    self._open_spill()
+
+    def write(self, chunk: bytes) -> None:
+        self._buffer_write(chunk)
+        self._capture_spill(chunk)
+
+    async def awrite(self, chunk: bytes) -> None:
+        """One awaited disk operation per stream: bounded backpressure, no queue.
+
+        Keep display buffers on the event loop. A cancelled drain must join its
+        write before the reaper closes the sink; cancelling to_thread alone does
+        not stop the underlying filesystem operation.
+        """
+        self._buffer_write(chunk)
+        if not self.spill_target:
+            return
+        if not self._dropped:
+            self._pending.append(chunk)
+            return
+        write = asyncio.create_task(asyncio.to_thread(self._capture_spill, chunk))
+        try:
+            await asyncio.shield(write)
+        except asyncio.CancelledError:
+            with anyio.CancelScope(shield=True):
+                await asyncio.shield(write)
+            raise
+
+    def _buffer_write(self, chunk: bytes) -> None:
+        self.total += len(chunk)
         keep = self.cap // 2
         if not self._dropped:
             self._head.extend(chunk)
@@ -438,8 +485,7 @@ class RingBuffer:
                 self._tail = self._head[-keep:]
                 self._dropped = len(self._head) - 2 * keep
                 del self._head[keep:]
-                self._open_spill()  # first drop: from here the file is the only
-            return                  # complete copy of the stream
+            return
         self._tail.extend(chunk)
         if len(self._tail) > keep:
             overflow = len(self._tail) - keep
@@ -475,6 +521,9 @@ class RingBuffer:
             return
         try:
             os.remove(path)
+            parent = os.path.dirname(path)
+            if os.path.basename(parent) == _INSTANCE_ID:
+                os.rmdir(parent)  # only if empty; never recurse into other logs
         except OSError:
             pass
         self.spill_path = None
@@ -516,6 +565,11 @@ class RingBuffer:
 
         offset = max(0, min(offset, self.total))
         end = max(offset, min(end, self.total))
+        # Suppress only an initial UTF-8 BOM in presentation. Raw logs and byte
+        # cursors retain it; embedded U+FEFF and other codecs are unchanged.
+        if (offset == 0 and codecs.lookup(self.codec).name == "utf-8"
+                and self._head[:3] == codecs.BOM_UTF8):
+            offset = min(3, end)
         if not self._dropped:
             offset = align_utf8_start(self._head, offset)
             return decode(
@@ -612,11 +666,20 @@ class Job:
     _timeout_task: Optional[asyncio.Task] = None
     _reaper_task: Optional[asyncio.Task] = None
     stdin_eof: bool = False
+    ownership: windows_job.WindowsJob | None = None
+    finished: float | None = None
+
+    @property
+    def runtime_ms(self) -> int:
+        end = self.finished if self.finished is not None else time.monotonic()
+        return int((end - self.started) * 1000)
 
 
 JOBS: dict[str, Job] = {}
 _counter = 0
 _starting_jobs = 0
+_start_operations: set[asyncio.Task] = set()
+_shutting_down = False
 
 
 def _next_id() -> str:
@@ -650,53 +713,44 @@ async def _drain(stream: asyncio.StreamReader, buf: RingBuffer) -> None:
         chunk = await stream.read(4096)
         if not chunk:
             break
-        buf.write(chunk)
+        await buf.awrite(chunk)
 
 
 async def _kill_tree(job: Job, sig: int = signal.SIGTERM) -> None:
     """Kill the whole process group, not just the top process (§2b, the #1 bug)."""
     proc = job.proc
-    if proc.returncode is not None:
-        return
     try:
         if IS_WINDOWS:
-            # taskkill /T walks and kills the whole child tree.
-            taskkill = os.path.join(
-                os.environ.get("SystemRoot", r"C:\Windows"),
-                "System32", "taskkill.exe",
-            )
-            if not os.path.isfile(taskkill):
-                taskkill = "taskkill"
-            killer = await asyncio.create_subprocess_exec(
-                taskkill, "/T", "/F", "/PID", str(proc.pid),
-                stdin=DEVNULL,
-                stdout=DEVNULL,
-                stderr=DEVNULL,
-                creationflags=WINDOWS_PROCESS_FLAGS,
-            )
-            try:
-                await asyncio.wait_for(killer.wait(), timeout=3.0)
-            except asyncio.TimeoutError:
-                killer.kill()
-                await killer.wait()
-            if killer.returncode != 0 and proc.returncode is None:
+            if job.ownership is not None:
+                job.ownership.close()
+            # The launcher may not have joined the job yet when cancelled.
+            if proc.returncode is None:
                 proc.kill()
         else:
-            os.killpg(os.getpgid(proc.pid), sig)
+            # start_new_session makes pid the group ID. It remains valid for
+            # descendants after the original group leader has been reaped.
+            os.killpg(proc.pid, sig)
     except (ProcessLookupError, PermissionError):
         pass
 
 
 async def _watch_timeout(job: Job, timeout: float) -> None:
     await asyncio.sleep(timeout)
-    if job.proc.returncode is None:
+    if job.state == JobState.RUNNING:
         job.state = JobState.TIMEOUT
         await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
 
 
 async def _shutdown_jobs() -> None:
     """Kill and reap every child before the MCP server releases its transport."""
-    running = [job for job in JOBS.values() if job.proc.returncode is None]
+    global _shutting_down
+    _shutting_down = True
+    if _start_operations:
+        await asyncio.gather(*(asyncio.shield(task) for task in tuple(_start_operations)),
+                             return_exceptions=True)
+    running = [job for job in JOBS.values()
+               if job.state == JobState.RUNNING or job.proc.returncode is None
+               or (job._reaper_task is not None and not job._reaper_task.done())]
     for job in running:
         job.state = JobState.KILLED
         await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
@@ -714,6 +768,9 @@ async def _shutdown_jobs() -> None:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*reapers, return_exceptions=True)
+    for job in JOBS.values():
+        await asyncio.to_thread(job.stdout.remove_spill)
+        await asyncio.to_thread(job.stderr.remove_spill)
 
 
 # --- rendering: echo the command + output as a terminal-style block --------
@@ -723,7 +780,8 @@ def _console_text(cmd: str, snap: dict) -> str:
     def console_newlines(value: str) -> str:
         return value.replace("\r\n", "\n").replace("\r", "\n")
 
-    parts = [f"$ {cmd}"]
+    prompt = "PS>" if snap.get("shell") in ("pwsh", "powershell") else "$"
+    parts = [f"{prompt} {cmd}"]
     metadata = []
     if snap.get("job_id"):
         metadata.append(f"job={snap['job_id']}")
@@ -794,12 +852,43 @@ async def _start(
     encoding: Optional[str] = None,
     interactive: bool = False,
 ) -> dict:
+    """Own pending spawns through cancellation and shutdown."""
+    if _shutting_down:
+        raise ValueError("shell server is shutting down; no new jobs accepted")
+    operation = asyncio.create_task(_start_job(cmd, shell, cwd, timeout, env, encoding, interactive))
+    _start_operations.add(operation)
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            try:
+                data = await asyncio.shield(operation)
+            except Exception:
+                pass
+            else:
+                await kill(data["job_id"])
+        raise
+    finally:
+        _start_operations.discard(operation)
+
+
+async def _start_job(
+    cmd: str,
+    shell: Optional[Shell] = None,
+    cwd: Optional[str] = None,
+    timeout: Optional[float] = None,
+    env: Optional[dict[str, str | None]] = None,
+    encoding: Optional[str] = None,
+    interactive: bool = False,
+) -> dict:
     """Launch the process and register the job. Internal: run()/start() call this;
     only the @mcp.tool wrappers shape the ToolResult the client sees."""
     global _starting_jobs
     _prune_finished()
     effective_timeout = _validate_timeout(timeout, DEFAULT_TIMEOUT)
-    running_jobs = sum(job.proc.returncode is None for job in JOBS.values())
+    running_jobs = sum(job.state == JobState.RUNNING or job.proc.returncode is None
+                       or (job._reaper_task is not None and not job._reaper_task.done())
+                       for job in JOBS.values())
     if running_jobs + _starting_jobs >= MAX_RUNNING_JOBS:
         raise ValueError(
             f"shell concurrency limit reached ({MAX_RUNNING_JOBS} running jobs); "
@@ -809,6 +898,8 @@ async def _start(
     shell_name = (shell or _default_shell()).lower()
     job_encoding = _job_encoding(shell_name, encoding)
     argv = build_argv(cmd, shell_name, job_encoding)  # validates cmd too
+    if shell_name in ("pwsh", "powershell") and not interactive:
+        argv.insert(1, "-NonInteractive")
     # cwd defaults to the workspace, and relative cwd resolves against it — the
     # server's own cwd (wherever Continue launched it) is never the implicit base.
     workspace = os.environ.get("MCP_WORKSPACE")
@@ -836,17 +927,21 @@ async def _start(
     # Reserve synchronously before the first await so concurrent start calls
     # cannot all pass the count while their subprocesses are being created.
     _starting_jobs += 1
+    owned_job = None
     try:
-        if IS_WINDOWS and shell_name == "cmd":
-            # cmd.exe parses its command line with its own rules; the \"-escaping
-            # that list-based spawning applies breaks any quoted command. Hand
-            # cmd.exe the raw string instead and explicitly select the resolved
-            # executable rather than mutating the server's global ComSpec.
-            proc = await asyncio.create_subprocess_shell(
-                cmd, executable=argv[0], **common
+        if IS_WINDOWS:
+            owned_job = windows_job.WindowsJob()
+            launcher = os.path.join(os.path.dirname(__file__), "windows_job.py")
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", os.path.abspath(launcher),
+                owned_job.name, shell_name, *argv, **common,
             )
         else:
             proc = await asyncio.create_subprocess_exec(*argv, **common)
+    except BaseException:
+        if owned_job is not None:
+            owned_job.close()
+        raise
     finally:
         _starting_jobs -= 1
     jid = _next_id()
@@ -854,6 +949,7 @@ async def _start(
     job = Job(
         job_id=jid, cmd=cmd, proc=proc, started=time.monotonic(),
         shell=shell_name, interpreter=argv[0], encoding=job_encoding,
+        ownership=owned_job,
         stdout=RingBuffer(spill_target=os.path.join(root, f"{jid}-stdout.log") if root else None, codec=job_encoding),
         stderr=RingBuffer(spill_target=os.path.join(root, f"{jid}-stderr.log") if root else None, codec=job_encoding),
     )
@@ -883,8 +979,13 @@ async def _start(
         "The outer interpreter is resolved from the server environment before env "
         "overrides; per-call PATH affects only commands inside it. env null values "
         "remove variables. encoding overrides the shell-derived output/input codec "
-        "when a native producer uses another encoding. Poll with output/poll and "
-        "stop with kill."
+        "when a native producer uses another encoding. Pass output's returned byte "
+        "cursors on subsequent output calls; poll checks status only. Use kill to "
+        "stop jobs; do not rely on Continue's Stop button. interactive=true enables "
+        "stdin/send; otherwise PowerShell prompts fail. Completion terminates "
+        "remaining owned descendants. "
+        + ("Use $env:NAME and & 'path' in PowerShell; powershell (5.1) lacks &&/||."
+           if IS_WINDOWS else "")
     ),
 )
 async def start(
@@ -927,25 +1028,30 @@ async def _reap(job: Job) -> None:
     while job.proc.returncode is None:
         await asyncio.sleep(0.01)
     rc = job.proc.returncode
-    # Descendants may inherit pipe handles after the parent exits. Preserve bytes
-    # while they are arriving, but do not let idle inherited handles keep a
-    # completed job alive forever. The idle deadline resets after every write.
+    job.finished = time.monotonic()
+    # Preserve trailing bytes, but neither idle nor continuously writing
+    # descendants may keep the job alive indefinitely after its shell exits.
     pending = set(job._readers)
     previous_totals = (-1, -1)
     idle_since = time.monotonic()
-    while pending and time.monotonic() - idle_since < 0.5:
+    drain_deadline = idle_since + POST_EXIT_DRAIN_SECONDS
+    while (pending and time.monotonic() - idle_since < 0.5
+           and time.monotonic() < drain_deadline):
         _, pending = await asyncio.wait(pending, timeout=0.05)
         totals = (job.stdout.total, job.stderr.total)
         if totals != previous_totals:
             previous_totals = totals
             idle_since = time.monotonic()
+    # A completed job never leaves owned background descendants behind, even
+    # when they closed their copies of stdout/stderr. Daemons need another host.
+    await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
     for reader in pending:
         reader.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
     if job._timeout_task:
         job._timeout_task.cancel()
-    job.stdout.close()
-    job.stderr.close()
+    await asyncio.to_thread(job.stdout.close)
+    await asyncio.to_thread(job.stderr.close)
     job.exit_code = rc
     if job.state == JobState.RUNNING:
         job.state = JobState.EXITED
@@ -968,7 +1074,7 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
-        "runtime_ms": int((time.monotonic() - job.started) * 1000),
+        "runtime_ms": job.runtime_ms,
         "stdout": stdout,
         "stderr": stderr,
         "stdout_cursor": stdout_cursor,
@@ -1028,12 +1134,13 @@ async def poll(job_id: str) -> ToolResult:
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
-        "runtime_ms": int((time.monotonic() - job.started) * 1000),
+        "runtime_ms": job.runtime_ms,
         "error": "command timed out" if timed_out else None,
         "error_type": "timeout" if timed_out else None,
     }
     tail = f"[{data['state']}]" + (f" exit {data['exit_code']}" if data['exit_code'] is not None else "")
-    text = f"{data['job_id']}: {tail} · {data['runtime_ms']}ms · $ {job.cmd}"
+    prompt = "PS>" if job.shell in ("pwsh", "powershell") else "$"
+    text = f"{data['job_id']}: {tail} · {data['runtime_ms']}ms · {prompt} {job.cmd}"
     return ToolResult(
         content=[TextContent(type="text", text=text)], structured_content=data,
         is_error=not data["ok"],
@@ -1046,13 +1153,14 @@ async def kill(job_id: str) -> ToolResult:
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"no such job: {job_id}")
-    if job.proc.returncode is None:
+    if job.state == JobState.RUNNING or job.proc.returncode is None:
         job.state = JobState.KILLED
         await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
     if job._reaper_task is not None:
         await asyncio.shield(job._reaper_task)
     data = {"job_id": job.job_id, "state": job.state}
-    text = f"{data['job_id']}: [{data['state']}] · $ {job.cmd}"
+    prompt = "PS>" if job.shell in ("pwsh", "powershell") else "$"
+    text = f"{data['job_id']}: [{data['state']}] · {prompt} {job.cmd}"
     return ToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
 
 
@@ -1064,13 +1172,15 @@ async def list_jobs() -> ToolResult:
             "job_id": j.job_id,
             "cmd": j.cmd,
             "state": j.state,
-            "runtime_ms": int((time.monotonic() - j.started) * 1000),
+            "runtime_ms": j.runtime_ms,
+            "shell": j.shell,
         }
         for j in JOBS.values()
     ]
     data = {"jobs": jobs, "count": len(jobs)}
     block = "\n".join(
-        f"{j['job_id']}  [{j['state']}]  {j['runtime_ms']}ms  $ {j['cmd']}" for j in jobs
+        f"{j['job_id']}  [{j['state']}]  {j['runtime_ms']}ms  "
+        f"{'PS>' if j['shell'] in ('pwsh', 'powershell') else '$'} {j['cmd']}" for j in jobs
     )
     md = f"{len(jobs)} job(s)" + (f"\n\n{fenced_block(block, 'console')}" if block else "")
     return ToolResult(content=[TextContent(type="text", text=md)], structured_content=data)
@@ -1084,7 +1194,12 @@ async def list_jobs() -> ToolResult:
         f"{('Windows' if IS_WINDOWS else 'non-Windows')} default: {_default_shell()}. "
         "The outer interpreter is resolved from the server environment before env "
         "overrides, so per-call PATH only affects commands inside the shell. encoding "
-        "overrides the shell-derived codec for native programs that emit another one."
+        "overrides the shell-derived codec for native programs that emit another one. "
+        "PowerShell prompts fail noninteractively; use start(interactive=true)/send "
+        "for input and start/output/kill for long jobs. Completion terminates "
+        "remaining owned descendants. "
+        + ("Use $env:NAME and & 'path' in PowerShell; powershell (5.1) lacks &&/||."
+           if IS_WINDOWS else "")
     ),
 )
 async def run(

@@ -38,22 +38,36 @@ Extra roots and disabling controls remain available through `MCP_JAIL_EXTRA` and
 `MCP_JAIL`. Reads may be Automatic under the user's threat model; edits and
 arbitrary shell commands stay Ask First.
 
-Edit/create encode before writing and use sibling temporary files plus atomic
-replacement where the platform supports it. Edit's bounded digest/stat conflict
-check is optimistic and best-effort; it narrows common lost-update windows but
-cannot make an absolute concurrency guarantee.
+Edit/create encode before writing and use sibling temporary files. New-file
+publication is no-overwrite: Windows uses atomic `os.rename` and needs no
+hardlinks on NTFS/exFAT; POSIX requires hard-link support and reports an error
+without it. Replacement is atomic where supported; Windows sharing locks fail
+safely rather than replacing an incompatibly open target. Edit's bounded
+digest/stat conflict check remains optimistic and best-effort.
 
 ## Installation and packaging
 
-`servers.json` is the compact inventory and default-selection source. The
-installer renders all selected YAML first, stamps absolute uv/toolkit/workspace
-and detected-interpreter paths plus `--no-sync`, upgrades only marked or exactly
-recognized legacy generated files, refuses differing user-authored files, and performs one
-`uv sync --locked --project <toolkit>` unless skipped. It warns about, but never
+`servers.json` is the compact inventory and default-selection source. The source
+wrapper performs one locked uv sync and emits absolute uv/toolkit/workspace paths
+plus `--no-sync`. An installed wheel exposes `continue-mcp-install` and emits its
+installed Python with `-m`; package mode needs no checkout or uv, but its
+environment must be retained. Both modes render all selected YAML first, stamp
+detected interpreters and `SHELL_MCP_PREFERRED_SHELL`, upgrade only marked or
+exactly recognized legacy generated files, and refuse differing user-authored
+files. The installer warns about, but never
 silently removes, unselected installer-owned configurations. `--check` compares exact
 rendered content and uses FastMCP `Client`/`StdioTransport` to execute meaningful
 temporary-fixture checks for each selected server; fixtures are created inside and
 removed from the workspace even on failure.
+
+`SHELL_MCP_DEFAULT_SHELL` is a strict explicit override; installer preference is
+separate so Windows can fall back `pwsh` → `powershell` → `cmd`. Old DEFAULT-stamped
+YAML requires an installer rerun. Shell ownership uses a saved POSIX process group
+or a kill-on-close Windows Job Object joined by a launcher before shell creation.
+Timeout remains active through post-parent pipe draining (one second absolute,
+0.5 second idle), then completion kills remaining owned descendants. This is not
+sandboxing: externally brokered processes and deliberate POSIX `setsid` escapes
+are outside the guarantee; persistent daemons belong under a service manager.
 
 The supported automatic topology is a saved, local, single-root workspace. Remote
 use requires an explicitly validated installation on the same host and filesystem

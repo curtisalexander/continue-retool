@@ -20,8 +20,9 @@ Automatic.
   - `sql-mcp/` — Optional SQL formatting and linting through sqruff
 <!-- END GENERATED SERVER INVENTORY -->
 
-All servers share one distribution, lockfile, and environment while running as
-separate stdio processes. Install the three read/execution defaults with:
+All servers share one distribution and environment while running as separate
+stdio processes. From a source checkout, install the three defaults with the
+preserved wrapper (it performs one locked `uv sync`):
 
 ```bash
 uv run continue-mcp/install-workspace.py /path/to/project
@@ -31,6 +32,23 @@ uv run continue-mcp/install-workspace.py /path/to/project --with-edit --with-sql
 uv run continue-mcp/install-workspace.py /path/to/project --with-sql
 ```
 
+From PowerShell, install Python 3.11+, `uv`, and ripgrep (`rg`), then run from
+this checkout:
+
+```powershell
+$workspace = 'C:\Users\Me\workspace path 工作区'  # existing project directory
+uv run continue-mcp/install-workspace.py "$workspace"
+if ($LASTEXITCODE -ne 0) { throw 'Installation failed' }
+uv run --project continue-mcp --no-sync python continue-mcp/install-workspace.py "$workspace" --check
+if ($LASTEXITCODE -ne 0) { throw 'Doctor failed' }
+```
+
+An installed wheel instead provides `continue-mcp-install`. Run it from the
+durable virtual/tool environment where the wheel is installed; generated YAML
+uses that environment's Python with `-m`, so package installs need neither a
+source checkout nor `uv`/`uvx`. Do not use an ephemeral `uvx` environment because
+Continue must be able to launch the same installation later.
+
 The installer does not change model configuration, built-in permissions, or remove
 existing server YAML. See the [Continue compatibility and migration guide](continue-mcp/CONTINUE_COMPATIBILITY.md),
 [the toolkit guide](continue-mcp/README.md), [current architecture](ARCHITECTURE.md),
@@ -38,9 +56,13 @@ and [ADRs](docs/adr/README.md). Superseded explorations remain clearly retained
 under [docs/history](docs/history/).
 
 Search requires a system `rg`, `uv tool install ripgrep-bin`, or `RIPGREP_BIN`.
+GUI-launched editors may not inherit terminal environment changes; use an
+absolute `RIPGREP_BIN` in the generated YAML when needed.
 
 ## Site and license
 
 The [project site](https://curtisalexander.github.io/continue-retool/) is served
 from `docs/`. Rebuild generated Pandoc pages with `./build/build-docs.sh`.
+That contributor-only script requires Bash (Git Bash or WSL on Windows); the MCP
+runtime itself does not require Git Bash.
 Licensed under the [MIT License](LICENSE).

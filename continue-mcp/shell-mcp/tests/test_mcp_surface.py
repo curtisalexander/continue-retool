@@ -86,15 +86,15 @@ def test_every_tool_advertises_expected_authority():
             assert getattr(ann, hint) is value, f"{name} should set {hint}={value}"
 
 
-def test_run_over_mcp():
-    sh = default_shell()
-    if sh is None:
-        pytest.skip("no usable shell on this host")
+def test_run_over_mcp(shell_case, tmp_path):
+    sh = shell_case.name
+    script = tmp_path / "via mcp.py"
+    script.write_text("print('via-mcp')\n", encoding="utf-8")
 
     async def scenario():
         async with Client(mcp) as c:
             return await c.call_tool("run", {
-                "cmd": f'"{PY}" -c "print(\'via-mcp\')"',
+                "cmd": shell_case.invoke(PY, script),
                 "shell": sh,
                 "timeout": 15,
             })
@@ -192,10 +192,8 @@ def test_content_only_incremental_output_uses_exact_rendered_cursors(tmp_path):
     assert second_cursors[0] > cursors(first)[0]
 
 
-def test_client_call_cancellation_kills_tree_without_disconnect(tmp_path):
-    sh = default_shell()
-    if sh is None:
-        pytest.skip("no usable shell on this host")
+def test_client_call_cancellation_kills_tree_without_disconnect(tmp_path, shell_case):
+    sh = shell_case.name
     ready = tmp_path / "child-ready"
     marker = tmp_path / "cancelled-child-side-effect"
     trigger = tmp_path / "allow-side-effect"
@@ -220,7 +218,7 @@ def test_client_call_cancellation_kills_tree_without_disconnect(tmp_path):
         async with Client(mcp) as c:
             request_id = c.session._request_id
             call = asyncio.create_task(c.call_tool("run", {
-                "cmd": f'"{PY}" "{parent}" "{child}" "{ready}" "{marker}" "{trigger}"',
+                "cmd": shell_case.invoke(PY, parent, child, ready, marker, trigger),
                 "shell": sh, "timeout": 60,
             }))
             async with asyncio.timeout(5):
@@ -255,15 +253,15 @@ def test_client_call_cancellation_kills_tree_without_disconnect(tmp_path):
     assert not marker.exists()
 
 
-def test_start_poll_output_lifecycle_over_mcp():
-    sh = default_shell()
-    if sh is None:
-        pytest.skip("no usable shell on this host")
+def test_start_poll_output_lifecycle_over_mcp(shell_case, tmp_path):
+    sh = shell_case.name
+    script = tmp_path / "mcp lifecycle.py"
+    script.write_text("print('lifecycle')\n", encoding="utf-8")
 
     async def scenario():
         async with Client(mcp) as c:
             started = await c.call_tool("start", {
-                "cmd": f'"{PY}" -c "print(\'lifecycle\')"',
+                "cmd": shell_case.invoke(PY, script),
                 "shell": sh,
                 "timeout": 15,
             })

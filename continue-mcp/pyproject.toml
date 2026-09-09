@@ -35,6 +35,7 @@ test = ["pytest>=8"]
 rg = ["ripgrep-bin==15.2.0"]
 
 [project.scripts]
+continue-mcp-install = "continue_mcp_common.installer:main"
 # BEGIN GENERATED SERVER ENTRY POINTS
 shell-mcp = "shell_mcp.server:main"
 fs-mcp = "fs_mcp.server:main"

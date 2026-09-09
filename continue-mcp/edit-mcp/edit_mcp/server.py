@@ -27,6 +27,7 @@ from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 
 from continue_mcp_common.config import env_int as _env_int
+from continue_mcp_common.atomic import create_from_temp
 from continue_mcp_common.paths import jail_error
 from continue_mcp_common.paths import resolve_existing as _resolve_existing
 from continue_mcp_common.paths import resolve_path as _resolve
@@ -189,11 +190,13 @@ def _write(
         if expected_version is not None:
             _verify_unchanged(target, expected_version)
         if no_replace:
-            # Linking a fully-written sibling into place is an atomic
-            # create-if-absent operation. Unlike an exists() check followed by
-            # replace(), it cannot clobber a destination created concurrently.
-            os.link(temp_path, target)
-            os.remove(temp_path)
+            # Atomically publish without clobbering a destination created
+            # concurrently (hard link on POSIX, rename on Windows).
+            create_from_temp(temp_path, target)
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:  # Windows rename consumes the temporary.
+                pass
         else:
             os.replace(temp_path, target)
         _sync_parent(parent)

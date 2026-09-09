@@ -59,6 +59,9 @@ model-visible display. Check an item only after its focused tests pass.
 - [x] Make installer doctor launch with the rendered configuration environment, not the terminal's full environment.
 - [x] Test minimal GUI-like `PATH` behavior and nonstandard PowerShell locations.
 - [x] Keep operator documentation and generated templates synchronized with actual installer behavior.
+- [x] Preserve source-wrapper locked sync while installed-wheel YAML uses its durable Python `-m` environment without uv.
+- [x] Separate detected `SHELL_MCP_PREFERRED_SHELL` fallback from strict explicit `SHELL_MCP_DEFAULT_SHELL`.
+- [x] Add quoted space/Unicode-path source/package lifecycle smoke tests.
 
 ## 7. End-to-end proof and documentation
 
@@ -68,4 +71,10 @@ model-visible display. Check an item only after its focused tests pass.
 - [x] Add fixtures covering cp1252, UTF-8 BOM, UTF-16, emoji, CJK, combining characters, and mixed line endings across the tool suites.
 - [x] Update architecture and tool documentation with the final encoding/environment contracts.
 - [x] Run CI lint/type checks, all server and installer tests, metadata/docs checks, and build/package smoke tests available in the orb.
-- [x] Confirm the Windows-only tests on the `windows-latest` CI runner.
+- [x] Add Windows `pwsh` orchestration, interpreter preflight, and parameterized lifecycle coverage to CI.
+- [ ] Confirm the new Job Object, atomic publication, installer, and PowerShell-status changes on native `windows-latest`.
+
+PowerShell 7 tests can run in the Linux orb, but that is not native Windows
+verification. Do not check the final item until updated Windows CI passes.
+`build/build-docs.sh` requires Git Bash or WSL for Windows contributors rebuilding
+docs only; the runtime has no Git Bash requirement.
