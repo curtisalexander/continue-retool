@@ -23,7 +23,7 @@ def test_generated_metadata_is_current():
 def test_inventory_defaults_are_explicit():
     servers = load_servers()
     assert [s["name"] for s in servers] == ["shell", "fs", "search", "edit", "sql"]
-    assert [s["name"] for s in servers if s["default"]] == ["shell", "fs", "search", "edit"]
+    assert [s["name"] for s in servers if s["default"]] == ["shell", "fs", "search"]
 
 
 def test_dependency_update_cutoff_and_command_are_enforced():

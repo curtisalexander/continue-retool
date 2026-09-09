@@ -59,12 +59,14 @@ def test_read_default_limit_caps(tmp_path):
     assert res["lines_scanned"] == 2001
 
 
-def test_read_long_lines_are_clipped(tmp_path):
+def test_read_long_lines_have_horizontal_continuation(tmp_path):
     f = tmp_path / "wide.txt"
     f.write_text("y" * 10_000, encoding="utf-8")
     res = _read(f)
-    assert "…[+" in res["content"]
+    assert "…[+" not in res["content"]
     assert len(res["content"]) < 3000
+    assert res["next_start_line"] == 1
+    assert res["next_start_column"] == server.MAX_LINE_CHARS + 1
 
 
 def test_read_bom_and_crlf(tmp_path):
@@ -345,17 +347,72 @@ def test_read_next_start_line_pages_to_the_end(tmp_path):
     assert seen == 200  # every line delivered exactly once, no gap or overlap
 
 
-def test_read_emits_first_line_even_if_it_busts_the_budget(tmp_path, monkeypatch):
-    """A read must always make progress; returning zero lines would wedge the
-    caller re-requesting the same start_line forever. Only reachable with a
-    small FS_MCP_MAX_BYTES, since MAX_LINE_CHARS clips any line long before
-    it can exhaust the default 50KB on its own."""
+def test_read_splits_first_line_instead_of_busting_the_budget(tmp_path, monkeypatch):
+    """A wide first line must make progress without exceeding the byte budget."""
     monkeypatch.setattr(server, "MAX_BYTES", 64)
     f = tmp_path / "lines.txt"
     f.write_text("z" * 400 + "\nsecond\n", encoding="utf-8")
     res = _read(f)
     assert res["start_line"] == 1 and res["end_line"] == 1
-    assert res["truncated"] is True and res["next_start_line"] == 2
+    assert res["truncated"] is True and res["next_start_line"] == 1
+    assert res["next_start_column"] > 1
+    assert len(res["content"].encode("utf-8")) <= 64
+
+
+@pytest.mark.parametrize(
+    ("source", "expected", "next_column"),
+    [("ab🙂", "1\tab🙂", None), ("a🙂界", "1\ta🙂", 3)],
+)
+def test_read_multibyte_byte_boundary(tmp_path, monkeypatch, source, expected, next_column):
+    monkeypatch.setattr(server, "MAX_BYTES", 8)
+    path = tmp_path / "boundary.txt"
+    path.write_text(source, encoding="utf-8")
+    data = _read(path)
+    assert data["content"] == expected
+    assert data["next_start_column"] == next_column
+    assert data["truncated_by"] == ("bytes" if next_column else None)
+
+
+def test_hidden_only_scan_exhaustion_is_explicit(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MAX_SCANNED_ENTRIES", 3)
+    for index in range(5):
+        (tmp_path / f".hidden-{index}").touch()
+    result = asyncio.run(server.list(str(tmp_path)))
+    assert result.structured_content["count"] == 0
+    assert result.structured_content["scan_capped"] is True
+    assert "examined 3 entries, including hidden entries" in result.content[0].text
+
+
+def test_explicit_codec_bypasses_binary_heuristic_and_renders_loss(tmp_path):
+    path = tmp_path / "oem.txt"
+    path.write_bytes("日本語".encode("cp932"))
+    result = asyncio.run(server.read(str(path), encoding="cp932"))
+    assert not result.is_error
+    assert "日本語" in result.content[0].text
+    assert "encoding=cp932" in result.content[0].text
+    path.write_bytes(b"hello\xff")
+    result = asyncio.run(server.read(str(path), encoding="utf-8"))
+    assert "hello�" in result.content[0].text
+    assert "decode_loss=true" in result.content[0].text
+
+
+def test_content_only_reconstructs_wide_asymmetric_unicode_pages(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "MAX_BYTES", 73)
+    monkeypatch.setattr(server, "MAX_LINE_CHARS", 17)
+    original = "α🙂界" * 37 + "tail"
+    f = tmp_path / "unicode.txt"
+    f.write_text(original, encoding="utf-8")
+    line = column = 1
+    rebuilt = ""
+    for _ in range(100):
+        res = _read(f, start_line=line, start_column=column, content_only=True)
+        assert len(res["content"].encode("utf-8")) <= server.MAX_BYTES
+        rebuilt += res["content"]
+        assert res["encoding"] == "utf-8" and res["decode_loss"] is False
+        if not res["truncated"]:
+            break
+        line, column = res["next_start_line"], res["next_start_column"]
+    assert rebuilt == original
 
 
 def test_read_truncation_hint_reaches_the_model(tmp_path):

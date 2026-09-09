@@ -2,6 +2,12 @@
 
 The server exposes exactly two Ask First tools:
 
+Install explicitly with `install-workspace.py /path/to/project --with-edit`.
+These tools mutate disk, not VS Code's unsaved buffers. Save the target before
+using them. They do not provide Continue's accept/reject diff UI or atomic
+multi-edit batches; keep the built-in editor tools enabled. `dry_run` is a
+preview, not a staged transaction. See [migration](../CONTINUE_COMPATIBILITY.md).
+
 | Tool | Purpose |
 |---|---|
 | `edit(path, old_string, new_string, replace_all?, dry_run?)` | Exact-first replacement with Unicode-normalized fuzzy fallback |

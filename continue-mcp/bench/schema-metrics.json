@@ -3,27 +3,27 @@
   "schema_version": 1,
   "servers": {
     "edit": {
-      "estimated_tokens": 256,
+      "estimated_tokens": 291,
       "tool_count": 2,
       "tools": {
         "create_file": 94,
-        "edit": 162
+        "edit": 197
       }
     },
     "fs": {
-      "estimated_tokens": 304,
+      "estimated_tokens": 347,
       "tool_count": 2,
       "tools": {
         "list": 110,
-        "read": 194
+        "read": 237
       }
     },
     "search": {
-      "estimated_tokens": 409,
+      "estimated_tokens": 418,
       "tool_count": 2,
       "tools": {
         "files": 140,
-        "grep": 269
+        "grep": 278
       }
     },
     "shell": {

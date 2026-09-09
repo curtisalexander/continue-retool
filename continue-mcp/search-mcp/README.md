@@ -57,23 +57,26 @@ uv run search-mcp                            # Continue launches this for you
 
 ## 3. Wire it into Continue and retire the built-ins
 
-1. Copy `.continue/mcpServers/search.yaml` into your workspace's `.continue/mcpServers/`.
-2. In Agent-mode tool settings:
+1. Run `python continue-mcp/install-workspace.py /path/to/project --only search`
+   from the toolkit repository, then run the same selection with `--check`.
+2. Verify search in your actual Continue version before changing Agent-mode tool settings:
    - set built-in **Grep search** → **Excluded**
    - set built-in **Glob search** → **Excluded**
-   - consider **`search.grep`** and **`search.files`** → **Automatic** under
+   - consider **`search_grep`** and **`search_files`** → **Automatic** under
      your threat model; path scoping reduces mistakes but is not a sandbox
 
-Now the agent reaches for `rg` instead of Continue's built-in search.
+The installer adds tools; it does not disable built-ins or configure permissions.
+See [the migration checklist](../CONTINUE_COMPATIBILITY.md) for rollback and
+editor/remote-workspace limitations.
 
 ## Usage examples (what the agent calls)
 
 ```jsonc
-search.grep({ "pattern": "TODO|FIXME", "glob": ["*.py"] })
-search.grep({ "pattern": "def \\w+", "path": "src", "max_results": 50 })
-search.grep({ "pattern": "start.*end", "multiline": true, "context": 2 })
-search.grep({ "pattern": "café", "path": "legacy.txt", "encoding": "windows-1252" })
-search.files({ "glob": ["*.ts", "!**/dist/**"] })
+search_grep({ "pattern": "TODO|FIXME", "glob": ["*.py"] })
+search_grep({ "pattern": "def \\w+", "path": "src", "max_results": 50 })
+search_grep({ "pattern": "start.*end", "multiline": true, "context": 2 })
+search_grep({ "pattern": "café", "path": "legacy.txt", "encoding": "windows-1252" })
+search_files({ "glob": ["*.ts", "!**/dist/**"] })
 ```
 
 ## Notes
@@ -97,7 +100,16 @@ search.files({ "glob": ["*.ts", "!**/dist/**"] })
   Now the buffer is raised to `SEARCH_MCP_MAX_RECORD` (default 8MB) and each line
   is clipped to `SEARCH_MCP_MAX_LINE_CHARS` (default 500, `line_clipped` flags it);
   a record past even 8MB degrades to a partial result, never a traceback.
-- **`context` and `multiline`** map to `rg -C` and `rg --multiline --multiline-dotall`.
+- **Bounded context and output.** `context` maps to `rg -C` but is capped at 20
+  lines (`SEARCH_MCP_MAX_CONTEXT`). Context and matches together are capped by
+  `SEARCH_MCP_MAX_OUTPUT_ROWS` (2000) and `SEARCH_MCP_MAX_OUTPUT_BYTES` (100KiB
+  of rendered rows, including paths). File listings share the byte budget.
+  Summary, fencing, bounded error diagnostics, and the structured copy are
+  additional protocol overhead. Text reports the effective context and any
+  clamping, plus `truncated_by` when results are cut off.
+  A match-count cap uses one-match lookahead, so exactly-at-cap results correctly
+  report `truncated: false`; trailing context is retained when it fits.
+- **`multiline`** maps to `rg --multiline --multiline-dotall`.
 - **Timeout** (`SEARCH_MCP_TIMEOUT`, default 30s) kills a runaway search and returns
   whatever was collected with `timed_out: true`.
 - **Shelling out to `rg` is the design**, not a stopgap: the toolkit is pure Python

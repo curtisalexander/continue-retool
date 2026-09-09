@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Any, cast
 import pytest
+from mcp.types import TextContent
 
 SCRIPT = Path(__file__).parents[1] / "install-workspace.py"
 SPEC = importlib.util.spec_from_file_location("install_workspace", SCRIPT)
@@ -12,12 +13,15 @@ installer = cast(Any, importlib.util.module_from_spec(SPEC))
 SPEC.loader.exec_module(installer)
 
 def test_defaults_and_sql_selection():
-    assert installer._selection(None, False) == ["shell", "fs", "search", "edit"]
+    assert installer._selection(None, False) == ["shell", "fs", "search"]
     assert installer._selection(None, True)[-1] == "sql"
+    assert installer._selection(None, True, True)[-2:] == ["sql", "edit"]
     assert installer._selection("sql,fs", False) == ["sql", "fs"]
     assert installer._selection(" sql, fs ", False) == ["sql", "fs"]
     with pytest.raises(ValueError, match="empty"):
         installer._selection("fs, ", False)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        installer._selection("fs", False, True)
 
 def test_install_requires_existing_directory(tmp_path: Path):
     with pytest.raises(RuntimeError, match="does not exist or is not a directory"):
@@ -41,6 +45,79 @@ def test_check_uses_handshake_without_subprocess_dependency(tmp_path: Path, monk
     monkeypatch.setattr(installer, "_handshake", handshake)
     installer.check(str(tmp_path), ["fs"], "/tools/uv")
     assert calls == [("fs", os.path.abspath("/tools/uv"), tmp_path.resolve(), {"MCP_WORKSPACE": str(tmp_path.resolve())})]
+
+
+def test_handshake_dispatches_functional_fs_check(tmp_path: Path, monkeypatch):
+    calls = []
+    class Result:
+        is_error = False
+        structured_content = {"ok": True, "content": "before continue-mcp-check-7c19"}
+        content = [TextContent(type="text", text="before continue-mcp-check-7c19")]
+    class Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def call_tool(self, name, arguments, **kwargs):
+            calls.append((name, arguments, kwargs))
+            return Result()
+    monkeypatch.setattr("fastmcp.Client", Client)
+    asyncio = __import__("asyncio")
+    asyncio.run(installer._handshake("fs", "/tools/uv", tmp_path, {"MCP_WORKSPACE": str(tmp_path)}))
+    assert calls[0][0] == "read"
+    assert calls[0][2] == {"raise_on_error": False}
+    assert not list(tmp_path.glob(".continue-mcp-check-*"))
+
+
+def test_search_operational_check_reports_missing_rg(tmp_path: Path, monkeypatch):
+    class Result:
+        is_error = True
+        structured_content = {"ok": False, "error": "ripgrep executable not found"}
+        content = []
+    class Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def call_tool(self, *args, **kwargs): return Result()
+    monkeypatch.setattr("fastmcp.Client", Client)
+    asyncio = __import__("asyncio")
+    with pytest.raises(RuntimeError, match="ripgrep executable not found"):
+        asyncio.run(installer._handshake("search", "/tools/uv", tmp_path, {"MCP_WORKSPACE": str(tmp_path)}))
+    assert not list(tmp_path.glob(".continue-mcp-check-*"))
+
+
+@pytest.mark.parametrize("server", ["search", "shell"])
+def test_operational_check_does_not_mistake_argument_echo_for_output(tmp_path, monkeypatch, server):
+    class Result:
+        is_error = False
+        structured_content = {"ok": True, "count": 0, "matches": [], "exit_code": 0, "stdout": ""}
+        content = [TextContent(type="text", text="requested continue-mcp-check-7c19")]
+    class Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def call_tool(self, *args, **kwargs): return Result()
+    monkeypatch.setattr("fastmcp.Client", Client)
+    import asyncio
+    with pytest.raises(RuntimeError, match="operational check did not"):
+        asyncio.run(installer._handshake(server, "/tools/uv", tmp_path, {}))
+    assert not list(tmp_path.glob(".continue-mcp-check-*"))
+
+
+def test_operational_check_requires_content_visible_to_continue():
+    class Result:
+        is_error = False
+        structured_content = {"ok": True, "content": "marker"}
+        content = []
+    with pytest.raises(RuntimeError, match="no expected marker"):
+        installer._assert_result("fs", Result(), "marker")
+
+
+def test_warns_but_does_not_remove_unselected_owned_server(tmp_path: Path, capsys):
+    installer.install(str(tmp_path), ["edit"], "/tools/uv")
+    target = tmp_path / ".continue/mcpServers/edit.yaml"
+    installer.warn_unselected_owned(str(tmp_path), ["fs"])
+    assert target.exists()
+    assert "never silently removes" in capsys.readouterr().err
 
 def test_install_stamps_absolute_paths_and_is_idempotent(tmp_path: Path):
     detected = installer.detect_shell_env()

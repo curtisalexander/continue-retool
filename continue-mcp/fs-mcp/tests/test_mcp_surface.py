@@ -29,6 +29,22 @@ def test_read_over_mcp(tmp_path):
     assert res.data["content"] == "2\ttwo"
 
 
+def test_content_only_read_over_mcp(tmp_path):
+    f = tmp_path / "plain.txt"
+    f.write_text("one\ntwo\n", encoding="utf-8")
+
+    async def scenario():
+        async with Client(mcp) as c:
+            return await c.call_tool("read", {
+                "path": str(f), "content_only": True,
+            })
+
+    res = asyncio.run(scenario())
+    assert res.data["content"] == "one\ntwo"
+    assert res.data["content_only"] is True
+    assert res.data["encoding"] == "utf-8"
+
+
 def test_list_over_mcp(tmp_path):
     (tmp_path / "x.py").write_text("", encoding="utf-8")
 

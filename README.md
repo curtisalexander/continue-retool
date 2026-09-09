@@ -21,15 +21,19 @@ Automatic.
 <!-- END GENERATED SERVER INVENTORY -->
 
 All servers share one distribution, lockfile, and environment while running as
-separate stdio processes. Install the four defaults with:
+separate stdio processes. Install the three read/execution defaults with:
 
 ```bash
 uv run continue-mcp/install-workspace.py /path/to/project
+# explicitly opt into disk mutation (and optionally combine with SQL):
+uv run continue-mcp/install-workspace.py /path/to/project --with-edit --with-sql
 # add packaged, optional SQL:
 uv run continue-mcp/install-workspace.py /path/to/project --with-sql
 ```
 
-See [the toolkit guide](continue-mcp/README.md), [current architecture](ARCHITECTURE.md),
+The installer does not change model configuration, built-in permissions, or remove
+existing server YAML. See the [Continue compatibility and migration guide](continue-mcp/CONTINUE_COMPATIBILITY.md),
+[the toolkit guide](continue-mcp/README.md), [current architecture](ARCHITECTURE.md),
 and [ADRs](docs/adr/README.md). Superseded explorations remain clearly retained
 under [docs/history](docs/history/).
 

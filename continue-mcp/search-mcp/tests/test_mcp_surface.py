@@ -80,3 +80,27 @@ def test_read_only_tools_are_annotated():
     for name in ('grep', 'files'):
         ann = tools[name].annotations
         assert ann and ann.readOnlyHint is True, f"{name} should be readOnlyHint"
+
+
+@needs_rg
+def test_regex_diagnostic_reaches_continue_as_protocol_error(tmp_path):
+    async def scenario():
+        async with Client(mcp) as client:
+            return await client.call_tool("grep", {
+                "pattern": "[", "path": str(tmp_path),
+            }, raise_on_error=False)
+
+    result = asyncio.run(scenario())
+    assert result.is_error
+    text = "\n".join(b.text for b in result.content if b.type == "text")
+    assert "unclosed character class" in text
+
+
+def test_jail_refusal_is_a_protocol_error(tmp_path):
+    async def scenario():
+        async with Client(mcp) as client:
+            return await client.call_tool("files", {"path": "../outside"}, raise_on_error=False)
+
+    result = asyncio.run(scenario())
+    assert result.is_error
+    assert "workspace path scope" in result.content[0].text

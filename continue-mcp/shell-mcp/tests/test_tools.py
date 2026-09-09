@@ -159,6 +159,89 @@ def test_ring_buffer_caps_and_marks_truncation():
     assert len(rb) == 500               # logical length preserved for cursors
 
 
+def test_ring_buffer_spill_cap_preserves_capped_drain_and_reports_loss(tmp_path):
+    rb = RingBuffer(cap=100, spill_target=str(tmp_path / "out.log"), spill_cap=120)
+    rb.write(b"A" * 500)
+    rb.write(b"B" * 500)
+    rb.close()
+    assert rb.total == 1000
+    assert rb.spill_bytes <= 120
+    assert rb.spill_error and "spill cap reached" in rb.spill_error
+    assert "recovery loss" in rb.text()
+
+
+def test_ring_buffer_spill_write_error_preserves_capped_drain(tmp_path, monkeypatch):
+    rb = RingBuffer(cap=100, spill_target=str(tmp_path / "out.log"))
+    class BrokenSink:
+        def write(self, _chunk):
+            raise OSError(28, "No space left on device")
+        def close(self):
+            pass
+    monkeypatch.setattr("builtins.open", lambda *_a, **_k: BrokenSink())
+    rb.write(b"x" * 500)
+    rb.write(b"y" * 500)
+    rb.close()
+    assert rb.total == 1000 and rb.spill_error
+    assert "No space left" in rb.spill_error
+
+
+def test_job_drains_and_exits_after_spill_write_failure(monkeypatch):
+    class BrokenWriteSink:
+        def write(self, _chunk):
+            raise OSError(28, "job spill write failed")
+        def close(self):
+            pass
+
+    def broken_open(buf):
+        buf._spill_file = BrokenWriteSink()
+        buf.spill_path = buf.spill_target
+
+    monkeypatch.setattr(RingBuffer, "_open_spill", broken_open)
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def scenario():
+        code = "import sys; sys.stdout.write('x'*400000); sys.stdout.flush()"
+        return (await server.run(f'"{PY}" -c "{code}"', shell=sh, timeout=15)).structured_content
+
+    snap = asyncio.run(scenario())
+    assert snap["state"] == "exited" and snap["exit_code"] == 0
+    assert server.JOBS[snap["job_id"]].stdout.total == 400000
+    assert "job spill write failed" in snap["stdout_spill_error"]
+
+
+@pytest.mark.parametrize("failure", ["flush", "close"])
+def test_job_drains_and_exits_after_spill_finalize_failure(monkeypatch, failure):
+    class BrokenFinalizeSink:
+        def write(self, chunk):
+            return len(chunk)
+        def flush(self):
+            if failure == "flush":
+                raise OSError("job spill flush failed")
+        def close(self):
+            if failure == "close":
+                raise OSError("job spill close failed")
+
+    def broken_open(buf):
+        buf._spill_file = BrokenFinalizeSink()
+        buf.spill_path = buf.spill_target
+
+    monkeypatch.setattr(RingBuffer, "_open_spill", broken_open)
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+
+    async def scenario():
+        code = "import sys; sys.stdout.write('y'*400000); sys.stdout.flush()"
+        return (await server.run(f'"{PY}" -c "{code}"', shell=sh, timeout=15)).structured_content
+
+    snap = asyncio.run(scenario())
+    assert snap["state"] == "exited" and snap["exit_code"] == 0
+    assert server.JOBS[snap["job_id"]].stdout.total == 400000
+    assert f"job spill {failure} failed" in snap["stdout_spill_error"]
+
+
 def test_ring_buffer_cursor_stable_across_truncation():
     """A cursor taken BEFORE the buffer truncates must never re-serve consumed
     bytes or skip new ones — offsets are logical stream positions, not indexes
@@ -381,6 +464,50 @@ def test_interactive_send_reaches_stdin():
 
     res = asyncio.run(scenario())
     assert "got:ping-from-test" in res["stdout"]
+
+
+def test_send_rejects_after_eof():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    async def scenario():
+        code = "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stdout.flush()"
+        started = (await server.start(
+            f'"{PY}" -c "{code}"', shell=sh, timeout=15, interactive=True,
+        )).structured_content
+        jid = started["job_id"]
+        await server.send(jid, "done\n", eof=True)
+        result = await server.send(jid, "too late")
+        job = server.JOBS[jid]
+        assert job._reaper_task is not None
+        await asyncio.wait_for(asyncio.shield(job._reaper_task), timeout=5)
+        output = (await server.output(jid)).structured_content
+        return result, output
+    result, output = asyncio.run(scenario())
+    assert result.is_error is True
+    assert "closed" in result.structured_content["error"]
+    assert output["stdout"] == "done\n"
+    assert output["state"] == "exited" and output["exit_code"] == 0
+
+
+def test_run_cancellation_kills_and_reaps():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    async def scenario():
+        server.JOBS.clear()
+        task = asyncio.create_task(server.run(
+            f'"{PY}" -c "import time; time.sleep(30)"', shell=sh, timeout=60
+        ))
+        while not server.JOBS:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return next(iter(server.JOBS.values()))
+    job = asyncio.run(scenario())
+    assert job.state == "killed" and job.proc.returncode is not None
+    assert job._reaper_task and job._reaper_task.done()
 
 
 def test_output_tail_mode():

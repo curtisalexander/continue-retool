@@ -46,8 +46,8 @@ CONFLICT_HASH_MAX_BYTES = _env_int(
 
 
 def _result(summary: str, data: dict, diff: str = "") -> ToolResult:
-    """Return a ToolResult so Continue's UI shows a rendered summary + diff
-    (content) while the model still gets the structured fields (res.data)."""
+    """Continue consumes the rendered summary/diff; other clients may also
+    consume the structured payload."""
     return _shared_result(summary, data, block=diff, lang="diff")
 
 
@@ -231,7 +231,9 @@ async def edit(
     replace_all: bool = False,
     dry_run: bool = False,
 ) -> ToolResult:
-    """Replace old_string with new_string in a file. Matches exactly first, then
+    """Replace old_string with new_string on disk immediately; save the target's
+    editor buffer first, or use Continue's built-in edit tools for unsaved changes
+    and interactive diff approval. Matches exactly first, then
     falls back to a Unicode-normalized match (smart quotes, dashes, NBSP, accents,
     trailing whitespace, CRLF) so non-ASCII regions still match. old_string must be
     unique unless replace_all is set. dry_run previews the diff without writing."""

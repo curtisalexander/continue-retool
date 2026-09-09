@@ -56,6 +56,9 @@ MAX_RECORD_BYTES = _env_int(
     "SEARCH_MCP_MAX_RECORD", 8 * 1024 * 1024, 64 * 1024, 64 * 1024 * 1024
 )
 MAX_ERROR_BYTES = 64 * 1024
+MAX_CONTEXT = _env_int("SEARCH_MCP_MAX_CONTEXT", 20, 0, 100)
+MAX_OUTPUT_ROWS = _env_int("SEARCH_MCP_MAX_OUTPUT_ROWS", 2000, 1, 10_000)
+MAX_OUTPUT_BYTES = _env_int("SEARCH_MCP_MAX_OUTPUT_BYTES", 100 * 1024, 1024, 4 * 1024 * 1024)
 
 T = TypeVar("T")
 SearchEncoding = Literal["utf-8", "utf-16le", "utf-16be", "windows-1252"]
@@ -105,8 +108,9 @@ def build_grep_args(
         args.append("-i")
     if multiline:
         args += ["--multiline", "--multiline-dotall"]
-    if context > 0:
-        args += ["-C", str(context)]
+    effective_context = max(0, min(context, MAX_CONTEXT))
+    if effective_context:
+        args += ["-C", str(effective_context)]
     if hidden:
         args.append("--hidden")
     if no_ignore:
@@ -147,10 +151,9 @@ def _clip(text: str) -> tuple[str, bool]:
 async def _collect_json(
     stdout: asyncio.StreamReader, out: list, max_results: int, flags: dict
 ) -> bool:
-    """Stream rg --json, append match/context rows to `out`, stop at the cap.
-    Sets flags['line_clipped'] if any line was clipped. Returns True if we hit
-    the match cap."""
+    """Collect bounded match/context rows, looking ahead to prove truncation."""
     matches = 0
+    output_bytes = 0
     async for raw in stdout:
         try:
             obj = json.loads(raw)
@@ -172,6 +175,10 @@ async def _collect_json(
         except (KeyError, TypeError, ValueError, binascii.Error):
             flags["decode_error"] = True
             continue
+        if t == "match" and matches >= max_results:
+            # Look ahead one match: reaching the cap exactly is not truncation.
+            flags["truncated_by"] = "matches"
+            return True
         if clipped:
             flags["line_clipped"] = True
         row = {
@@ -201,10 +208,15 @@ async def _collect_json(
                     row["column"] = char_column
                 except (KeyError, TypeError, ValueError):
                     flags["decode_error"] = True
-            matches += 1
-        out.append(row)
-        if matches >= max_results:
+        cost = len(f"{row['file']}:{row['line']}: {row['text']}\n".encode("utf-8", "replace"))
+        if len(out) >= MAX_OUTPUT_ROWS or output_bytes + cost > MAX_OUTPUT_BYTES:
+            flags["output_cap"] = True
+            flags["truncated_by"] = "rows" if len(out) >= MAX_OUTPUT_ROWS else "bytes"
             return True
+        out.append(row)
+        output_bytes += cost
+        if t == "match":
+            matches += 1
     return False
 
 
@@ -323,7 +335,7 @@ def _capped_result(
     timed_out = run.timed_out
     oversize = isinstance(run.collector_error, ValueError)
     collector_failed = run.collector_error is not None
-    truncated = bool(run.value) or collector_failed or bool(flags.get("decode_error"))
+    truncated = bool(run.value) or collector_failed or bool(flags.get("decode_error")) or timed_out
     # rg exit codes: 0 = matches, 1 = none, 2 = real error.
     error = None
     error_type = None
@@ -352,7 +364,9 @@ def _capped_result(
         "matches": out,
         "count": sum(1 for r in out if r["kind"] == "match"),
         "truncated": truncated,
+        "truncated_by": flags.get("truncated_by") or (error_type if error else None),
         "line_clipped": bool(flags.get("line_clipped")),
+        "output_capped": bool(flags.get("output_cap")),
         "timed_out": timed_out,
         "error": error,
         "error_type": error_type,
@@ -361,27 +375,41 @@ def _capped_result(
 
 async def _run_files(args: list[str], cap: int, timeout: float) -> dict:
     paths: list[str] = []
+    output_bytes = 0
+    truncated_by = None
+
+    def append_path(raw: bytes) -> bool:
+        nonlocal output_bytes, truncated_by
+        if len(raw) > MAX_RECORD_BYTES:
+            raise ValueError("a file path exceeded the record limit")
+        path = decode_filename(raw)
+        cost = len(path.encode("utf-8", "replace")) + 1
+        if len(paths) >= cap or output_bytes + cost > MAX_OUTPUT_BYTES:
+            truncated_by = "files" if len(paths) >= cap else "bytes"
+            return True
+        paths.append(path)
+        output_bytes += cost
+        return False
+
     async def _collect_files(stdout: asyncio.StreamReader) -> bool:
         pending = bytearray()
         while chunk := await stdout.read(8192):
             pending.extend(chunk)
             while (end := pending.find(0)) >= 0:
-                paths.append(decode_filename(bytes(pending[:end])))
+                capped = append_path(bytes(pending[:end]))
                 del pending[: end + 1]
-                if len(paths) >= cap:
+                if capped:
                     return True
             if len(pending) > MAX_RECORD_BYTES:
                 raise ValueError("a file path exceeded the record limit")
         # Defensive support for producers that omit the final delimiter.
         if pending:
-            paths.append(decode_filename(bytes(pending)))
-            if len(paths) >= cap:
-                return True
+            return append_path(bytes(pending))
         return False
 
     run = await _run_process(args, timeout, _collect_files)
     collector_error = run.collector_error
-    truncated = bool(run.value) or collector_error is not None
+    truncated = bool(run.value) or collector_error is not None or run.timed_out
     timed_out = run.timed_out
     error = (
         run.stderr or "ripgrep exited with code 2"
@@ -398,6 +426,7 @@ async def _run_files(args: list[str], cap: int, timeout: float) -> dict:
         "files": paths,
         "count": len(paths),
         "truncated": truncated,
+        "truncated_by": truncated_by or (error_type if error else None),
         "timed_out": timed_out,
         "error": error,
         "error_type": error_type,
@@ -434,16 +463,18 @@ async def grep(
     max_results: int = 200,
     encoding: Optional[SearchEncoding] = None,
 ) -> ToolResult:
-    """Search file contents with ripgrep (regex, gitignore-aware). Returns matching
-    lines as {file, line, column, text}; capped at max_results and flagged truncated
-    if the cap is hit. Long matching lines are clipped to 500 chars (line_clipped
-    flags it). Use `glob` (e.g. ['*.py']) to scope by file type. For a known
-    legacy file, set encoding='windows-1252' so non-ASCII patterns match."""
+    """Search saved disk text with ripgrep (regex, gitignore-aware). Results include
+    matching lines and context; capped by matches, rows, and output bytes with a
+    truncation reason. Context is clamped to 20 lines by default. Long lines are
+    clipped to 500 characters; use fs_read for full text. Use glob (e.g. ['*.py'])
+    to scope by file type. For a known legacy file, set encoding='windows-1252'
+    so non-ASCII patterns match."""
     path = _resolve(path)
     if err := jail_error(path):
         return _result(f"❌ {err}",
-                       {"matches": [], "count": 0, "truncated": False,
-                        "line_clipped": False, "timed_out": False, "error": err})
+                       {"ok": False, "matches": [], "count": 0, "truncated": False,
+                        "line_clipped": False, "timed_out": False, "error": err,
+                        "error_type": "jail"})
     cap = max(1, min(max_results, MAX_RESULTS_CAP))
     args = build_grep_args(
         pattern, path, ignore_case, glob, multiline, context, hidden, no_ignore,
@@ -457,13 +488,20 @@ async def grep(
         )
     except (OSError, RuntimeError) as exc:
         data = _subprocess_failure("spawn", str(exc), files=False)
+    data["context"] = max(0, min(context, MAX_CONTEXT))
+    data["context_capped"] = context > MAX_CONTEXT
     n = data["count"]
     flags = [label for key, label in (
         ("truncated", "truncated"), ("line_clipped", "long lines clipped"),
         ("timed_out", "timed out"), ("error", "error"),
     ) if data.get(key)]
     summary = f"{n} match(es) for {pattern!r}" + (f" [{', '.join(flags)}]" if flags else "")
+    if data.get("truncated_by"):
+        summary += f" · truncated_by={data['truncated_by']}"
+    summary += f" · context={data['context']}" + (" (context capped)" if data["context_capped"] else "")
     block = "\n".join(f"{r['file']}:{r['line']}: {r['text']}" for r in data["matches"])
+    if data.get("error"):
+        block += ("\n" if block else "") + f"ERROR [{data.get('error_type') or 'unknown'}]: {data['error']}"
     return _result(summary, data, block)
 
 
@@ -481,8 +519,8 @@ async def files(
     path = _resolve(path)
     if err := jail_error(path):
         return _result(f"❌ {err}",
-                       {"files": [], "count": 0, "truncated": False,
-                        "timed_out": False, "error": err})
+                       {"ok": False, "files": [], "count": 0, "truncated": False,
+                        "timed_out": False, "error": err, "error_type": "jail"})
     cap = max(1, min(max_results, MAX_RESULTS_CAP))
     args = build_files_args(glob, path, hidden, no_ignore)
     try:
@@ -494,7 +532,11 @@ async def files(
         ("error", "error"),
     ) if data.get(key)]
     summary = f"{data['count']} file(s)" + (f" [{', '.join(flags)}]" if flags else "")
+    if data.get("truncated_by"):
+        summary += f" · truncated_by={data['truncated_by']}"
     block = "\n".join(data["files"])
+    if data.get("error"):
+        block += ("\n" if block else "") + f"ERROR [{data.get('error_type') or 'unknown'}]: {data['error']}"
     return _result(summary, data, block)
 
 

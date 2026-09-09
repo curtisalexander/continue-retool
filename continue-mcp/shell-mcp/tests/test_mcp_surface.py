@@ -2,12 +2,15 @@
 an MCP client (Continue) would — start a job, poll it, read output, all over
 the MCP boundary. Deterministic: no LLM, no network, in-process transport."""
 import asyncio
+import re
 import shutil
 import sys
 
 import pytest
 
 from fastmcp import Client
+from mcp.shared.exceptions import McpError
+from mcp.types import CancelledNotification, CancelledNotificationParams
 
 from shell_mcp import server
 from shell_mcp.server import IS_WINDOWS, mcp
@@ -100,6 +103,156 @@ def test_run_over_mcp():
     assert res.data["exit_code"] == 0
     assert "via-mcp" in res.data["stdout"]
     assert res.data["state"] == "exited"
+
+
+def test_rendered_content_contains_complete_recovery_contract_over_mcp():
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    async def scenario():
+        async with Client(mcp) as c:
+            return await c.call_tool("run", {
+                "cmd": f'"{PY}" -c "print(\'content-contract\')"',
+                "shell": sh, "timeout": 15,
+            })
+    res = asyncio.run(scenario())
+    text = "\n".join(block.text for block in res.content if block.type == "text")
+    assert "content-contract" in text
+    assert "job=j" in text
+    assert "stdout_cursor=" in text and "stderr_cursor=" in text
+    assert "encoding=" in text
+
+
+def test_failure_sets_mcp_is_error_and_keeps_structured_content():
+    async def scenario():
+        async with Client(mcp) as c:
+            return await c.call_tool("run", {"cmd": "bash nested", "shell": "bash"}, raise_on_error=False)
+    res = asyncio.run(scenario())
+    assert res.is_error is True
+    assert res.structured_content
+    assert res.structured_content["ok"] is False
+    assert res.structured_content["error_type"] == "validation"
+
+
+def test_content_only_incremental_output_uses_exact_rendered_cursors(tmp_path):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    producer = tmp_path / "two_chunks.py"
+    release = tmp_path / "release-second-chunk"
+    producer.write_text(
+        "import pathlib, sys, time\n"
+        "print('async-chunk-one', flush=True)\n"
+        "while not pathlib.Path(sys.argv[1]).exists(): time.sleep(.01)\n"
+        "print('async-chunk-two', flush=True)\n",
+        encoding="utf-8",
+    )
+
+    def rendered(result):
+        return "\n".join(block.text for block in result.content if block.type == "text")
+
+    def cursors(text):
+        match = re.search(r"stdout_cursor=(\d+) stderr_cursor=(\d+)", text)
+        assert match, text
+        return int(match.group(1)), int(match.group(2))
+
+    async def scenario():
+        async with Client(mcp) as c:
+            started = await c.call_tool("start", {
+                "cmd": f'"{PY}" "{producer}" "{release}"', "shell": sh, "timeout": 15,
+            })
+            job_match = re.search(r"\bjob=(j\d+)\b", rendered(started))
+            assert job_match
+            jid = job_match[1]
+            first_text = ""
+            for _ in range(100):
+                first_text = rendered(await c.call_tool("output", {
+                    "job_id": jid, "since_stdout": 0, "since_stderr": 0,
+                }))
+                if "async-chunk-one" in first_text:
+                    break
+                await asyncio.sleep(0.01)
+            out_cursor, err_cursor = cursors(first_text)
+            release.touch()
+            second_text = ""
+            for _ in range(200):
+                second_text = rendered(await c.call_tool("output", {
+                    "job_id": jid,
+                    "since_stdout": out_cursor,
+                    "since_stderr": err_cursor,
+                }))
+                if "async-chunk-two" in second_text:
+                    break
+                await asyncio.sleep(0.01)
+            return first_text, second_text, cursors(second_text)
+
+    first, second, second_cursors = asyncio.run(scenario())
+    assert "\nasync-chunk-one\n" in first and "async-chunk-two" not in first
+    assert "\nasync-chunk-two\n" in second and "async-chunk-one" not in second
+    assert second_cursors[0] > cursors(first)[0]
+
+
+def test_client_call_cancellation_kills_tree_without_disconnect(tmp_path):
+    sh = default_shell()
+    if sh is None:
+        pytest.skip("no usable shell on this host")
+    ready = tmp_path / "child-ready"
+    marker = tmp_path / "cancelled-child-side-effect"
+    trigger = tmp_path / "allow-side-effect"
+    child = tmp_path / "delayed_marker.py"
+    child.write_text(
+        "import pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).touch()\n"
+        "while not pathlib.Path(sys.argv[3]).exists(): time.sleep(.01)\n"
+        "pathlib.Path(sys.argv[2]).touch()\n",
+        encoding="utf-8",
+    )
+    parent = tmp_path / "parent.py"
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, *sys.argv[1:]])\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    async def scenario():
+        server.JOBS.clear()
+        async with Client(mcp) as c:
+            request_id = c.session._request_id
+            call = asyncio.create_task(c.call_tool("run", {
+                "cmd": f'"{PY}" "{parent}" "{child}" "{ready}" "{marker}" "{trigger}"',
+                "shell": sh, "timeout": 60,
+            }))
+            async with asyncio.timeout(5):
+                while not ready.exists():
+                    await asyncio.sleep(0.01)
+            job = next(reversed(server.JOBS.values()))
+            # Emit the MCP cancellation notification for this real call while
+            # preserving the client session.
+            await c.session.send_notification(CancelledNotification(
+                params=CancelledNotificationParams(
+                    requestId=request_id, reason="cancellation regression test",
+                )
+            ))
+            with pytest.raises(McpError, match="cancelled"):
+                await call
+            # Prove the still-connected client did not rely on lifespan shutdown.
+            assert await c.list_tools()
+            async with asyncio.timeout(5):
+                while (
+                    job.state == "running"
+                    or job._reaper_task is None
+                    or not job._reaper_task.done()
+                ):
+                    await asyncio.sleep(0.01)
+            trigger.touch()
+            await asyncio.sleep(1)
+            return job
+
+    job = asyncio.run(scenario())
+    assert job.state == "killed" and job.proc.returncode is not None
+    assert job._reaper_task and job._reaper_task.done()
+    assert not marker.exists()
 
 
 def test_start_poll_output_lifecycle_over_mcp():

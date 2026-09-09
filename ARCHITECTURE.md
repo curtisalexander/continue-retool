@@ -4,8 +4,8 @@ This is the maintained current-state description. Historical designs are under
 [`docs/history/`](docs/history/).
 
 Continue directly launches selected stdio servers from one packaged Python
-distribution. The installer enables `shell`, `fs`, `search`, and `edit` by
-default; packaged `sql` is opt-in. There is no gateway, notes service, hello
+distribution. The installer enables `shell`, `fs`, and `search` by default;
+disk-mutating `edit` and packaged `sql` are explicit opt-ins. There is no gateway, notes service, hello
 service, manifest manager, or tool factory.
 
 ## Components and authority
@@ -49,8 +49,17 @@ cannot make an absolute concurrency guarantee.
 installer renders all selected YAML first, stamps absolute uv/toolkit/workspace
 and detected-interpreter paths plus `--no-sync`, upgrades only marked or exactly
 recognized legacy generated files, refuses differing user-authored files, and performs one
-`uv sync --locked --project <toolkit>` unless skipped. `--check` compares exact
-rendered content and uses FastMCP `Client`/`StdioTransport` for a live handshake.
+`uv sync --locked --project <toolkit>` unless skipped. It warns about, but never
+silently removes, unselected installer-owned configurations. `--check` compares exact
+rendered content and uses FastMCP `Client`/`StdioTransport` to execute meaningful
+temporary-fixture checks for each selected server; fixtures are created inside and
+removed from the workspace even on failure.
+
+The supported automatic topology is a saved, local, single-root workspace. Remote
+use requires an explicitly validated installation on the same host and filesystem
+as the workspace. Multi-root workspaces require manual configuration and are not
+automatically supported. Tool annotations describe intent; they are not Continue
+permission policy, and the installer never changes models or built-in permissions.
 
 `scripts/sync_metadata.py --check` verifies generated packaging, inventory, and
 landing-page cards. Golden and FastMCP surface tests cover each server.

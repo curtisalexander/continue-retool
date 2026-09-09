@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -327,6 +328,27 @@ def _config_env(text: str) -> dict[str, str]:
     return env
 
 
+def _response_text(result: object) -> str:
+    return "\n".join(
+        str(getattr(block, "text", ""))
+        for block in (getattr(result, "content", None) or [])
+        if getattr(block, "type", None) == "text"
+    )
+
+
+def _assert_result(name: str, result: object, expected: str) -> dict:
+    data = getattr(result, "structured_content", None) or getattr(result, "data", None) or {}
+    text = _response_text(result)
+    if getattr(result, "is_error", False) or data.get("ok") is False:
+        raise RuntimeError(f"{name} operational check failed: {text or data!s}")
+    if expected not in text:
+        raise RuntimeError(
+            f"{name} operational check returned no expected marker {expected!r}: "
+            f"{text or data!s}"
+        )
+    return data
+
+
 async def _handshake(name: str, uv: str, workspace: Path, env: dict[str, str]) -> None:
     from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
@@ -340,7 +362,38 @@ async def _handshake(name: str, uv: str, workspace: Path, env: dict[str, str]) -
     )
     async with asyncio.timeout(120):
         async with Client(transport, init_timeout=120, timeout=120) as client:
-            await client.list_tools()
+            marker = "continue-mcp-check-7c19"
+            with tempfile.TemporaryDirectory(prefix=".continue-mcp-check-", dir=workspace) as temporary:
+                fixture = Path(temporary) / "fixture.txt"
+                fixture.write_text(f"before {marker}\n", encoding="utf-8")
+                if name == "fs":
+                    result = await client.call_tool("read", {"path": str(fixture), "content_only": True}, raise_on_error=False)
+                    data = _assert_result(name, result, marker)
+                    if data.get("content") != f"before {marker}":
+                        raise RuntimeError("fs operational check returned incorrect fixture content")
+                elif name == "search":
+                    result = await client.call_tool("grep", {"pattern": marker, "path": temporary}, raise_on_error=False)
+                    data = _assert_result(name, result, marker)
+                    if data.get("count") != 1 or data.get("matches", [{}])[0].get("text") != f"before {marker}":
+                        raise RuntimeError("search operational check did not find its fixture")
+                elif name == "shell":
+                    result = await client.call_tool("run", {"cmd": f"echo {marker}", "timeout": 15}, raise_on_error=False)
+                    data = _assert_result(name, result, marker)
+                    if data.get("exit_code") != 0 or data.get("stdout", "").strip() != marker:
+                        raise RuntimeError("shell operational check did not produce its output marker")
+                elif name == "edit":
+                    created = Path(temporary) / "created.txt"
+                    result = await client.call_tool("create_file", {"path": str(created), "content": "old-marker"}, raise_on_error=False)
+                    _assert_result(name, result, "Created")
+                    result = await client.call_tool("edit", {"path": str(created), "old_string": "old-marker", "new_string": marker}, raise_on_error=False)
+                    _assert_result(name, result, marker)
+                    if created.read_text(encoding="utf-8") != marker:
+                        raise RuntimeError("edit operational check did not mutate its temporary fixture")
+                elif name == "sql":
+                    result = await client.call_tool("format", {"sql": "SELECT CHECK_MARKER FROM T;"}, raise_on_error=False)
+                    _assert_result(name, result, "check_marker")
+                else:  # inventory validation should make this unreachable
+                    raise RuntimeError(f"no operational check defined for {name}")
 
 
 def check(project: str, selected: list[str], uv: str) -> None:
@@ -355,10 +408,14 @@ def check(project: str, selected: list[str], uv: str) -> None:
         print(f"ok {name}-mcp")
 
 
-def _selection(value: str | None, with_sql: bool) -> list[str]:
+def _selection(value: str | None, with_sql: bool, with_edit: bool = False) -> list[str]:
+    if value is not None and (with_sql or with_edit):
+        raise ValueError("--only is mutually exclusive with --with-sql and --with-edit")
     selected = [name.strip() for name in value.split(",")] if value is not None else list(DEFAULT_SERVERS)
     if with_sql:
         selected.append("sql")
+    if with_edit:
+        selected.append("edit")
     selected = list(dict.fromkeys(selected))
     if any(not name for name in selected):
         raise ValueError("unknown server(s): <empty>")
@@ -368,20 +425,42 @@ def _selection(value: str | None, with_sql: bool) -> list[str]:
     return selected
 
 
+def warn_unselected_owned(project: str, selected: list[str]) -> None:
+    directory = Path(project).resolve() / ".continue" / "mcpServers"
+    remaining = []
+    for name in SERVERS.keys() - set(selected):
+        path = directory / f"{name}.yaml"
+        try:
+            if path.is_file() and _is_owned(path.read_bytes()):
+                remaining.append(name)
+        except OSError:
+            continue
+    if remaining:
+        print(
+            "warning: unselected installer-owned server configuration(s) remain installed: "
+            + ", ".join(sorted(remaining))
+            + ". The installer never silently removes existing configuration. "
+            "In particular, previous default edit users must explicitly keep it with --with-edit "
+            "or manually remove .continue/mcpServers/edit.yaml after reviewing their setup.",
+            file=sys.stderr,
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("project")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--only", help="comma-separated explicit server subset")
-    group.add_argument("--with-sql", action="store_true", help="add optional sql-mcp")
+    parser.add_argument("--only", help="comma-separated explicit server subset")
+    parser.add_argument("--with-sql", action="store_true", help="add optional sql-mcp")
+    parser.add_argument("--with-edit", action="store_true", help="add opt-in disk mutation edit-mcp")
     parser.add_argument("--no-sync", action="store_true")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:
-        selected = _selection(args.only, args.with_sql)
+        selected = _selection(args.only, args.with_sql, args.with_edit)
         uv = shutil.which("uv")
         if not uv:
             raise RuntimeError("uv is not available on PATH")
+        warn_unselected_owned(args.project, selected)
         if args.check:
             check(args.project, selected, uv)
         else:
@@ -389,7 +468,7 @@ def main() -> int:
             if not args.no_sync:
                 sync_deps(uv)
             install(args.project, selected, uv)
-    except (ImportError, OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except Exception as exc:
         print(f"continue-mcp install failed: {exc}", file=sys.stderr)
         return 1
     return 0

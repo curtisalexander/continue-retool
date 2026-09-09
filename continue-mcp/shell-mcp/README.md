@@ -37,7 +37,17 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
   `.continue-mcp/logs/` inside the workspace (so workspace-scoped `fs.read`/`search`
   tools can open it), and the `...[N bytes truncated — full output: …]...` marker
   names the file. A job that fits in the buffer never touches disk.
-  `SHELL_MCP_SPILL=0` disables spilling; `SHELL_MCP_SPILL_DIR` relocates it.
+  Each stream's spill is itself bounded by `SHELL_MCP_MAX_SPILL_BYTES` (default
+  16 MiB). `SHELL_MCP_SPILL=0` disables spilling;
+  `SHELL_MCP_SPILL_DIR` relocates it. Disk/open/write/finalize failures and a
+  reached disk cap never stop pipe draining: retained output stays capped and
+  the response reports that the spill is incomplete.
+- **Content-only recovery contract.** Continue currently consumes MCP text
+  content rather than `structuredContent`. Shell transcripts therefore render
+  the job ID, stdout/stderr byte cursors, selected encoding, decode loss, spill
+  paths, and spill-loss diagnostics directly in text as well as preserving the
+  structured fields. Failed starts, timeouts, kills, non-zero exits, decode and
+  stdin errors set MCP `isError`.
 - **One encoding per job.** PowerShell starts with UTF-8 console and pipeline
   defaults so PowerShell text and cooperating programs preserve emoji before
   capture. Bash/PowerShell default to UTF-8; `cmd` defaults to the Windows OEM
@@ -82,3 +92,9 @@ uv run shell-mcp                # run the server (stdio)
 Register `.continue/mcpServers/shell.yaml` (installer-stamped), set the
 built-in `run_terminal_command` to **Excluded**, and `shell.*` to **Ask First**
 because commands have open-world authority.
+
+Continue versions that do not forward their Stop/cancel action to an in-flight
+MCP call cannot trigger server-side cancellation cleanup. When cancellation
+does reach `shell.run`, the server kills the whole process tree and waits for it
+to be reaped before acknowledging cancellation. `shell.kill` is the explicit,
+reliable fallback for background jobs.

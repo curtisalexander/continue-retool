@@ -14,23 +14,34 @@ sandbox. `MCP_JAIL_EXTRA` adds explicit roots and `MCP_JAIL=0` disables scoping.
 ## Install
 
 ```bash
-python install-workspace.py /path/to/project              # shell,fs,search,edit
+python install-workspace.py /path/to/project              # shell,fs,search
+python install-workspace.py /path/to/project --with-edit  # add disk mutation
 python install-workspace.py /path/to/project --with-sql   # defaults plus SQL
+python install-workspace.py /path/to/project --with-edit --with-sql
 python install-workspace.py /path/to/project --only fs,search
 python install-workspace.py /path/to/project --no-sync
 uv run --project . --no-sync python install-workspace.py /path/to/project --check
 ```
 
-`--only` conflicts with `--with-sql`. Installation runs one locked root sync,
+`--only` conflicts with either `--with-sql` or `--with-edit`; the two opt-in flags
+can be combined. Installation runs one locked root sync,
 then creates or upgrades installer-owned YAML files; identical files are unchanged
-and differing user-authored files are refused. A versioned ownership marker makes
+and differing user-authored files are refused. Unselected existing configurations
+are never silently removed: installer-owned ones produce a warning. Users upgrading
+from the former edit-by-default behavior should use `--with-edit` to retain that
+selection, or manually remove its YAML after review. A versioned ownership marker makes
 that distinction explicit, with exact recognition for legacy unmarked generated
 files. YAML stamps absolute uv, toolkit, workspace, and detected shell-interpreter
-paths plus `--no-sync`. Check mode compares exact current rendering and performs a real
-FastMCP stdio handshake. Invoking check through the synced toolkit environment
+paths plus `--no-sync`. Check mode compares exact current rendering and performs real
+fs read, search grep, shell echo, optional edit create/edit, and optional SQL format
+operations against temporary workspace fixtures, which are cleaned on failure.
+This catches runtime failures such as missing `rg`. Invoking check through the synced toolkit environment
 as shown above ensures its FastMCP import is available; import failures are also
 reported as a clean installer failure. The optional `rules/rule-rule.md` guidance is not
 installed automatically.
+
+The installer does not modify Continue model configuration or built-in permissions.
+See [CONTINUE_COMPATIBILITY.md](CONTINUE_COMPATIBILITY.md) before disabling built-ins.
 
 The installer detects and stamps available shell interpreters so a GUI's stale
 PATH is not authoritative. Runtime resolution validates those paths and falls

@@ -62,6 +62,12 @@ def test_grep_args_multiline_and_context():
     assert args[args.index("-C") + 1] == "3"
 
 
+def test_grep_context_is_bounded(monkeypatch):
+    monkeypatch.setattr(server, "MAX_CONTEXT", 7)
+    args = build_grep_args("x", context=10_000)
+    assert args[args.index("-C") + 1] == "7"
+
+
 def test_files_args_globs():
     args = build_files_args(glob=["*.ts"], path="app")
     assert args[0] == "--files"
@@ -125,6 +131,34 @@ def test_json_multibyte_byte_and_character_columns_differ():
     out, flags = asyncio.run(_collect_payload(json.dumps(record).encode() + b"\n"))
     assert out[0]["byte_column"] == 3
     assert out[0]["column"] == 2
+
+
+def test_exact_match_cap_uses_lookahead():
+    def record(line):
+        return {"type": "match", "data": {"path": {"text": "x"},
+            "lines": {"text": "hit\n"}, "line_number": line,
+            "submatches": [{"start": 0, "end": 3}]}}
+
+    payload = json.dumps(record(1)).encode() + b"\n"
+    async def collect():
+        reader = asyncio.StreamReader()
+        reader.feed_data(payload)
+        reader.feed_eof()
+        out, flags = [], {}
+        return await server._collect_json(reader, out, 1, flags), out
+
+    capped, out = asyncio.run(collect())
+    assert capped is False and len(out) == 1
+
+
+def test_total_output_rows_are_bounded(monkeypatch):
+    monkeypatch.setattr(server, "MAX_OUTPUT_ROWS", 2)
+    records = [{"type": "context", "data": {"path": {"text": "x"},
+        "lines": {"text": f"line {i}\n"}, "line_number": i}}
+        for i in range(4)]
+    payload = b"".join(json.dumps(r).encode() + b"\n" for r in records)
+    out, flags = asyncio.run(_collect_payload(payload))
+    assert len(out) == 2 and flags["output_cap"] is True
 
 
 def test_malformed_base64_is_structured_partial_failure(tmp_path, monkeypatch):
@@ -330,3 +364,47 @@ def test_grep_degrades_when_a_record_exceeds_the_hard_ceiling(tmp_path, monkeypa
     d = res.structured_content
     assert d["truncated"] is True
     assert d["error"] and "exceeded" in d["error"]
+
+
+@needs_rg
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_file_cap_requires_an_extra_result(tmp_path, count):
+    for index in range(count):
+        (tmp_path / f"{index}.txt").write_text("x")
+    data = asyncio.run(server.files(path=str(tmp_path), max_results=2)).structured_content
+    assert data["count"] == min(count, 2)
+    assert data["truncated"] is (count > 2)
+
+
+@needs_rg
+def test_exact_match_cap_retains_trailing_context(tmp_path):
+    path = tmp_path / "context.txt"
+    path.write_text("first\nbefore\nNEEDLE\nafter\nlast\n", encoding="utf-8")
+    result = asyncio.run(server.grep("NEEDLE", path=str(path), context=2, max_results=1))
+    data = result.structured_content
+    assert [r["text"] for r in data["matches"]] == ["first", "before", "NEEDLE", "after", "last"]
+    assert data["count"] == 1 and data["truncated"] is False
+
+
+@needs_rg
+def test_excessive_context_is_clamped_and_reported_in_text(tmp_path):
+    path = tmp_path / "context.txt"
+    path.write_text("before\n" * 2000 + "NEEDLE\n" + "after\n" * 2000)
+    result = asyncio.run(server.grep("NEEDLE", path=str(path), context=2000, max_results=1))
+    assert len(result.structured_content["matches"]) == 2 * server.MAX_CONTEXT + 1
+    assert "context capped" in result.content[0].text
+
+
+@needs_rg
+def test_output_byte_budget_counts_unicode_and_paths(tmp_path, monkeypatch):
+    path = tmp_path / "long-path.txt"
+    path.write_text("é🙂hit\n" * 8, encoding="utf-8")
+    row_bytes = len(f"{path}:1: é🙂hit\n".encode("utf-8"))
+    monkeypatch.setattr(server, "MAX_OUTPUT_BYTES", 2 * row_bytes)
+    result = asyncio.run(server.grep("hit", path=str(path)))
+    assert result.structured_content["count"] == 2
+    assert "truncated_by=bytes" in result.content[0].text
+    monkeypatch.setattr(server, "MAX_OUTPUT_BYTES", len(str(path).encode("utf-8")))
+    result = asyncio.run(server.files(path=str(tmp_path)))
+    assert result.structured_content["files"] == []
+    assert "truncated_by=bytes" in result.content[0].text

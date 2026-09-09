@@ -28,4 +28,5 @@ def result(summary: str, data: dict, block: str = "", lang: str = "") -> ToolRes
     return ToolResult(
         content=[TextContent(type="text", text=markdown)],
         structured_content=data,
+        is_error=data.get("ok") is False or bool(data.get("error")),
     )

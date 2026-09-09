@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, Optional
 
+import anyio
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent
@@ -53,6 +54,9 @@ MAX_BUFFER_BYTES = _env_int(
 )
 MAX_FINISHED_JOBS = _env_int("SHELL_MCP_MAX_FINISHED", 20, 1, 1000)
 MAX_RUNNING_JOBS = _env_int("SHELL_MCP_MAX_RUNNING", 8, 1, 128)
+MAX_SPILL_BYTES = _env_int(
+    "SHELL_MCP_MAX_SPILL_BYTES", 16 * 1024 * 1024, 1024, 1024 * 1024 * 1024
+)
 MIN_TIMEOUT = 0.1
 MAX_TIMEOUT = 86_400.0
 IS_WINDOWS = sys.platform.startswith("win")
@@ -355,7 +359,7 @@ class RingBuffer:
     chunks are held in `_pending` so the head can still be flushed to the file
     retroactively — a job that stays under the cap never touches the disk."""
 
-    def __init__(self, cap: int = MAX_BUFFER_BYTES, spill_target: str | None = None, codec: str = "utf-8") -> None:
+    def __init__(self, cap: int = MAX_BUFFER_BYTES, spill_target: str | None = None, codec: str = "utf-8", spill_cap: int = MAX_SPILL_BYTES) -> None:
         self.cap = cap
         self.codec = codec
         self.decode_errors = False
@@ -366,8 +370,43 @@ class RingBuffer:
         self.spill_target = spill_target   # path to use IF we overflow; None = never
         self.spill_path: str | None = None  # set once the file actually exists
         self._spill_file = None
+        self.spill_cap = spill_cap
+        self.spill_bytes = 0
+        self.spill_error: str | None = None
         self._pending: list[bytes] = []      # raw chunks not yet on disk
         self._closed = False
+
+    def _disable_spill(self, reason: str) -> None:
+        """Abandon an unhealthy/incomplete sink without interrupting pipe draining."""
+        self.spill_error = reason
+        self.spill_target = None
+        self._pending.clear()
+        sink, self._spill_file = self._spill_file, None
+        if sink is not None:
+            try:
+                sink.close()
+            except OSError:
+                pass
+
+    def _spill_write(self, chunk: bytes) -> None:
+        if self._spill_file is None:
+            return
+        remaining = self.spill_cap - self.spill_bytes
+        if remaining <= 0:
+            self._disable_spill(f"spill cap reached ({self.spill_cap} bytes); full output is incomplete")
+            return
+        payload = chunk[:remaining]
+        try:
+            written = self._spill_file.write(payload)
+            if written is None:
+                written = len(payload)
+            self.spill_bytes += written
+            if written != len(payload):
+                self._disable_spill("short write to spill file; full output is incomplete")
+            elif len(chunk) > remaining:
+                self._disable_spill(f"spill cap reached ({self.spill_cap} bytes); full output is incomplete")
+        except OSError as exc:
+            self._disable_spill(f"spill write failed ({exc}); full output is incomplete")
 
     def _open_spill(self) -> None:
         if self._spill_file is not None or not self.spill_target:
@@ -375,20 +414,21 @@ class RingBuffer:
         try:
             os.makedirs(os.path.dirname(self.spill_target), exist_ok=True)
             self._spill_file = open(self.spill_target, "wb")
-        except OSError:
-            self.spill_target = None  # read-only workspace: degrade, don't crash
-            self._pending.clear()
+        except OSError as exc:
+            self._disable_spill(f"spill open failed ({exc}); full output is unavailable")
             return
         self.spill_path = self.spill_target
         for chunk in self._pending:
-            self._spill_file.write(chunk)
+            self._spill_write(chunk)
+            if self._spill_file is None:
+                break
         self._pending.clear()
 
     def write(self, chunk: bytes) -> None:
         self.total += len(chunk)
         if self.spill_target:
             if self._spill_file is not None:
-                self._spill_file.write(chunk)
+                self._spill_write(chunk)
             else:
                 self._pending.append(chunk)
         keep = self.cap // 2
@@ -411,8 +451,15 @@ class RingBuffer:
         the pending chunks are simply discarded and no file is ever created."""
         self._pending.clear()
         if self._spill_file is not None:
-            self._spill_file.close()
-            self._spill_file = None
+            sink, self._spill_file = self._spill_file, None
+            try:
+                sink.flush()
+            except OSError as exc:
+                self.spill_error = f"spill finalize failed ({exc}); full output may be incomplete"
+            try:
+                sink.close()
+            except OSError as exc:
+                self.spill_error = f"spill finalize failed ({exc}); full output may be incomplete"
         self._closed = True
 
     def remove_spill(self) -> None:
@@ -493,6 +540,8 @@ class RingBuffer:
         gap_end = min(end, tail_start)
         if gap_end > gap_start:
             where = f" — full output: {self.spill_path}" if self.spill_path else ""
+            if self.spill_error:
+                where += f" — recovery loss: {self.spill_error}"
             parts.append(f"\n...[{gap_end - gap_start} bytes truncated{where}]...\n")
         if end > tail_start:
             parts.append(
@@ -562,6 +611,7 @@ class Job:
     _readers: list[asyncio.Task] = field(default_factory=list)
     _timeout_task: Optional[asyncio.Task] = None
     _reaper_task: Optional[asyncio.Task] = None
+    stdin_eof: bool = False
 
 
 JOBS: dict[str, Job] = {}
@@ -667,14 +717,29 @@ async def _shutdown_jobs() -> None:
 
 
 # --- rendering: echo the command + output as a terminal-style block --------
-# Returning a ToolResult gives Continue's UI a readable transcript (content)
-# while still handing the model the structured fields (structured_content /
-# res.data). Without this the command and output are buried in escaped JSON.
+# Continue passes only content to the model. Keep lifecycle and recovery fields
+# in the transcript as well as structured_content for other MCP clients.
 def _console_text(cmd: str, snap: dict) -> str:
     def console_newlines(value: str) -> str:
         return value.replace("\r\n", "\n").replace("\r", "\n")
 
     parts = [f"$ {cmd}"]
+    metadata = []
+    if snap.get("job_id"):
+        metadata.append(f"job={snap['job_id']}")
+    if "stdout_cursor" in snap:
+        metadata.extend((f"stdout_cursor={snap['stdout_cursor']}", f"stderr_cursor={snap['stderr_cursor']}"))
+    if snap.get("encoding"):
+        metadata.append(f"encoding={snap['encoding']}")
+    if snap.get("decode_errors"):
+        metadata.append("decode_loss=true")
+    for stream in ("stdout", "stderr"):
+        if snap.get(f"{stream}_full_output"):
+            metadata.append(f"{stream}_spill={snap[f'{stream}_full_output']}")
+        if snap.get(f"{stream}_spill_error"):
+            metadata.append(f"{stream}_spill_loss={snap[f'{stream}_spill_error']}")
+    if metadata:
+        parts.append("[metadata] " + " ".join(metadata))
     out = console_newlines(snap.get("stdout") or "").rstrip("\n")
     err = console_newlines(snap.get("stderr") or "").rstrip("\n")
     if out:
@@ -683,8 +748,6 @@ def _console_text(cmd: str, snap: dict) -> str:
         parts.append("[stderr]\n" + err)
     state, ec = snap.get("state"), snap.get("exit_code")
     tail = f"[{state}]" + (f" exit {ec}" if ec is not None else "")
-    if snap.get("job_id") and ec is None and not out and not err:
-        tail += f" job={snap['job_id']}"
     parts.append(tail)
     return fenced_block("\n".join(parts), "console")
 
@@ -693,6 +756,7 @@ def _shell_result(cmd: str, snap: dict) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=_console_text(cmd, snap))],
         structured_content=snap,
+        is_error=snap.get("ok") is False,
     )
 
 
@@ -707,7 +771,8 @@ def _shell_failure(cmd: str, kind: str, error: str, **extra) -> ToolResult:
     transcript = f"$ {cmd}\n[failed]"
     text = f"❌ {kind}: {error}\n\n{fenced_block(transcript, 'console')}"
     return ToolResult(
-        content=[TextContent(type="text", text=text)], structured_content=data
+        content=[TextContent(type="text", text=text)], structured_content=data,
+        is_error=True,
     )
 
 
@@ -918,6 +983,10 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
         "stderr_full_output": job.stderr.spill_path,
         "stdout_full_output_encoding": job.encoding if job.stdout.spill_path else None,
         "stderr_full_output_encoding": job.encoding if job.stderr.spill_path else None,
+        "stdout_spill_bytes": job.stdout.spill_bytes,
+        "stderr_spill_bytes": job.stderr.spill_bytes,
+        "stdout_spill_error": job.stdout.spill_error,
+        "stderr_spill_error": job.stderr.spill_error,
         "error": "command timed out" if timed_out else None,
         "error_type": "timeout" if timed_out else None,
     }
@@ -965,7 +1034,10 @@ async def poll(job_id: str) -> ToolResult:
     }
     tail = f"[{data['state']}]" + (f" exit {data['exit_code']}" if data['exit_code'] is not None else "")
     text = f"{data['job_id']}: {tail} · {data['runtime_ms']}ms · $ {job.cmd}"
-    return ToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
+    return ToolResult(
+        content=[TextContent(type="text", text=text)], structured_content=data,
+        is_error=not data["ok"],
+    )
 
 
 @mcp.tool(annotations={"destructiveHint": True, "idempotentHint": True})
@@ -977,6 +1049,8 @@ async def kill(job_id: str) -> ToolResult:
     if job.proc.returncode is None:
         job.state = JobState.KILLED
         await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+    if job._reaper_task is not None:
+        await asyncio.shield(job._reaper_task)
     data = {"job_id": job.job_id, "state": job.state}
     text = f"{data['job_id']}: [{data['state']}] · $ {job.cmd}"
     return ToolResult(content=[TextContent(type="text", text=text)], structured_content=data)
@@ -1045,6 +1119,21 @@ async def run(
     try:
         assert job._reaper_task is not None
         await asyncio.wait_for(asyncio.shield(job._reaper_task), timeout + 10.0)
+    except asyncio.CancelledError:
+        # FastMCP executes calls in an AnyIO cancellation scope. Shield the
+        # entire cleanup, not only the asyncio task await: a level-triggered
+        # AnyIO scope can otherwise interrupt the kill itself on every await.
+        with anyio.CancelScope(shield=True):
+            job.state = JobState.KILLED
+            await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
+            # In-process transports can place tasks created by the tool call in
+            # the call's cancellation scope too. Replace a cancelled reaper so
+            # cancellation cannot strand the Process transport or spill sinks.
+            if job._reaper_task is None or job._reaper_task.cancelled():
+                job._reaper_task = asyncio.create_task(_reap(job))
+            if job._reaper_task is not None:
+                await asyncio.shield(job._reaper_task)
+        raise
     except asyncio.TimeoutError:
         pass
     try:
@@ -1068,11 +1157,15 @@ async def send(job_id: str, text: str, eof: bool = False) -> ToolResult:
         data = {"ok": False, "job_id": job_id,
                 "error": "job has no stdin pipe (start it with interactive=true)"}
         return ToolResult(content=[TextContent(type="text", text=f"❌ {data['error']}")],
-                          structured_content=data)
+                          structured_content=data, is_error=True)
+    if job.stdin_eof or stdin.is_closing():
+        data = {"ok": False, "job_id": job_id, "error": "job stdin is closed"}
+        return ToolResult(content=[TextContent(type="text", text=f"❌ {data['error']}")],
+                          structured_content=data, is_error=True)
     if job.proc.returncode is not None:
         data = {"ok": False, "job_id": job_id, "error": "job already exited"}
         return ToolResult(content=[TextContent(type="text", text=f"❌ {data['error']}")],
-                          structured_content=data)
+                          structured_content=data, is_error=True)
     try:
         encoded = text.encode(job.encoding)
     except UnicodeError as exc:
@@ -1082,11 +1175,20 @@ async def send(job_id: str, text: str, eof: bool = False) -> ToolResult:
         return ToolResult(
             content=[TextContent(type="text", text=f"❌ {error}")],
             structured_content=data,
+            is_error=True,
         )
-    stdin.write(encoded)
-    await stdin.drain()
-    if eof:
-        stdin.close()
+    try:
+        stdin.write(encoded)
+        await stdin.drain()
+        if eof:
+            stdin.close()
+            job.stdin_eof = True
+    except (BrokenPipeError, ConnectionResetError, RuntimeError, OSError) as exc:
+        job.stdin_eof = stdin.is_closing() or job.proc.returncode is not None
+        error = f"could not write to job stdin: {exc}"
+        data = {"ok": False, "job_id": job_id, "error": error, "error_type": "stdin"}
+        return ToolResult(content=[TextContent(type="text", text=f"❌ {error}")],
+                          structured_content=data, is_error=True)
     data = {"ok": True, "job_id": job_id, "sent_bytes": len(encoded),
             "eof": eof, "state": job.state}
     return ToolResult(

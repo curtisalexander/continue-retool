@@ -35,7 +35,8 @@ mcp = FastMCP("fs")
 
 DEFAULT_LIMIT = _env_int("FS_MCP_DEFAULT_LIMIT", 2000, 1, 10_000)
 MAX_LINE_CHARS = _env_int("FS_MCP_MAX_LINE_CHARS", 2000, 40, 100_000)
-# Total payload cap. The line and per-line caps MULTIPLY (2000 lines x 2000 chars
+# Numbered-content byte cap (the protocol also carries a summary and a structured
+# copy). The line and per-line caps MULTIPLY (2000 lines x 2000 chars
 # is ~4MB), so on their own they don't bound the result at all — a wide file still
 # floods the context window. This is the cap that actually binds, and it's why
 # read reports truncated_by: whichever limit hits first wins.
@@ -108,32 +109,37 @@ async def read(
     start_line: int = 1,
     limit: Optional[int] = None,
     encoding: Optional[str] = None,
+    start_column: int = 1,
+    content_only: bool = False,
 ) -> ToolResult:
-    """Read a file as numbered lines: "LINENO<TAB>text". start_line is 1-based;
-    limit caps the line count (default 2000). Output is also capped at 50KB total,
-    whichever limit hits first. When the result is truncated it tells you the
-    start_line to pass next; repeat until truncated is false to read the whole file.
-    Pass encoding for bytes with a known external codec, such as the encoding
-    reported next to a shell full-output spill path."""
+    """Read saved disk text as "LINENO<TAB>text", not unsaved editor buffers.
+    start_line and start_column are 1-based; columns count Unicode characters.
+    Content is capped at 50KiB and limit lines (default 2000), plus metadata.
+    Wide lines continue horizontally: pass BOTH returned start_line/start_column
+    values until truncated=false. content_only omits line numbers, not metadata.
+    Line endings are displayed as LF. Pass encoding for a known external codec,
+    such as the encoding reported with a shell spill path."""
     path = _resolve_existing(path)
     if err := jail_error(path):
-        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
+        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err,
+                                         "error_type": "jail"})
     if not os.path.isfile(path):
-        data = {"ok": False, "path": path, "error": f"file not found: {path}"}
+        data = {"ok": False, "path": path, "error": f"file not found: {path}",
+                "error_type": "not_found"}
         return _result(f"❌ {data['error']}", data)
-    if _is_binary(path):
+    if encoding is None and _is_binary(path):
         size = os.path.getsize(path)
         err = (
             f"binary file ({size} bytes) — not decodable as text. Use a shell "
             f"command if you need to inspect it (e.g. `file`, `xxd | head`)."
         )
         return _result(f"❌ {err}", {"ok": False, "path": path, "error": err,
-                                     "binary": True, "size": size})
+                                     "error_type": "binary", "binary": True, "size": size})
     limit = max(1, limit if limit is not None else DEFAULT_LIMIT)
     start = max(1, start_line)
-    stop = start + limit  # exclusive
+    column = max(1, start_column)
 
-    numbered: List[str] = []
+    rows: List[str] = []
     observed_lines = 0
     budget = MAX_BYTES
     truncated_by: Optional[str] = None
@@ -154,33 +160,70 @@ async def read(
         raw.seek(len(decoded.bom))
         errors = "replace" if decoded.had_errors else "strict"
         text = io.TextIOWrapper(raw, encoding=decoded.codec, errors=errors, newline=None)
+        completed = 0
+        last_line = 0
+        next_line = next_column = None
         for observed_lines, ln in enumerate(text, start=1):
-            if observed_lines >= stop:
-                truncated_by = "lines"
+            if observed_lines < start:
+                continue
+            if completed >= limit:
+                truncated_by, next_line, next_column = "lines", observed_lines, 1
                 break
-            if start <= observed_lines and truncated_by is None:
-                ln = ln.rstrip("\n")
-                if len(ln) > MAX_LINE_CHARS:
-                    ln = ln[:MAX_LINE_CHARS] + f"…[+{len(ln) - MAX_LINE_CHARS} chars]"
-                row = f"{observed_lines}\t{ln}"
-                cost = len(row.encode("utf-8")) + 1  # +1 for the joining newline
-                # Stop on whole lines only — never hand back half a line. The
-                # first line alone can exceed the budget; emit it regardless so
-                # a read always makes progress instead of returning nothing.
-                if cost > budget and numbered:
-                    truncated_by = "bytes"
-                    break
-                budget -= cost
-                numbered.append(row)
+            ln = ln.rstrip("\n")
+            offset = column - 1 if observed_lines == start else 0
+            prefix = "" if content_only else f"{observed_lines}\t"
+            separator = 1 if rows else 0
+            room = budget - len(prefix.encode("utf-8")) - separator
+            candidate = ln[offset: offset + MAX_LINE_CHARS]
+            # Preserve whole-line pagination where possible. Only split the
+            # first row of a page, so a following request always has room to
+            # make progress even at a multibyte character boundary.
+            if rows and len(candidate.encode("utf-8")) > room:
+                truncated_by, next_line, next_column = "bytes", observed_lines, offset + 1
+                break
+            byte_limited = False
+            if offset >= len(ln):
+                piece = ""
+                line_done = True
+            else:
+                # Bound both characters and encoded bytes without splitting a
+                # Unicode character. Leave room for an optional line prefix.
+                piece_chars = []
+                used = 0
+                for char in candidate:
+                    size = len(char.encode("utf-8"))
+                    if used + size > room:
+                        byte_limited = True
+                        break
+                    piece_chars.append(char)
+                    used += size
+                piece = "".join(piece_chars)
+                line_done = offset + len(piece) >= len(ln)
+            row = prefix + piece
+            cost = len(row.encode("utf-8")) + separator
+            if cost > budget:
+                truncated_by, next_line, next_column = "bytes", observed_lines, offset + 1
+                break
+            rows.append(row)
+            last_line = observed_lines
+            budget -= cost
+            if not line_done:
+                truncated_by = "bytes" if byte_limited else "characters"
+                next_line, next_column = observed_lines, offset + len(piece) + 1
+                break
+            completed += 1
+            column = 1
         else:
             reached_eof = True
-    end = start - 1 + len(numbered)
+    end = last_line
     total_lines = observed_lines if reached_eof else None
     data = {
         "ok": True,
         "path": path,
-        "content": "\n".join(numbered),
-        "start_line": start if numbered else 0,
+        "content": "\n".join(rows),
+        "content_only": content_only,
+        "start_line": start if rows else 0,
+        "start_column": max(1, start_column),
         "end_line": end,
         "total_lines": total_lines,
         "total_lines_exact": reached_eof,
@@ -188,7 +231,8 @@ async def read(
         "lines_scanned": observed_lines,
         "truncated": not reached_eof,
         "truncated_by": truncated_by if not reached_eof else None,
-        "next_start_line": end + 1 if not reached_eof else None,
+        "next_start_line": next_line if not reached_eof else None,
+        "next_start_column": next_column if not reached_eof else None,
         "encoding": decoded.codec,
         "bom": decoded.bom.hex() if decoded.bom else None,
         "had_errors": decoded.had_errors,
@@ -196,16 +240,23 @@ async def read(
     }
     total_label = str(total_lines) if reached_eof else f"at least {observed_lines}"
     summary = (f"{data['path']} · lines {data['start_line']}–{data['end_line']} "
-               f"of {total_label}")
+               f"of {total_label} · start_column={data['start_column']} · "
+               f"encoding={decoded.codec} bom={data['bom'] or 'none'} "
+               f"decode_loss={str(decoded.loss).lower()} · "
+               f"truncated={str(data['truncated']).lower()}")
     block = data["content"]
     if data["truncated"]:
-        why = f"{MAX_BYTES // 1024}KB limit" if truncated_by == "bytes" else f"{limit}-line limit"
-        summary += f" (truncated: {why} — read on with start_line={data['next_start_line']})"
+        why = {"bytes": f"{MAX_BYTES}-byte content limit",
+               "characters": f"{MAX_LINE_CHARS}-character line segment limit",
+               "lines": f"{limit}-line limit"}[truncated_by]
+        continuation = (f"start_line={data['next_start_line']}, "
+                        f"start_column={data['next_start_column']}")
+        summary += f" (truncated: {why} — read on with {continuation})"
         # The hint goes in the fenced block too, not just the summary: it has to
         # survive in the payload the model reads back, next to where it ran out.
         block += (
             f"\n\n[Showing lines {data['start_line']}-{end} of {total_label} ({why}). "
-            f"Use start_line={data['next_start_line']} to continue.]"
+            f"Use {continuation} to continue.]"
         )
     return _result(summary, data, block)
 
@@ -217,7 +268,8 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
     include_hidden is set (.git is always skipped)."""
     path = _resolve_existing(path)
     if err := jail_error(path):
-        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err})
+        return _result(f"❌ {err}", {"ok": False, "path": path, "error": err,
+                                         "error_type": "jail"})
     if not os.path.isdir(path):
         data = {"ok": False, "path": path, "error": f"not a directory: {path}"}
         return _result(f"❌ {data['error']}", data)
@@ -229,6 +281,7 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
     skipped = 0
     error_count = 0
     scanned = 0
+    scan_capped = False
 
     def record_error(entry_path: str, error: OSError, entry_skipped: bool = True) -> None:
         nonlocal error_count, skipped
@@ -239,7 +292,7 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
             errors.append({"path": os.path.relpath(entry_path, path), "error": str(error)})
 
     def walk(dir_path: str, level: int) -> None:
-        nonlocal scanned, truncated
+        nonlocal scanned, truncated, scan_capped
         if len(entries) >= MAX_ENTRIES:
             truncated = True
             return
@@ -249,8 +302,11 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
                 for child in iterator:
                     if scanned >= MAX_SCANNED_ENTRIES:
                         truncated = True
+                        scan_capped = True
                         break
                     scanned += 1
+                    if child.name in ALWAYS_SKIP or (child.name.startswith(".") and not include_hidden):
+                        continue
                     children.append(child)
         except OSError as e:
             record_error(dir_path, e)
@@ -265,9 +321,6 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
             typed_children.append((not is_dir, child.name.lower(), child, is_dir))
         typed_children.sort(key=lambda item: (item[0], item[1]))
         for _, _, child, is_dir in typed_children:
-            name = child.name
-            if name in ALWAYS_SKIP or (name.startswith(".") and not include_hidden):
-                continue
             if len(entries) >= MAX_ENTRIES:
                 truncated = True
                 return
@@ -290,11 +343,12 @@ async def list(path: str = ".", depth: int = 1, include_hidden: bool = False) ->
             "count": len(entries), "truncated": truncated, "partial": partial,
             "requested_depth": requested_depth, "depth": depth,
             "depth_capped": requested_depth > depth, "skipped": skipped,
-            "scanned": scanned, "errors": errors,
+            "scanned": scanned, "scan_capped": scan_capped, "errors": errors,
             "errors_truncated": error_count > len(errors)}
     summary = (
         f"{data['count']} entr(ies) in {data['path']}"
         + (" (truncated)" if data['truncated'] else "")
+        + (f" (scan limit: examined {scanned} entries, including hidden entries; narrow path)" if scan_capped else "")
         + (f" (partial: {error_count} inaccessible)" if partial else "")
     )
     block = "\n".join(
