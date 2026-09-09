@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 import shutil
@@ -16,6 +17,22 @@ def fresh_admission_gate(monkeypatch):
     # Direct helper tests each represent a new server lifecycle.
     from shell_mcp import server
     monkeypatch.setattr(server, "_shutting_down", False)
+
+
+@pytest.fixture
+def native_command(monkeypatch):
+    """Exercise pipe ownership independently of a shell's pipeline lifetime.
+
+    Keep the real process-group/Windows Job Object spawn and reaper. Only the
+    command builder changes: PowerShell can wait for descendant pipeline EOF,
+    so a native parent's exit does not imply the outer shell has exited.
+    Call with shell='bash' to use the ordinary argv branch, including on Windows.
+    """
+    from shell_mcp import server
+    monkeypatch.setattr(
+        server, "build_argv", lambda cmd, *_args: [sys.executable, *json.loads(cmd)]
+    )
+    return lambda *args: json.dumps([str(arg) for arg in args])
 
 
 @dataclass(frozen=True)

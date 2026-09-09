@@ -94,7 +94,11 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
 - **Bounded pipe completion.** Output continues draining after the parent shell
   exits, with a 0.5-second idle bound and an absolute one-second post-exit bound.
   The command timeout remains active during this window; completion then kills
-  any remaining owned descendants.
+  any remaining owned descendants. If a reader must be cancelled, results report
+  `stdout_capture_error`/`stderr_capture_error` and a text `*_capture_loss` warning:
+  unread output may be missing even when the spill file itself has no error.
+  Such results set `ok=false` and `error_type=output_incomplete` (or `timeout`
+  when the command timed out), while retaining the actual process exit code.
 - **Bounded registry.** Finished jobs beyond `SHELL_MCP_MAX_FINISHED`
   (default 20) are pruned, oldest first — a week-long session can't leak
   buffers or spill logs. Spill logs remain available while their jobs are

@@ -388,6 +388,7 @@ class RingBuffer:
         self.spill_cap = spill_cap
         self.spill_bytes = 0
         self.spill_error: str | None = None
+        self.capture_error: str | None = None
         self._pending: list[bytes] = []      # raw chunks not yet on disk
         self._closed = False
 
@@ -796,6 +797,8 @@ def _console_text(cmd: str, snap: dict) -> str:
             metadata.append(f"{stream}_spill={snap[f'{stream}_full_output']}")
         if snap.get(f"{stream}_spill_error"):
             metadata.append(f"{stream}_spill_loss={snap[f'{stream}_spill_error']}")
+        if snap.get(f"{stream}_capture_error"):
+            metadata.append(f"{stream}_capture_loss={snap[f'{stream}_capture_error']}")
     if metadata:
         parts.append("[metadata] " + " ".join(metadata))
     out = console_newlines(snap.get("stdout") or "").rstrip("\n")
@@ -1045,8 +1048,11 @@ async def _reap(job: Job) -> None:
     # A completed job never leaves owned background descendants behind, even
     # when they closed their copies of stdout/stderr. Daemons need another host.
     await _kill_tree(job, signal.SIGKILL if not IS_WINDOWS else signal.SIGTERM)
-    for reader in pending:
-        reader.cancel()
+    for reader, buffer in zip(job._readers, (job.stdout, job.stderr)):
+        if reader in pending and reader.cancel():
+            # Bytes can still be queued in the pipe or StreamReader. Neither
+            # display cursors nor a healthy spill file prove complete capture.
+            buffer.capture_error = "post-exit drain limit reached; output may be incomplete"
     await asyncio.gather(*pending, return_exceptions=True)
     if job._timeout_task:
         job._timeout_task.cancel()
@@ -1068,9 +1074,10 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
     stdout, stdout_cursor = job.stdout.read_incremental(since_out)
     stderr, stderr_cursor = job.stderr.read_incremental(since_err)
     timed_out = job.state == JobState.TIMEOUT
+    capture_error = job.stdout.capture_error or job.stderr.capture_error
     return {
         "ok": job.state not in (JobState.TIMEOUT, JobState.KILLED)
-        and (job.exit_code is None or job.exit_code == 0),
+        and (job.exit_code is None or job.exit_code == 0) and not capture_error,
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
@@ -1093,8 +1100,10 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
         "stderr_spill_bytes": job.stderr.spill_bytes,
         "stdout_spill_error": job.stdout.spill_error,
         "stderr_spill_error": job.stderr.spill_error,
-        "error": "command timed out" if timed_out else None,
-        "error_type": "timeout" if timed_out else None,
+        "stdout_capture_error": job.stdout.capture_error,
+        "stderr_capture_error": job.stderr.capture_error,
+        "error": "command timed out" if timed_out else capture_error,
+        "error_type": "timeout" if timed_out else "output_incomplete" if capture_error else None,
     }
 
 

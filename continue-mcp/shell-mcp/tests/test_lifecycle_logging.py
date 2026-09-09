@@ -150,6 +150,50 @@ def test_slow_write_does_not_block_loop_and_cancel_joins_writer(tmp_path, monkey
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_post_exit_capture_loss_is_visible(native_command, tmp_path, monkeypatch, stream):
+    monkeypatch.setattr(server, "POST_EXIT_DRAIN_SECONDS", .05)
+    monkeypatch.setenv("MCP_WORKSPACE", str(tmp_path))
+    release = tmp_path / "release"
+    producer = tmp_path / "producer.py"
+    producer.write_text(
+        "import pathlib, sys, time\n"
+        "while not pathlib.Path(sys.argv[1]).exists(): time.sleep(.01)\n"
+        f"sys.{stream}.buffer.write(b'x' * 60000)\n"
+        f"sys.{stream}.flush()\n",
+        encoding="utf-8",
+    )
+
+    async def scenario():
+        started = await server._start(native_command(producer, release), shell="bash", timeout=10)
+        job = server.JOBS[started["job_id"]]
+        buffer = getattr(job, stream)
+        buffer.cap = 1024  # Also prove a healthy spill is not complete capture.
+        write = buffer.awrite
+
+        async def stalled_write(chunk):
+            await write(chunk)
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(buffer, "awrite", stalled_write)
+        release.touch()
+        await asyncio.wait_for(asyncio.shield(job._reaper_task), 5)
+        result = await server.output(job.job_id)
+        data = result.structured_content
+        assert data["state"] == "exited" and data["exit_code"] == 0
+        assert data["ok"] is False and result.is_error
+        assert data["error_type"] == "output_incomplete"
+        assert 0 < data[f"{stream}_cursor"] < 60000
+        assert data[f"{stream}_capture_error"]
+        assert data[f"{stream}_spill_error"] is None
+        assert data[f"{stream}_full_output"]
+        assert f"{stream}_capture_loss=" in result.content[0].text
+        other = "stderr" if stream == "stdout" else "stdout"
+        assert data[f"{other}_capture_error"] is None
+
+    asyncio.run(scenario())
+
+
 def test_short_writes_are_retried_and_failed_sink_keeps_draining():
     class Sink:
         def __init__(self):

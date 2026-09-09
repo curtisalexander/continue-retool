@@ -2,6 +2,7 @@
 if the binary is missing that's a real failure. Run: uv run --extra test pytest -q
 """
 import asyncio
+import sys
 
 import pytest
 
@@ -131,3 +132,101 @@ def test_decode_failure_is_structured(monkeypatch):
         "error": "could not decode sqruff output",
         "error_type": "decode",
     }
+
+
+def test_invalid_input_encoding_never_spawns(monkeypatch):
+    spawned = False
+
+    async def unexpected_spawn(*_args, **_kwargs):
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("invalid input must be rejected before spawning")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_spawn)
+    res = _lint("select '\ud800'")
+    assert res["ok"] is False
+    assert res["error_type"] == "decode"
+    assert "encode SQL input" in res["error"]
+    assert spawned is False
+
+
+def test_cancellation_during_communication_kills_and_reaps(monkeypatch):
+    processes = []
+    communicating = asyncio.Event()
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def recording_spawn(*args, **kwargs):
+        proc = await original_spawn(*args, **kwargs)
+        processes.append(proc)
+        communicate = proc.communicate
+
+        async def recording_communication(*args):
+            communicating.set()
+            return await communicate(*args)
+
+        monkeypatch.setattr(proc, "communicate", recording_communication)
+        return proc
+
+    async def scenario():
+        monkeypatch.setattr(server, "sqruff_bin", lambda: sys.executable)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_spawn)
+        task = asyncio.create_task(
+            server._run_sqruff(["-c", "import time; time.sleep(30)"], "select 1")
+        )
+        await asyncio.wait_for(communicating.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert processes[0].returncode is not None
+
+
+def test_cancellation_after_child_spawn_but_before_spawn_await_returns(monkeypatch):
+    processes = []
+    child_created = asyncio.Event()
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def delayed_spawn(*args, **kwargs):
+        proc = await original_spawn(*args, **kwargs)
+        processes.append(proc)
+        child_created.set()
+        await asyncio.sleep(0.05)
+        return proc
+
+    async def scenario():
+        monkeypatch.setattr(server, "sqruff_bin", lambda: sys.executable)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+        task = asyncio.create_task(
+            server._run_sqruff(["-c", "import time; time.sleep(30)"], "select 1")
+        )
+        await child_created.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert processes[0].returncode is not None
+
+
+def test_timeout_still_kills_and_reaps(monkeypatch):
+    processes = []
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def recording_spawn(*args, **kwargs):
+        proc = await original_spawn(*args, **kwargs)
+        processes.append(proc)
+        return proc
+
+    async def scenario():
+        monkeypatch.setattr(server, "sqruff_bin", lambda: sys.executable)
+        monkeypatch.setattr(server, "DEFAULT_TIMEOUT", 0.05)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_spawn)
+        with pytest.raises(server.SubprocessFailure, match="timed out") as failure:
+            await server._run_sqruff(
+                ["-c", "import time; time.sleep(30)"], "select 1"
+            )
+        assert failure.value.kind == "timeout"
+
+    asyncio.run(scenario())
+    assert processes[0].returncode is not None

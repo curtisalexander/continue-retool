@@ -26,6 +26,7 @@ import sys
 from asyncio.subprocess import PIPE
 from typing import Optional
 
+import anyio
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 
@@ -71,23 +72,62 @@ def config_path() -> str:
 
 
 async def _run_sqruff(subcmd: list[str], sql: str) -> tuple[int, str, str]:
+    # Encode before starting a process so malformed Python strings cannot leave
+    # a child behind when preparing its stdin fails.
+    try:
+        input_bytes = sql.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SubprocessFailure("decode", f"could not encode SQL input: {exc}") from exc
+
     try:
         executable = sqruff_bin()
-        proc = await asyncio.create_subprocess_exec(
-            executable, *subcmd,
-            stdin=PIPE,
-            stdout=PIPE,
-            stderr=PIPE,
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                executable,
+                *subcmd,
+                stdin=PIPE,
+                stdout=PIPE,
+                stderr=PIPE,
+            )
         )
     except (OSError, RuntimeError) as exc:
         raise SubprocessFailure("spawn", str(exc)) from exc
     try:
+        proc = await asyncio.shield(spawn)
+    except asyncio.CancelledError:
+        # create_subprocess_exec may already have created the child when its
+        # awaiter is cancelled. Take ownership of the completed spawn and reap.
+        with anyio.CancelScope(shield=True):
+            try:
+                proc = await asyncio.shield(spawn)
+            except Exception:
+                pass
+            else:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.communicate()
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise SubprocessFailure("spawn", str(exc)) from exc
+
+    communication = asyncio.create_task(proc.communicate(input_bytes))
+    try:
         out, err = await asyncio.wait_for(
-            proc.communicate(sql.encode("utf-8")), DEFAULT_TIMEOUT
+            asyncio.shield(communication), DEFAULT_TIMEOUT
         )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
+    except (asyncio.CancelledError, asyncio.TimeoutError) as exc:
+        # FastMCP uses AnyIO level cancellation, so shield the complete cleanup
+        # scope rather than only the asyncio await.
+        with anyio.CancelScope(shield=True):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await asyncio.shield(communication)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         raise SubprocessFailure(
             "timeout", f"sqruff timed out after {DEFAULT_TIMEOUT}s"
         ) from None

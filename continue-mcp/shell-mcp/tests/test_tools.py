@@ -796,32 +796,41 @@ def _write_exited_parent_fixture(tmp_path, *, chatty):
     )
     parent = tmp_path / "short parent.py"
     parent.write_text(
-        "import subprocess, sys\n"
-        "subprocess.Popen([sys.executable, *sys.argv[1:]])\n",
+        "import pathlib, subprocess, sys, time\n"
+        # Windows close_fds=True with all default streams does not forward
+        # redirected handles. Explicit streams make the child retain the pipes.
+        "child = subprocess.Popen([sys.executable, *sys.argv[1:]],\n"
+        "                         stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)\n"
+        # Child startup cannot consume the reaper's short idle-drain window.
+        "deadline = time.monotonic() + 10\n"
+        "while not pathlib.Path(sys.argv[2]).exists():\n"
+        "    assert child.poll() is None and time.monotonic() < deadline\n"
+        "    time.sleep(.01)\n",
         encoding="utf-8",
     )
     return parent, child, ready, trigger, sentinel, (tmp_path / ("yes" if chatty else "no"))
 
 
 @pytest.mark.parametrize("chatty", [False, True])
-def test_timeout_still_applies_while_draining_exited_parent(shell_case, tmp_path, monkeypatch, chatty):
+def test_timeout_still_applies_while_draining_exited_parent(native_command, tmp_path, monkeypatch, chatty):
     parts = _write_exited_parent_fixture(tmp_path, chatty=chatty)
     parent, child, ready, trigger, sentinel, mode = parts
     monkeypatch.setattr(server, "POST_EXIT_DRAIN_SECONDS", 5)
 
     async def scenario():
         result = await server._start(
-            shell_case.invoke(PY, parent, child, ready, trigger, sentinel, mode),
-            shell=shell_case.name, timeout=20,
+            native_command(parent, child, ready, trigger, sentinel, mode),
+            shell="bash", timeout=20,
         )
         job = server.JOBS[result["job_id"]]
         async with asyncio.timeout(10):
             while not ready.exists() or job.proc.returncode is None:
                 await asyncio.sleep(.01)
         assert job._timeout_task and job._reaper_task
+        assert not job._reaper_task.done()
         job._timeout_task.cancel()
         # Start the short deadline only once we have proved that a descendant
-        # survived its parent; slow PowerShell startup cannot satisfy this test.
+        # survived its parent; slow process startup cannot satisfy this test.
         job._timeout_task = asyncio.create_task(server._watch_timeout(job, .1))
         started = time.monotonic()
         await asyncio.wait_for(asyncio.shield(job._reaper_task), 3)
@@ -835,23 +844,25 @@ def test_timeout_still_applies_while_draining_exited_parent(shell_case, tmp_path
     assert not sentinel.exists()
 
 
-def test_post_exit_drain_hard_bounds_chatty_descendant(shell_case, tmp_path):
+def test_post_exit_drain_hard_bounds_chatty_descendant(native_command, tmp_path):
     parent, child, ready, trigger, sentinel, mode = _write_exited_parent_fixture(tmp_path, chatty=True)
     started = time.monotonic()
     result = asyncio.run(server.run(
-        shell_case.invoke(PY, parent, child, ready, trigger, sentinel, mode),
-        shell=shell_case.name, timeout=10,
+        native_command(parent, child, ready, trigger, sentinel, mode),
+        shell="bash", timeout=10,
     )).structured_content
     elapsed = time.monotonic() - started
     trigger.touch()
     time.sleep(.2)
     assert result["state"] == "exited" and result["exit_code"] == 0
+    assert ready.exists() and "still-writing" in result["stdout"]
+    assert result["ok"] is False and result["error_type"] == "output_incomplete"
     assert server.POST_EXIT_DRAIN_SECONDS <= elapsed < 3
     assert not sentinel.exists()
 
 
 @pytest.mark.parametrize("operation", ["kill", "shutdown"])
-def test_tree_operation_after_parent_exit_kills_child(shell_case, tmp_path, monkeypatch, operation):
+def test_tree_operation_after_parent_exit_kills_child(native_command, tmp_path, monkeypatch, operation):
     parent, child, ready, trigger, sentinel, mode = _write_exited_parent_fixture(tmp_path, chatty=True)
     # Hold the reaper in its drain window long enough to deterministically issue
     # the operation after the shell parent has exited but while its child lives.
@@ -859,13 +870,14 @@ def test_tree_operation_after_parent_exit_kills_child(shell_case, tmp_path, monk
 
     async def scenario():
         started = await server._start(
-            shell_case.invoke(PY, parent, child, ready, trigger, sentinel, mode),
-            shell=shell_case.name, timeout=20,
+            native_command(parent, child, ready, trigger, sentinel, mode),
+            shell="bash", timeout=20,
         )
         job = server.JOBS[started["job_id"]]
         async with asyncio.timeout(5):
             while not ready.exists() or job.proc.returncode is None:
                 await asyncio.sleep(.01)
+        assert job._reaper_task and not job._reaper_task.done()
         if operation == "kill":
             await server.kill(job.job_id)
         else:
@@ -1000,8 +1012,9 @@ def test_job_codec_is_fixed_when_global_override_changes(monkeypatch):
     assert "more" in res["stdout"]
 
 
-def test_kill_terminates_process_tree(tmp_path, shell_case):
-    """Killing the JOB must take down a confirmed-running grandchild."""
+@pytest.mark.parametrize("operation", ["kill", "timeout", "shutdown"])
+def test_termination_kills_process_tree(tmp_path, shell_case, operation):
+    """Each real shell must terminate a confirmed-running grandchild."""
     sh = shell_case.name
 
     sentinel = tmp_path / "grandchild_ran.txt"
@@ -1035,8 +1048,15 @@ def test_kill_terminates_process_tree(tmp_path, shell_case):
         async with asyncio.timeout(5):
             while not ready.exists():
                 await asyncio.sleep(0.01)
-        killed = (await server.kill(jid)).structured_content
         job = server.JOBS[jid]
+        if operation == "kill":
+            await server.kill(jid)
+        elif operation == "shutdown":
+            await server._shutdown_jobs()
+        else:
+            assert job._timeout_task
+            job._timeout_task.cancel()
+            job._timeout_task = asyncio.create_task(server._watch_timeout(job, .1))
         assert job._reaper_task is not None
         await asyncio.wait_for(asyncio.shield(job._reaper_task), timeout=5)
         trigger.touch()
@@ -1048,10 +1068,11 @@ def test_kill_terminates_process_tree(tmp_path, shell_case):
                     await asyncio.sleep(0.01)
         except TimeoutError:
             pass
-        return killed
+        return server._snapshot(job)
 
     killed = asyncio.run(scenario())
-    assert killed["state"] == "killed"
+    assert killed["state"] == ("timeout" if operation == "timeout" else "killed")
+    assert killed["ok"] is False
     assert not sentinel.exists(), (
         "grandchild outlived the kill — process-group/tree kill is broken"
     )
