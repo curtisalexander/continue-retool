@@ -2,7 +2,7 @@
 
 One Python distribution containing five focused stdio MCP servers:
 
-- `shell-mcp`: foreground/background commands (Ask First)
+- `shell-mcp`: foreground/background commands (Ask First by default; Automatic opt-in)
 - `fs-mcp`: bounded reads/listings (may be Automatic)
 - `search-mcp`: ripgrep content/file search (may be Automatic)
 - `edit-mcp`: exactly `edit` and `create_file` (Ask First)
@@ -10,6 +10,13 @@ One Python distribution containing five focused stdio MCP servers:
 
 Filesystem path controls are defense-in-depth workspace path scoping, not a
 sandbox. `MCP_JAIL_EXTRA` adds explicit roots and `MCP_JAIL=0` disables scoping.
+
+For **only a terminal replacement without repeated approval**, see the
+[shell-only setup guide](shell-mcp/README.md#setup). It covers `--only shell`
+for project registration or global/personal registration, plus the one-time
+Continue **Automatic** tool policy and exclusion of the built-in terminal.
+Global registration defaults to home, so run/start calls need an explicit project
+`cwd`. Approval policy is a per-user Continue setting, separate from MCP YAML.
 
 ## Install from source
 

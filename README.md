@@ -7,8 +7,32 @@ as an optional fifth server.
 Path-aware servers use realpath-based **workspace path scoping as defense in
 depth**. This reduces accidental or injected access outside configured roots; it
 is not a sandbox and does not eliminate filesystem races. Keep edit and shell
-tools **Ask First**. Under your threat model, read-only fs/search tools may be
-Automatic.
+tools **Ask First** by default; terminal-only users can explicitly opt into
+**Automatic** execution as described below. Under your threat model, read-only
+fs/search tools may be Automatic.
+
+## Replace Continue's terminal without repeated approval
+
+From this checkout, with Python 3.11+ and `uv` installed, choose one:
+
+```bash
+# Only this project (use an existing absolute project path):
+python continue-mcp/install-workspace.py "/path/to/project" --only shell
+# OR globally, in your personal Continue configuration (Bash / PowerShell):
+python continue-mcp/install-workspace.py "$HOME" --only shell
+```
+
+In Continue **Agent mode → tools icon**, set the seven tools in the `shell` MCP
+group to **Automatic**, and the built-in `run_terminal_command` to **Excluded**.
+Continue saves tool policies locally per user; the installer registers the server
+but does not grant approval. Automatic shell commands run with your account's
+authority, without per-command Continue prompts.
+
+Global registration defaults commands to **your home directory**, not the open
+project; pass the project's absolute path as `cwd` on every run/start call.
+Project registration defaults to the specified project. Neither is a shell sandbox.
+See the [terminal-only setup guide](continue-mcp/shell-mcp/README.md#setup)
+for clone/install instructions, Windows paths, verification, and rollback.
 
 ## Current inventory
 

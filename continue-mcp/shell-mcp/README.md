@@ -121,14 +121,127 @@ use `&` to invoke a quoted executable path.
 
 ## Setup
 
+### Install only the terminal tools
+
+Install Python 3.11+ and [uv](https://docs.astral.sh/uv/getting-started/installation/),
+then clone this repository to a durable location. Run these commands from the
+checkout root (not this `shell-mcp` directory):
+
+```bash
+git clone https://github.com/curtisalexander/continue-retool.git
+cd continue-retool
+```
+
+Choose **one** registration scope:
+
+| Scope | Install command (Bash or PowerShell) | Continue configuration written |
+|---|---|---|
+| Project | `python continue-mcp/install-workspace.py "/absolute/path/to/project" --only shell` | `<project>/.continue/mcpServers/shell.yaml` |
+| Global / personal | `python continue-mcp/install-workspace.py "$HOME" --only shell` | `~/.continue/mcpServers/shell.yaml` |
+
+On Windows, use an existing project path such as `C:\Users\Me\src\my-project`;
+`$HOME` works in PowerShell as well as Bash. The installer runs the locked `uv`
+sync for you. No ripgrep installation is needed for shell-only use. All servers
+share one Python package and dependencies, but `--only shell` registers and
+launches **only the shell server**, exposing its seven terminal/lifecycle tools.
+It does not register filesystem, search, edit, or SQL tools.
+
+Keep the checkout and its environment at that location: generated configuration
+contains absolute launch paths. Rerun the command after moving or updating the
+checkout. The installer does not change your models or approval preferences.
+It also does not remove previously installed servers; review and manually remove
+unwanted registrations if you previously installed the full toolkit. Do not
+register the same shell server both globally and in a project.
+
+**Registration scope is not the command working directory.** Project installs
+default commands to that project. The global command above stamps your home
+directory as `MCP_WORKSPACE`: commands without `cwd` run there, even when another
+project is open. For global use, instruct the agent to pass the active project's
+absolute filesystem path as `cwd` to every `shell_run` or `shell_start` call.
+Relative `cwd` is resolved against home, not the active editor workspace. Prefer
+project registration if you want a deterministic project default without relying
+on the model to supply `cwd`. Global registration does not implement automatic
+workspace switching. Shell commands are not restricted by `MCP_JAIL` and can
+access anything your OS account can access.
+
+### Run without repeated approval
+
+MCP does not bypass Continue's permissions. Configure this once in the **Continue
+IDE extension**, after installation:
+
+1. Reload Continue/the editor and switch to **Agent** mode with a tool-capable
+   model. MCP tools are not available in Chat mode.
+2. Click the **tools icon in the input toolbar**. Locate the `shell` MCP group
+   and click each tool's policy text to set it to **Automatic**:
+   `shell_run`, `shell_start`, `shell_output`, `shell_poll`, `shell_send`,
+   `shell_kill`, and `shell_list_jobs`. Labels may be displayed without the
+   `shell_` prefix inside the group. A group on/off toggle is not the approval
+   policy; check each tool's policy.
+3. Set the built-in **Run terminal command** (`run_terminal_command`) to
+   **Excluded** so the model uses the MCP replacement. Leave unrelated built-in
+   tools and their permissions unchanged.
+4. Verify with the checks below. Subsequent calls to these Automatic tools should
+   execute without Continue's Cancel/Continue approval prompt.
+
+Continue documents these policies as **stored locally per user**. Installing a
+project YAML does not grant automatic approval to everyone using that project.
+Each user must opt in through their extension's tool settings. This setup does
+not write undocumented IDE state, add an approval flag to MCP YAML, or use the
+CLI-only `permissions.yaml` mechanism. Policies may need rechecking after a tool
+rename or an extension update.
+
+**Automatic shell execution grants arbitrary command execution as your user**,
+including deletion, network access, and access to credentials. Use it only for
+work you trust, preferably in an isolated environment. Ask First remains the
+conservative default; Automatic is an explicit opt-in for this workflow. OS
+elevation, application confirmations, and commands waiting for stdin are separate
+from Continue approval and are not bypassed by this setting.
+
+### Verify and roll back
+
+Run the doctor with the same target and selection as the install. From the
+checkout root:
+
+```bash
+# Project registration:
+uv run --project continue-mcp --no-sync python continue-mcp/install-workspace.py "/absolute/path/to/project" --only shell --check
+# OR global registration:
+uv run --project continue-mcp --no-sync python continue-mcp/install-workspace.py "$HOME" --only shell --check
+```
+
+Expect `ok shell-mcp`. This launches the real MCP server and checks an echo
+command; it does **not** verify Continue's GUI or approval policy. In Continue,
+ask: “Use shell_run to print CONTINUE_SHELL_OK and the current directory. Pass
+`/absolute/path/to/project` as cwd.” Verify the actual tool result contains the
+marker and expected directory, and that no approval prompt appeared. Repeat
+after reloading the editor to check policy persistence. For global registration,
+also test a second project with its own absolute `cwd`.
+
+If approval still appears, check which tool was called, confirm its policy is
+Automatic, and check for duplicate shell registrations. If no tools appear,
+check Agent mode, the active configuration, and Continue's MCP connection errors.
+This repository has not certified a live Continue extension version; record your
+extension version when testing. See the [compatibility guide](../CONTINUE_COMPATIBILITY.md)
+for remote and multi-root limitations.
+
+To restore prompts, set the shell tools back to **Ask First**. To stop using the
+replacement, exclude the shell group (or remove only its generated `shell.yaml`
+from the selected scope), restore the built-in terminal's previous policy, and
+reload Continue. Keep your project files and other configuration intact.
+
+Upstream references:
+[MCP setup](https://docs.continue.dev/customize/deep-dives/mcp),
+[global and workspace configuration](https://docs.continue.dev/guides/configuring-models-rules-tools),
+and [IDE tool policies](https://docs.continue.dev/ide-extensions/agent/how-to-customize).
+
+### Server development
+
+From this `shell-mcp` directory:
+
 ```bash
 uv run --extra test pytest -q   # golden suite incl. the tree-kill test
 uv run shell-mcp                # run the server (stdio)
 ```
-
-Register `.continue/mcpServers/shell.yaml` (installer-stamped), set the
-built-in `run_terminal_command` to **Excluded**, and `shell.*` to **Ask First**
-because commands have open-world authority.
 
 Continue versions that do not forward their Stop/cancel action to an in-flight
 MCP call cannot trigger server-side cancellation cleanup. When cancellation

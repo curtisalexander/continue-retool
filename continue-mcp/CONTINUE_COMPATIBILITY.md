@@ -1,8 +1,12 @@
 # Continue compatibility and migration
 
 This toolkit is not claimed to be a drop-in-complete Continue replacement and has
-not been live-tested in VS Code. Its supported automatic installation target is a
-saved, local, single-root workspace. For remote work, install on the same host and
+not been live-tested in VS Code. Its project installation target is a
+saved, local, single-root workspace. For terminal-only project or personal/global
+registration and opt-in no-prompt execution, follow the
+[shell setup guide](shell-mcp/README.md#setup). Global registration uses a fixed
+home-directory default, not automatic active-workspace routing.
+For remote work, install on the same host and
 filesystem as the workspace and explicitly validate with `--check`. Multi-root
 workspaces require manual per-root configuration with distinct server names and
 are not automatically supported. Distinct names change the tool prefixes below.
@@ -33,8 +37,12 @@ Continue's reviewed MCP call path does not pass its cancellation signal at
 [the pinned source baseline](https://github.com/continuedev/continue/blob/5522c6f44ca0ac3528b37244818fbfa39b5af470/core/tools/callTool.ts#L102-L109).
 Do not rely on built-in **Stop**; explicitly call `shell_kill` for a
 running background job. Do not infer permission behavior from MCP annotations:
-annotations are not Continue policy. Configure shell and edit as **Ask First**;
-fs and search may be **Automatic** only if that matches your threat model.
+annotations are not Continue policy. Configure shell and edit as **Ask First**
+by default. For intentionally unattended terminal execution, explicitly set the
+shell tools to **Automatic** in Continue's per-user tool settings using the guide
+above; installing MCP YAML alone does not remove approval prompts. Shell commands
+have your account's full authority. Fs and search may also be **Automatic** if
+that matches your threat model.
 
 The installer intentionally makes no automatic changes to user model configuration
 or built-in permissions. The default changed from shell/fs/search/edit to
