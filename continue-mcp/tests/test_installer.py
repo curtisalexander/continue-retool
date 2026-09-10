@@ -287,7 +287,10 @@ def test_sync_is_one_locked_root_command(monkeypatch):
     calls = []
     monkeypatch.setattr(installer.subprocess, "run", lambda args, **kw: calls.append((args, kw)))
     installer.sync_deps("/tools/uv")
-    assert calls == [(["/tools/uv", "sync", "--locked", "--project", str(installer.KIT_DIR)], {"check": True})]
+    assert calls == [([
+        "/tools/uv", "sync", "--locked", "--no-editable", "--reinstall-package", "continue-mcp",
+        "--project", str(installer.KIT_DIR),
+    ], {"check": True})]
 
 
 def test_shell_detection_override_path_fallback_and_default(tmp_path: Path, monkeypatch):

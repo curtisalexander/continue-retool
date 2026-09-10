@@ -145,7 +145,14 @@ def expected_outputs(project: str | os.PathLike[str], selected: list[str], uv: s
 
 
 def sync_deps(uv: str) -> None:
-    subprocess.run([uv, "sync", "--locked", "--project", str(KIT_DIR)], check=True)
+    # Python 3.11 reads editable .pth paths with the Windows locale codec,
+    # not the UTF-8 encoding used by Hatchling. Install a regular wheel so a
+    # Unicode checkout path cannot silently disappear from sys.path. Rebuild
+    # this package on reruns so source edits do not leave an old wheel active.
+    subprocess.run([
+        uv, "sync", "--locked", "--no-editable", "--reinstall-package", "continue-mcp",
+        "--project", str(KIT_DIR),
+    ], check=True)
 
 
 def _is_owned(data: bytes) -> bool:

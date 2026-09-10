@@ -25,7 +25,7 @@ uv run --project . --no-sync python install-workspace.py /path/to/project --chec
 
 `install-workspace.py` remains the source-checkout wrapper. `--only` conflicts
 with either opt-in flag; the two opt-in flags can be combined. Source installation
-runs one locked root `uv sync`,
+runs one locked root `uv sync --no-editable --reinstall-package continue-mcp`,
 then creates or upgrades installer-owned YAML files; identical files are unchanged
 and differing user-authored files are refused. Unselected existing configurations
 are never silently removed: installer-owned ones produce a warning. Users upgrading
@@ -40,6 +40,13 @@ This catches runtime failures such as missing `rg`. Invoking check through the s
 as shown above ensures its FastMCP import is available; import failures are also
 reported as a clean installer failure. The optional `rules/rule-rule.md` guidance is not
 installed automatically.
+
+The installer uses a normal wheel rather than editable source-path `.pth` files,
+which Python 3.11 can misdecode in Unicode Windows checkout paths. Rerun the
+installer after changing toolkit source; it rebuilds this package while retaining
+locked dependencies. `--no-sync` assumes that installation is already current.
+If a development `uv sync` switches the environment back to editable mode, rerun
+the installer before using Continue from a Unicode Windows checkout.
 
 ## Install from a wheel
 
