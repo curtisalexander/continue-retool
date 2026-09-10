@@ -350,6 +350,27 @@ def test_minimal_doctor_environment_does_not_copy_secret(tmp_path: Path, monkeyp
     assert "UNRELATED_SECRET" not in doctor_env
 
 
+@pytest.mark.parametrize("windows", [False, True])
+def test_doctor_preserves_windows_module_locations_only_on_windows(monkeypatch, windows):
+    monkeypatch.setattr(installer, "_is_windows", lambda: windows)
+    locations = {
+        "ProgramFiles": r"C:\Program Files",
+        "ProgramFiles(x86)": r"C:\Program Files (x86)",
+        "ProgramW6432": r"C:\Program Files",
+        "PSModulePath": r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules;D:\Modules",
+    }
+    for name, value in locations.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("UNRELATED_SECRET", "do-not-copy")
+    env = installer._minimal_base_env()
+    for name, value in locations.items():
+        if windows:
+            assert env[name] == value
+        else:
+            assert name not in env
+    assert "UNRELATED_SECRET" not in env
+
+
 def test_backup_cleanup_failure_never_removes_installed_configs(tmp_path: Path, monkeypatch):
     installer.install(str(tmp_path), ["shell", "fs"], "/tools/uv")
     for path in tmp_path.rglob("*.yaml"):

@@ -319,7 +319,12 @@ def install(project: str, selected: list[str], uv: str) -> None:
 
 def _minimal_base_env() -> dict[str, str]:
     names = (
-        ("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+        # PowerShell 5.1 needs the host's system/module locations too. The MCP
+        # SDK's default Windows environment preserves profile paths but drops
+        # these; rebuilding module discovery in that environment can stall the
+        # first command even when the same interpreter works from a terminal.
+        ("PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+         "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "PSModulePath")
         if _is_windows() else ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
     )
     return {name: os.environ[name] for name in names if name in os.environ}
