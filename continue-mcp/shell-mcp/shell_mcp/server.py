@@ -935,8 +935,13 @@ async def _start_job(
         if IS_WINDOWS:
             owned_job = windows_job.WindowsJob()
             launcher = os.path.join(os.path.dirname(__file__), "windows_job.py")
+            # A Windows venv redirector wraps its interpreter in another
+            # kill-on-close Job Object. Assigning our launcher to its own job
+            # nests that job below the redirector's: launcher exit would then
+            # kill descendants before our bounded pipe drain can finish.
+            # The isolated launcher uses only the standard library.
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-I", os.path.abspath(launcher),
+                getattr(sys, "_base_executable", sys.executable), "-I", os.path.abspath(launcher),
                 owned_job.name, shell_name, *argv, **common,
             )
         else:
