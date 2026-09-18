@@ -134,6 +134,37 @@ def test_failure_sets_mcp_is_error_and_keeps_structured_content():
     assert res.structured_content["error_type"] == "validation"
 
 
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_command_outcome_is_explicit_in_text_and_protocol(shell_case, tmp_path, exit_code):
+    script = tmp_path / "outcome.py"
+    script.write_text(
+        f"import sys\nprint('diagnostic', file=sys.stderr)\nsys.exit({exit_code})\n",
+        encoding="utf-8",
+    )
+
+    async def scenario():
+        async with Client(mcp) as client:
+            result = await client.call_tool("run", {
+                "cmd": shell_case.invoke(PY, script), "shell": shell_case.name,
+            }, raise_on_error=False)
+            jid = result.structured_content["job_id"]
+            polled = await client.call_tool("poll", {"job_id": jid}, raise_on_error=False)
+            output = await client.call_tool("output", {"job_id": jid}, raise_on_error=False)
+            return result, polled, output
+
+    for result in asyncio.run(scenario()):
+        data = result.structured_content
+        assert result.is_error is (exit_code != 0)
+        assert data["ok"] is (exit_code == 0)
+        # PowerShell maps a failed final native command to shell exit 1.
+        expected_code = 1 if exit_code and shell_case.name in ("pwsh", "powershell") else exit_code
+        assert data["exit_code"] == expected_code
+        assert data["error_type"] == ("exit_code" if exit_code else None)
+        text = result.content[0].text
+        assert text.startswith("FAILED:" if exit_code else "SUCCEEDED:")
+        assert f"code {expected_code}" in text
+
+
 def test_content_only_incremental_output_uses_exact_rendered_cursors(tmp_path):
     sh = default_shell()
     if sh is None:
@@ -161,6 +192,7 @@ def test_content_only_incremental_output_uses_exact_rendered_cursors(tmp_path):
             started = await c.call_tool("start", {
                 "cmd": f'"{PY}" "{producer}" "{release}"', "shell": sh, "timeout": 15,
             })
+            assert rendered(started).startswith("RUNNING: not complete;")
             job_match = re.search(r"\bjob=(j\d+)\b", rendered(started))
             assert job_match
             jid = job_match[1]

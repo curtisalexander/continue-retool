@@ -348,6 +348,20 @@ def _child_environment(
     path_key = canonical("PATH")
     interpreter_dir = os.path.dirname(os.path.abspath(interpreter))
     inherited_path = result.get(path_key, "")
+    # uv activates the server's environment, not the workspace's. Do not
+    # advertise that environment (or its Python binaries) to project commands.
+    if sys.prefix != sys.base_prefix:
+        def normalize(path: str) -> str:
+            return os.path.normcase(os.path.abspath(path))
+
+        server_bin = normalize(os.path.join(sys.prefix, "Scripts" if windows else "bin"))
+        inherited_path = os.pathsep.join(
+            part for part in inherited_path.split(os.pathsep)
+            if not part or normalize(part) != server_bin
+        )
+        venv_key = canonical("VIRTUAL_ENV")
+        if result.get(venv_key) and normalize(result[venv_key]) == normalize(sys.prefix):
+            result.pop(venv_key)
     result[path_key] = os.pathsep.join(filter(None, (interpreter_dir, inherited_path)))
     for key, value in (overrides or {}).items():
         actual = canonical(key)
@@ -777,6 +791,14 @@ async def _shutdown_jobs() -> None:
 # --- rendering: echo the command + output as a terminal-style block --------
 # Continue passes only content to the model. Keep lifecycle and recovery fields
 # in the transcript as well as structured_content for other MCP clients.
+def _outcome_text(snap: dict) -> str:
+    if snap.get("ok") is False:
+        return "FAILED: " + (snap.get("error") or f"command ended with state {snap.get('state')}")
+    if snap.get("state") == JobState.RUNNING:
+        return "RUNNING: not complete; use poll/output with the job_id before claiming success."
+    return "SUCCEEDED: command exited with code 0."
+
+
 def _console_text(cmd: str, snap: dict) -> str:
     def console_newlines(value: str) -> str:
         return value.replace("\r\n", "\n").replace("\r", "\n")
@@ -815,7 +837,7 @@ def _console_text(cmd: str, snap: dict) -> str:
 
 def _shell_result(cmd: str, snap: dict) -> ToolResult:
     return ToolResult(
-        content=[TextContent(type="text", text=_console_text(cmd, snap))],
+        content=[TextContent(type="text", text=_outcome_text(snap) + "\n\n" + _console_text(cmd, snap))],
         structured_content=snap,
         is_error=snap.get("ok") is False,
     )
@@ -1073,16 +1095,28 @@ def _last_lines(text: str, n: int) -> str:
     return "\n".join(lines[-n:])
 
 
+def _job_status(job: Job) -> dict:
+    capture_error = job.stdout.capture_error or job.stderr.capture_error
+    if job.state == JobState.TIMEOUT:
+        kind, error = "timeout", "command timed out"
+    elif job.state == JobState.KILLED:
+        kind, error = "killed", "command was killed"
+    elif capture_error:
+        kind, error = "output_incomplete", capture_error
+    elif job.exit_code is not None and job.exit_code != 0:
+        kind, error = "exit_code", f"command exited with code {job.exit_code}"
+    else:
+        kind, error = None, None
+    return {"ok": error is None, "error": error, "error_type": kind}
+
+
 def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
     """Cursors are logical byte offsets into each stream (stable across the
     RingBuffer's truncation), NOT character offsets into the decoded text."""
     stdout, stdout_cursor = job.stdout.read_incremental(since_out)
     stderr, stderr_cursor = job.stderr.read_incremental(since_err)
-    timed_out = job.state == JobState.TIMEOUT
-    capture_error = job.stdout.capture_error or job.stderr.capture_error
     return {
-        "ok": job.state not in (JobState.TIMEOUT, JobState.KILLED)
-        and (job.exit_code is None or job.exit_code == 0) and not capture_error,
+        **_job_status(job),
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
@@ -1107,8 +1141,6 @@ def _snapshot(job: Job, since_out: int = 0, since_err: int = 0) -> dict:
         "stderr_spill_error": job.stderr.spill_error,
         "stdout_capture_error": job.stdout.capture_error,
         "stderr_capture_error": job.stderr.capture_error,
-        "error": "command timed out" if timed_out else capture_error,
-        "error_type": "timeout" if timed_out else "output_incomplete" if capture_error else None,
     }
 
 
@@ -1141,20 +1173,16 @@ async def poll(job_id: str) -> ToolResult:
     job = JOBS.get(job_id)
     if not job:
         raise ValueError(f"no such job: {job_id}")
-    timed_out = job.state == JobState.TIMEOUT
     data = {
-        "ok": job.state not in (JobState.TIMEOUT, JobState.KILLED)
-        and (job.exit_code is None or job.exit_code == 0),
+        **_job_status(job),
         "job_id": job.job_id,
         "state": job.state,
         "exit_code": job.exit_code,
         "runtime_ms": job.runtime_ms,
-        "error": "command timed out" if timed_out else None,
-        "error_type": "timeout" if timed_out else None,
     }
     tail = f"[{data['state']}]" + (f" exit {data['exit_code']}" if data['exit_code'] is not None else "")
     prompt = "PS>" if job.shell in ("pwsh", "powershell") else "$"
-    text = f"{data['job_id']}: {tail} · {data['runtime_ms']}ms · {prompt} {job.cmd}"
+    text = _outcome_text(data) + f"\n{data['job_id']}: {tail} · {data['runtime_ms']}ms · {prompt} {job.cmd}"
     return ToolResult(
         content=[TextContent(type="text", text=text)], structured_content=data,
         is_error=not data["ok"],
@@ -1211,7 +1239,8 @@ async def list_jobs() -> ToolResult:
         "overrides the shell-derived codec for native programs that emit another one. "
         "PowerShell prompts fail noninteractively; use start(interactive=true)/send "
         "for input and start/output/kill for long jobs. Completion terminates "
-        "remaining owned descendants. "
+        "remaining owned descendants. Nonzero exits are tool errors; stderr alone "
+        "is not failure. Exit 0 describes the final shell status, not every command. "
         + ("Use $env:NAME and & 'path' in PowerShell; powershell (5.1) lacks &&/||."
            if IS_WINDOWS else "")
     ),

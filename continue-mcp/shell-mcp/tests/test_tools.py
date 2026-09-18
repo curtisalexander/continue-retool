@@ -586,6 +586,32 @@ def test_redundant_interpreter_is_rejected_before_spawn(command, monkeypatch):
     assert called is False
 
 
+@pytest.mark.parametrize("windows", [False, True])
+def test_child_environment_isolates_server_venv(monkeypatch, tmp_path, windows):
+    import os
+
+    prefix = str(tmp_path / "server-venv")
+    bins = os.path.join(prefix, "Scripts" if windows else "bin")
+    other = str(tmp_path / "project-bin")
+    monkeypatch.setattr(sys, "prefix", prefix)
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+    path_key, venv_key = ("Path", "Virtual_Env") if windows else ("PATH", "VIRTUAL_ENV")
+    base = {path_key: os.pathsep.join((bins, other, bins)), venv_key: prefix}
+    result = server._child_environment(PY, None, windows=windows, base=base)
+    assert venv_key not in result
+    assert bins not in result[path_key].split(os.pathsep)
+    assert other in result[path_key].split(os.pathsep)
+    assert base[venv_key] == prefix
+
+    explicit = server._child_environment(
+        PY, {"VIRTUAL_ENV": prefix, "PATH": bins}, windows=windows, base=base,
+    )
+    assert explicit["VIRTUAL_ENV"] == prefix and explicit[path_key] == bins
+    base[venv_key] = str(tmp_path / "project-venv")
+    preserved = server._child_environment(PY, None, windows=windows, base=base)
+    assert preserved[venv_key] == base[venv_key]
+
+
 def test_windows_environment_overlay_is_case_insensitive_and_can_remove():
     result = server._child_environment(
         r"C:\PowerShell\pwsh.exe",
@@ -857,6 +883,10 @@ def test_post_exit_drain_hard_bounds_chatty_descendant(native_command, tmp_path)
     assert result["state"] == "exited" and result["exit_code"] == 0
     assert ready.exists() and "still-writing" in result["stdout"]
     assert result["ok"] is False and result["error_type"] == "output_incomplete"
+    polled = asyncio.run(server.poll(result["job_id"]))
+    assert polled.is_error is True
+    assert polled.structured_content["error_type"] == "output_incomplete"
+    assert polled.content[0].text.startswith("FAILED:")
     assert server.POST_EXIT_DRAIN_SECONDS <= elapsed < 3
     assert not sentinel.exists()
 

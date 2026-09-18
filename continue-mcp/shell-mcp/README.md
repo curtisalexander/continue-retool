@@ -60,6 +60,13 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
   paths, and spill-loss diagnostics directly in text as well as preserving the
   structured fields. Failed starts, timeouts, kills, non-zero exits, decode and
   stdin errors set MCP `isError`.
+  `run`, `output`, and `poll` lead with `SUCCEEDED`, `FAILED` with a reason, or
+  `RUNNING` with instructions to check completion. A successful `start` only
+  means the job was launched. Nonzero exits include `error_type=exit_code`;
+  `poll` and `output` agree on capture failures even when the process exits 0.
+  Stderr is diagnostic output, not a failure flag: warnings can accompany exit 0.
+  The MCP server stays alive after command failures; its own process status is
+  not the command's exit status.
 - **One encoding per job.** PowerShell starts with UTF-8 console and pipeline
   defaults so PowerShell text and cooperating programs preserve emoji before
   capture. Bash/PowerShell default to UTF-8; `cmd` defaults to the Windows OEM
@@ -91,6 +98,12 @@ synchronous `run` convenience for quick one-liners. Design rationale lives in
   `MCP_WORKSPACE`; relative `cwd` resolves against it. `env` overlays the copied
   server environment per call; a null value removes a variable. Windows names
   are merged case-insensitively, and no per-call value leaks into later jobs.
+  The server's own virtual-environment bin/Scripts directory is removed from
+  inherited PATH, and VIRTUAL_ENV is removed when it points to that environment.
+  This prevents `uv run` in another project from inheriting the MCP environment
+  and warning about a mismatch. Unrelated inherited environments are preserved;
+  explicit per-call `env` overrides are applied after cleanup. Select a project
+  environment with `uv run` in the correct `cwd` or activate it in the command.
 - **Bounded pipe completion.** Output continues draining after the parent shell
   exits, with a 0.5-second idle bound and an absolute one-second post-exit bound.
   The command timeout remains active during this window; completion then kills
@@ -118,6 +131,13 @@ nonzero status or `Write-Error` becomes exit 1, explicit `exit 7` remains 7, and
 a caught error or successful final command may return 0. PowerShell 5.1 lacks
 PowerShell 7's `&&`/`||`; use compatible syntax when selecting `powershell`, and
 use `&` to invoke a quoted executable path.
+
+An exit code describes the shell's final status, not the success of every step.
+For Bash, `false; echo done` exits 0. Use `step1 && step2` for dependent commands
+and `set -o pipefail` when an upstream pipeline failure must fail the command.
+For PowerShell native programs, check `$LASTEXITCODE` immediately and explicitly
+`exit $LASTEXITCODE` to preserve it before another command runs. The server does
+not infer failures from words in stdout/stderr or silently change shell semantics.
 
 ## Setup
 
