@@ -3,7 +3,6 @@
 import asyncio
 import os
 import sys
-import time
 
 import pytest
 
@@ -113,17 +112,18 @@ def test_noninteractive_prompts_fail_promptly(shell_case, tmp_path, command):
     _require_powershell(shell_case)
     target = tmp_path / "confirm target.txt"
     target.write_text("keep", encoding="utf-8")
-    started = time.monotonic()
+    # Include cold PowerShell startup in the usual integration-test budget.
+    # Assert prompt rejection, not runner speed: a watchdog kill must still fail.
     result = asyncio.run(server.run(
         command,
         shell=shell_case.name,
-        timeout=5,
+        timeout=15,
         env={"SHELL_MCP_CONFIRM_TARGET": str(target)},
     )).structured_content
 
-    assert time.monotonic() - started < 4
     assert result["state"] == "exited", result
     assert result["exit_code"] != 0, result
+    assert "noninteractive" in result["stderr"].lower(), result
     if "Remove-Item" in command:
         assert target.exists()
 
