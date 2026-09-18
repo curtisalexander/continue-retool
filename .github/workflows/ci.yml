@@ -1,6 +1,6 @@
 # Deterministic CI: every suite runs the servers directly and over the MCP
 # protocol via fastmcp's in-process Client — no LLM, no Continue install.
-# windows-latest exercises native Job Objects and both PowerShell generations.
+# windows-latest exercises native Job Objects, PowerShell 7+, and cmd.
 name: CI
 
 on:
@@ -74,11 +74,8 @@ jobs:
           Get-Command cmd.exe -CommandType Application -ErrorAction Stop | Out-Null
           cmd.exe /d /c exit 0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Get-Command powershell.exe -CommandType Application -ErrorAction Stop | Out-Null
-          powershell.exe -NoLogo -NoProfile -NonInteractive -Command "exit 0"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Command pwsh.exe -CommandType Application -ErrorAction Stop | Out-Null
-          pwsh.exe -NoLogo -NoProfile -NonInteractive -Command "exit 0"
+          pwsh.exe -NoLogo -NoProfile -NonInteractive -Command 'if ($PSVersionTable.PSVersion.Major -lt 7) { exit 1 }; $PSVersionTable.PSVersion.ToString()'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Sync committed lockfile (Windows)

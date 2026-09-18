@@ -54,7 +54,7 @@ class ShellCase:
 
 def _available_shells() -> list[tuple[str, str]]:
     if sys.platform.startswith("win"):
-        names = ("pwsh", "powershell", "cmd")
+        names = ("pwsh", "cmd")
     else:
         names = ("bash", "pwsh")
     found = []
