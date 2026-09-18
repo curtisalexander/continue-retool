@@ -27,14 +27,14 @@
       }
     },
     "shell": {
-      "estimated_tokens": 1001,
+      "estimated_tokens": 1031,
       "tool_count": 7,
       "tools": {
         "kill": 51,
         "list_jobs": 38,
         "output": 130,
         "poll": 57,
-        "run": 290,
+        "run": 320,
         "send": 92,
         "start": 343
       }
