@@ -184,6 +184,49 @@ on the model to supply `cwd`. Global registration does not implement automatic
 workspace switching. Shell commands are not restricted by `MCP_JAIL` and can
 access anything your OS account can access.
 
+### Troubleshooting: commands run in home instead of the current project
+
+This was reported when running the tool with PowerShell. The implementation
+supports a registration/default-directory explanation, not a confirmed
+PowerShell-specific bug; the reported Windows session has not been reproduced.
+
+The installer writes the registration directory into `MCP_WORKSPACE`, and
+`shell_run` and `shell_start` use the following working-directory rules:
+
+| Tool argument | Working directory |
+|---|---|
+| Absolute `cwd` | The supplied directory |
+| Relative `cwd`, with `MCP_WORKSPACE` set | Resolved against `MCP_WORKSPACE` |
+| Omitted `cwd`, with `MCP_WORKSPACE` set | `MCP_WORKSPACE` |
+| Omitted or relative `cwd`, with `MCP_WORKSPACE` unset | The server's inherited directory, or a path relative to it |
+
+Inspect `MCP_WORKSPACE` in `~/.continue/mcpServers/shell.yaml` (global) or
+`<project>/.continue/mcpServers/shell.yaml` (project). If it points to home,
+commands without `cwd` running there are consistent with this configuration.
+Opening a project or changing an editor terminal's directory does not update
+this setting. Each tool call starts a fresh shell, so `cd` or `Set-Location` in
+one call does not change the working directory of subsequent calls.
+
+For an immediate workaround, pass the intended project's **absolute** path on
+every call. For example, use these `shell_run` arguments with an existing path:
+
+```json
+{
+  "cmd": "Get-Location",
+  "shell": "powershell",
+  "cwd": "C:\\src\\my-project"
+}
+```
+
+Verify that the result reports that directory before running commands that
+modify files. Alternatively, use the project registration command above for a
+deterministic project default, removing the duplicate global registration.
+
+Requiring explicit `cwd` for global installations is a possible future safeguard,
+**not implemented behavior**. Automatic workspace switching would require
+directory context from Continue; the server currently does not implement it.
+This diagnosis documents the existing behavior and workarounds, not a code fix.
+
 ### Run without repeated approval
 
 MCP does not bypass Continue's permissions. Configure this once in the **Continue
