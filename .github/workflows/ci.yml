@@ -46,9 +46,7 @@ jobs:
           # the pinned current stable Python once to avoid tripling CI cost.
           - os: ubuntu-latest
             python: "3.11"
-          # Use the Intel pool: macos-latest (arm64) failed to acquire a
-          # hosted runner during capacity constraints before any steps ran.
-          - os: macos-15-intel
+          - os: macos-latest
             python: "3.11"
           - os: windows-latest
             python: "3.11"
